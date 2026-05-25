@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from .tools.folder_rename import rename_person_folders
+from .tools.personnel_change_merge import merge_personnel_changes
 from .tools.salary_merge import merge_monthly_salary
 from .tools.salary_split import split_salary_by_company
 
@@ -84,6 +86,83 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
     )
+
+    change_merge = subparsers.add_parser(
+        "change-merge",
+        help="需求6：汇总多个项目异动表",
+    )
+    change_merge.add_argument(
+        "-i",
+        "--input-dir",
+        required=True,
+        type=Path,
+        help="输入文件夹，内含多个 .xlsx 项目异动表",
+    )
+    change_merge.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    change_merge.add_argument(
+        "--template",
+        type=Path,
+        help="可选异动表模板；不填时使用输入文件夹中的第一份异动表作为模板",
+    )
+    change_merge.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别异动记录，不生成 Excel 文件",
+    )
+    change_merge.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
+
+    folder_rename = subparsers.add_parser(
+        "folder-rename",
+        help="需求8：人员资料文件夹批量改名",
+    )
+    folder_rename.add_argument(
+        "-r",
+        "--root",
+        required=True,
+        type=Path,
+        help="需要处理的人员文件夹所在目录",
+    )
+    folder_rename.add_argument(
+        "--mode",
+        required=True,
+        choices=["append", "remove", "replace"],
+        help="append=追加文字，remove=删除结尾文字，replace=修改单个文件夹名",
+    )
+    folder_rename.add_argument(
+        "--text",
+        default="",
+        help="追加文字或要删除的结尾文字，例如：劳动合同、-劳动合同、_身份证",
+    )
+    folder_rename.add_argument(
+        "--target",
+        default="",
+        help="指定单个人员/原文件夹名；不填时 append/remove 处理全部子文件夹",
+    )
+    folder_rename.add_argument(
+        "--replacement",
+        default="",
+        help="replace 模式下的新文件夹名",
+    )
+    folder_rename.add_argument(
+        "--apply",
+        action="store_true",
+        help="实际执行改名；不加时只预览",
+    )
+    folder_rename.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
     return parser
 
 
@@ -120,6 +199,36 @@ def main(argv: list[str] | None = None) -> int:
             _print_salary_merge_summary(payload)
         return 0
 
+    if args.command == "change-merge":
+        result = merge_personnel_changes(
+            input_dir=args.input_dir,
+            output_dir=args.output,
+            template_path=args.template,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_change_merge_summary(payload)
+        return 0
+
+    if args.command == "folder-rename":
+        result = rename_person_folders(
+            root_dir=args.root,
+            mode=args.mode,
+            text=args.text,
+            target_name=args.target,
+            replacement_name=args.replacement,
+            dry_run=not args.apply,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_folder_rename_summary(payload)
+        return 0
+
     parser.print_help(sys.stderr)
     return 2
 
@@ -154,6 +263,36 @@ def _print_salary_merge_summary(payload: dict) -> None:
     print(f"已存在未覆盖记录数：{payload['skipped_record_count']}")
     if payload.get("output_file"):
         print(f"输出文件：{payload['output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_change_merge_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"输入文件夹：{payload['input_dir']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别文件数：{payload['source_file_count']}")
+    print(f"异动记录数：{payload['record_count']}")
+    for sheet_name, count in payload["sheet_counts"].items():
+        print(f"- {sheet_name}: {count} 条")
+    if payload.get("output_file"):
+        print(f"输出文件：{payload['output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_folder_rename_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"目录：{payload['root_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '执行'}")
+    print(f"改名数量：{payload['operation_count']}")
+    for operation in payload["operations"]:
+        print(f"- {operation['source_name']} -> {operation['target_name']}")
     if payload["warnings"]:
         print("提醒：")
         for warning in payload["warnings"]:

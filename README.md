@@ -1,6 +1,6 @@
 # HR Toolkit
 
-人事 Excel 自动化工具箱。当前已落地：**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**。
+人事 Excel 自动化工具箱。当前已落地：**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**、**需求6：异动表汇总**、**需求8：人员资料文件夹改名**。
 
 ## 已实现工具
 
@@ -29,6 +29,29 @@
 - 人员在某个月没有工资时自动填 `0`
 - 输出 `个人薪资汇总表.xlsx`
 
+### 需求6-异动表汇总
+
+输入一个包含多个项目异动表的文件夹，将各项目填写的 `增员`、`减员`、`转正`、`调动`、`奖罚扣补` 汇总到一份异动汇总表。
+
+输出内容：
+
+- 自动读取五类异动 sheet
+- 忽略模板中只有预填序号、没有填写内容的空行
+- 汇总后重新编排各 sheet 序号
+- 保留模板工作簿样式
+- 输出 `异动汇总表.xlsx`
+
+### 需求8-人员资料文件夹改名
+
+选择一个人员资料目录，对目录下的人员文件夹做批量改名。执行前会先预览，并二次确认。
+
+支持内容：
+
+- 批量追加后缀，例如 `张三` -> `张三-劳动合同`
+- 批量删除结尾文字，例如 `张三_劳动合同`、`李四劳动合同` -> `张三`、`李四`
+- 指定单个人员处理，例如只处理 `张三`
+- 替换单个文件夹名，例如 `张三` -> `章五`
+
 ## 桌面版使用
 
 无参数启动时会打开图形界面：
@@ -40,9 +63,9 @@ python3 -m hr_toolkit
 界面操作流程：
 
 1. 在左侧选择工具
-2. 选择工资表文件或工资表文件夹
+2. 选择工资表文件、工资表文件夹、异动表文件夹或人员资料目录
 3. 保存位置默认在桌面结果目录下，也可以手动选择
-4. 点击 `开始拆分` 或 `开始合并`
+4. 点击 `开始拆分`、`开始合并` 或 `开始汇总`
 5. 程序会在保存位置下自动创建 `结果_年月日_时分秒` 子文件夹
 6. 点击 `打开所在文件夹` 查看结果
 
@@ -92,12 +115,71 @@ python3 -m hr_toolkit salary-merge \
   --output "outputs/salary_merge_demo"
 ```
 
+异动表汇总：
+
+```bash
+python3 -m hr_toolkit change-merge \
+  --input-dir "各项目异动表文件夹" \
+  --output "outputs/change_merge_demo"
+```
+
+指定异动表模板：
+
+```bash
+python3 -m hr_toolkit change-merge \
+  --input-dir "各项目异动表文件夹" \
+  --template "问题6-2026年4月异动汇总表（模板）.xlsx" \
+  --output "outputs/change_merge_demo"
+```
+
+人员资料文件夹改名预览：
+
+```bash
+python3 -m hr_toolkit folder-rename \
+  --root "人员资料目录" \
+  --mode append \
+  --text "劳动合同"
+```
+
+确认执行改名：
+
+```bash
+python3 -m hr_toolkit folder-rename \
+  --root "人员资料目录" \
+  --mode append \
+  --text "劳动合同" \
+  --apply
+```
+
+删除结尾文字：
+
+```bash
+python3 -m hr_toolkit folder-rename \
+  --root "人员资料目录" \
+  --mode remove \
+  --text=_劳动合同 \
+  --apply
+```
+
+替换单个文件夹名：
+
+```bash
+python3 -m hr_toolkit folder-rename \
+  --root "人员资料目录" \
+  --mode replace \
+  --target "张三" \
+  --replacement "章五" \
+  --apply
+```
+
 ## 后续扩展约定
 
 每个需求独立成一个工具模块：
 
 - `hr_toolkit/tools/salary_split.py`：需求4，工资表拆分
 - `hr_toolkit/tools/salary_merge.py`：需求5，工资表合并
+- `hr_toolkit/tools/personnel_change_merge.py`：需求6，异动表汇总
+- `hr_toolkit/tools/folder_rename.py`：需求8，人员资料文件夹改名
 - `hr_toolkit/tools/archive_import.py`：需求7，档案移交表入库
 - `hr_toolkit/tools/social_security.py`：需求1，社保明细/汇总
 
