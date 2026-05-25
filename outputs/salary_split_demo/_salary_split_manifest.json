@@ -1,0 +1,34 @@
+{
+  "tool_name": "需求4-工资表按入职公司拆分",
+  "input_path": "/Users/wangjingchuan/Downloads/hr-toolkit/附件/问题4-薪资表模板(1).xlsx",
+  "output_dir": "/Users/wangjingchuan/Downloads/hr-toolkit/outputs/salary_split_demo",
+  "dry_run": false,
+  "company_count": 3,
+  "employee_count": 23,
+  "outputs": [
+    {
+      "company": "春苗北京",
+      "employee_count": 18,
+      "projects": [
+        "未填写项目"
+      ],
+      "file_path": "/Users/wangjingchuan/Downloads/hr-toolkit/outputs/salary_split_demo/春苗北京-工资表.xlsx"
+    },
+    {
+      "company": "岩亨",
+      "employee_count": 1,
+      "projects": [
+        "未填写项目"
+      ],
+      "file_path": "/Users/wangjingchuan/Downloads/hr-toolkit/outputs/salary_split_demo/岩亨-工资表.xlsx"
+    },
+    {
+      "company": "唐人",
+      "employee_count": 4,
+      "projects": [
+        "未填写项目"
+      ],
+      "file_path": "/Users/wangjingchuan/Downloads/hr-toolkit/outputs/salary_split_demo/唐人-工资表.xlsx"
+    }
+  ]
+}
