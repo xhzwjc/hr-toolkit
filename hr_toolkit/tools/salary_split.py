@@ -27,6 +27,16 @@ HEADER_PROJECT = "项目"
 HEADER_NAME = "姓名"
 HEADER_ID_CARD = "身份证号码"
 HEADER_SEQ = "序号"
+DETAIL_NON_TOTAL_HEADERS = (
+    "区域",
+    "项目",
+    "岗位",
+    "入职公司",
+    "卡号",
+    "开户行",
+    "手机号",
+    "专项扣款",
+)
 
 
 @dataclass
@@ -104,6 +114,7 @@ class SalarySheetLayout:
     id_card_col: int
     project_col: int
     company_col: int
+    amount_end_col: int
 
 
 def split_salary_by_company(
@@ -111,6 +122,7 @@ def split_salary_by_company(
     output_dir: str | Path,
     *,
     dry_run: bool = False,
+    write_manifest: bool = False,
 ) -> SalarySplitResult:
     """Split one salary workbook into one workbook per hiring company."""
     input_path = Path(input_path).expanduser().resolve()
@@ -147,11 +159,12 @@ def split_salary_by_company(
         _write_company_workbook(input_path, layout, company_output.company, rows, output_path)
         company_output.file_path = str(output_path)
 
-    manifest_path = output_dir / "_salary_split_manifest.json"
-    manifest_path.write_text(
-        json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if write_manifest:
+        manifest_path = output_dir / "_salary_split_manifest.json"
+        manifest_path.write_text(
+            json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return result
 
 
@@ -174,6 +187,7 @@ def _detect_layout(workbook) -> SalarySheetLayout:
             id_card_col=headers[HEADER_ID_CARD],
             project_col=headers[HEADER_PROJECT],
             company_col=headers[HEADER_COMPANY],
+            amount_end_col=_find_amount_end_col(headers, detail_ws.max_column),
         )
     except KeyError as exc:
         raise ValueError(f"明细表缺少必要字段：{exc.args[0]}") from exc
@@ -204,6 +218,17 @@ def _read_headers(ws: Worksheet, header_row: int) -> dict[str, int]:
         if text and text not in headers:
             headers[text] = col_index
     return headers
+
+
+def _find_amount_end_col(headers: dict[str, int], max_column: int) -> int:
+    non_total_cols = [
+        col_index
+        for header, col_index in headers.items()
+        if header in DETAIL_NON_TOTAL_HEADERS
+    ]
+    if not non_total_cols:
+        return max_column
+    return min(non_total_cols) - 1
 
 
 def _find_data_start_row(ws: Worksheet, header_row: int) -> int:
@@ -386,7 +411,7 @@ def _write_detail_section_total_formulas(
         cell = ws.cell(subtotal_row, col_index)
         if col_index == layout.id_card_col:
             cell.value = None
-        elif col_index <= 43:
+        elif col_index <= layout.amount_end_col:
             if last_data_row >= first_data_row:
                 cell.value = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})"
             else:
@@ -406,7 +431,7 @@ def _write_detail_grand_total_formulas(
         cell = ws.cell(total_row, col_index)
         if col_index == layout.id_card_col:
             cell.value = None
-        elif col_index <= 43:
+        elif col_index <= layout.amount_end_col:
             if subtotal_rows:
                 cell.value = "=" + "+".join(f"{col_letter}{row}" for row in subtotal_rows)
             else:

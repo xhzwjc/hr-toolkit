@@ -55,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
             input_path=args.input,
             output_dir=args.output,
             dry_run=args.dry_run,
+            write_manifest=not args.dry_run,
         )
         payload = result.to_dict()
         if args.json:
@@ -80,4 +81,3 @@ def _print_salary_split_summary(payload: dict) -> None:
             f"- {item['company']}: {item['employee_count']} 人，"
             f"{len(item['projects'])} 个项目{file_part}"
         )
-

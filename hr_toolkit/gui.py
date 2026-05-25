@@ -11,8 +11,8 @@ from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, filedialog, messagebox
 from tkinter import Tk, StringVar, Text
 from tkinter import ttk
 
-from . import __version__
-from .tools.salary_split import split_salary_by_company
+from hr_toolkit import __version__
+from hr_toolkit.tools.salary_split import split_salary_by_company
 
 
 class HRToolkitApp:

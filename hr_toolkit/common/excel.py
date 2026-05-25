@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import copy
 from dataclasses import dataclass
 from typing import Any
@@ -93,5 +94,12 @@ def unmerge_ranges_from_row(ws: Worksheet, min_row: int) -> None:
 
 
 def _translate_same_row_formula(formula: str, source_row: int, target_row: int) -> str:
-    return formula.replace(str(source_row), str(target_row))
+    cell_ref_pattern = re.compile(r"(?<![A-Za-z0-9_])(\$?[A-Z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_])")
 
+    def replace_row(match: re.Match[str]) -> str:
+        column_ref, row_anchor, row_number = match.groups()
+        if row_anchor or int(row_number) != source_row:
+            return match.group(0)
+        return f"{column_ref}{target_row}"
+
+    return cell_ref_pattern.sub(replace_row, formula)

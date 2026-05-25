@@ -23,15 +23,12 @@ class SalarySplitTest(unittest.TestCase):
 
             self.assertEqual(payload["company_count"], 3)
             self.assertEqual(payload["employee_count"], 23)
-            self.assertTrue((out_dir / "_salary_split_manifest.json").exists())
+            self.assertFalse((out_dir / "_salary_split_manifest.json").exists())
 
             companies = {item["company"]: item for item in payload["outputs"]}
             self.assertEqual(companies["春苗北京"]["employee_count"], 18)
             self.assertEqual(companies["唐人"]["employee_count"], 4)
             self.assertEqual(companies["岩亨"]["employee_count"], 1)
-
-            manifest = json.loads((out_dir / "_salary_split_manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["tool_name"], "需求4-工资表按入职公司拆分")
 
             wb = load_workbook(companies["春苗北京"]["file_path"], data_only=False)
             detail = wb["明细表"]
@@ -50,6 +47,16 @@ class SalarySplitTest(unittest.TestCase):
             self.assertEqual(summary["A7"].value, "广东河源市2026年4月移动线路代维项目")
             self.assertEqual(summary["C6"].value, "='明细表'!P18")
             self.assertEqual(summary["C7"].value, "='明细表'!P25")
+
+    def test_manifest_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            split_salary_by_company(SAMPLE, out_dir, write_manifest=True)
+            manifest_path = out_dir / "_salary_split_manifest.json"
+            self.assertTrue(manifest_path.exists())
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["tool_name"], "需求4-工资表按入职公司拆分")
 
 
 if __name__ == "__main__":
