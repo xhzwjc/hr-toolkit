@@ -23,7 +23,7 @@ class HRToolkitApp:
         self.root.minsize(720, 460)
 
         self.input_path = StringVar()
-        self.output_dir = StringVar(value=str(default_output_dir()))
+        self.output_dir = StringVar(value=str(default_output_parent_dir()))
         self.output_dir_user_selected = False
         self.status_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.last_output_dir: Path | None = None
@@ -67,7 +67,7 @@ class HRToolkitApp:
         ttk.Entry(form, textvariable=self.input_path).grid(row=0, column=1, sticky="ew", padx=8)
         ttk.Button(form, text="选择文件", command=self._choose_input).grid(row=0, column=2, sticky="e")
 
-        ttk.Label(form, text="输出目录").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(form, text="保存位置").grid(row=1, column=0, sticky="w", pady=4)
         ttk.Entry(form, textvariable=self.output_dir).grid(row=1, column=1, sticky="ew", padx=8)
         ttk.Button(form, text="选择目录", command=self._choose_output).grid(row=1, column=2, sticky="e")
         form.columnconfigure(1, weight=1)
@@ -76,7 +76,7 @@ class HRToolkitApp:
         actions.pack(fill="x", pady=(14, 10))
         self.run_button = ttk.Button(actions, text="开始拆分", command=self._run_salary_split)
         self.run_button.pack(side=LEFT)
-        self.open_button = ttk.Button(actions, text="打开输出目录", command=self._open_output_dir, state="disabled")
+        self.open_button = ttk.Button(actions, text="打开所在文件夹", command=self._open_output_dir)
         self.open_button.pack(side=LEFT, padx=(8, 0))
 
         ttk.Label(right_frame, text="执行结果").pack(anchor="w")
@@ -88,7 +88,7 @@ class HRToolkitApp:
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
 
-        self._write_log("请选择工资表文件和输出目录，然后点击“开始拆分”。")
+        self._write_log("请选择工资表文件和保存位置，然后点击“开始拆分”。")
 
     def _choose_input(self) -> None:
         filename = filedialog.askopenfilename(
@@ -98,17 +98,17 @@ class HRToolkitApp:
         if filename:
             self.input_path.set(filename)
             if not self.output_dir_user_selected:
-                self.output_dir.set(str(default_output_dir()))
+                self.output_dir.set(str(default_output_parent_dir()))
 
     def _choose_output(self) -> None:
-        directory = filedialog.askdirectory(title="选择输出目录")
+        directory = filedialog.askdirectory(title="选择保存位置")
         if directory:
             self.output_dir_user_selected = True
             self.output_dir.set(directory)
 
     def _run_salary_split(self) -> None:
         input_path = Path(self.input_path.get().strip())
-        output_dir = Path(self.output_dir.get().strip())
+        output_parent_dir = Path(self.output_dir.get().strip())
         if not input_path:
             messagebox.showwarning("缺少文件", "请先选择工资表文件。")
             return
@@ -118,12 +118,12 @@ class HRToolkitApp:
         if input_path.suffix.lower() != ".xlsx":
             messagebox.showwarning("格式不支持", "当前工具只支持 .xlsx 工资表。")
             return
-        if not output_dir:
-            messagebox.showwarning("缺少目录", "请选择输出目录。")
+        if not output_parent_dir:
+            messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
 
+        output_dir = make_result_output_dir(output_parent_dir)
         self.run_button.config(state="disabled")
-        self.open_button.config(state="disabled")
         self._clear_log()
         self._write_log("开始拆分，请稍候...")
 
@@ -165,8 +165,7 @@ class HRToolkitApp:
             if item.get("file_path"):
                 self._write_log(f"  输出：{item['file_path']}")
         self.run_button.config(state="normal")
-        self.open_button.config(state="normal")
-        messagebox.showinfo("拆分完成", "工资表已拆分完成，可以打开输出目录查看。")
+        messagebox.showinfo("拆分完成", "工资表已拆分完成，可以打开结果文件夹查看。")
 
     def _handle_error(self, exc: object | None) -> None:
         self._write_log("拆分失败。")
@@ -175,9 +174,17 @@ class HRToolkitApp:
         messagebox.showerror("拆分失败", str(exc))
 
     def _open_output_dir(self) -> None:
-        directory = self.last_output_dir or Path(self.output_dir.get().strip())
-        if not directory.exists():
-            messagebox.showwarning("目录不存在", "输出目录不存在。")
+        directory_text = self.output_dir.get().strip()
+        directory = self.last_output_dir
+        if directory is None and directory_text:
+            directory = make_result_output_dir(Path(directory_text))
+        if directory is None:
+            messagebox.showwarning("缺少目录", "请先选择保存位置。")
+            return
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("无法创建目录", str(exc))
             return
         open_path(directory)
 
@@ -189,12 +196,16 @@ class HRToolkitApp:
         self.log_text.delete("1.0", END)
 
 
-def _default_output_name() -> str:
-    return "salary_split_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+def _default_result_dir_name() -> str:
+    return "结果_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def default_output_dir() -> Path:
-    return desktop_dir() / "HR工具箱输出" / _default_output_name()
+def default_output_parent_dir() -> Path:
+    return desktop_dir() / "工资表拆分结果"
+
+
+def make_result_output_dir(parent_dir: Path) -> Path:
+    return parent_dir / _default_result_dir_name()
 
 
 def desktop_dir() -> Path:
