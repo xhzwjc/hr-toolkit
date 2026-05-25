@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from .tools.salary_merge import merge_monthly_salary
 from .tools.salary_split import split_salary_by_company
 
 
@@ -43,6 +44,46 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
     )
+
+    salary_merge = subparsers.add_parser(
+        "salary-merge",
+        help="需求5：合并多个月工资表，生成个人应发工资汇总",
+    )
+    salary_merge.add_argument(
+        "-i",
+        "--input-dir",
+        required=True,
+        type=Path,
+        help="输入文件夹，内含多个 .xlsx 月度工资表",
+    )
+    salary_merge.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    salary_merge.add_argument(
+        "-s",
+        "--summary",
+        type=Path,
+        help="已有个人薪资汇总表；传入后只追加缺失月份，不覆盖已有金额",
+    )
+    salary_merge.add_argument(
+        "--year",
+        type=int,
+        help="汇总年份，例如 2026；不填时自动根据工资表月份推断",
+    )
+    salary_merge.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别文件、月份和人数，不生成 Excel 文件",
+    )
+    salary_merge.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
     return parser
 
 
@@ -64,6 +105,21 @@ def main(argv: list[str] | None = None) -> int:
             _print_salary_split_summary(payload)
         return 0
 
+    if args.command == "salary-merge":
+        result = merge_monthly_salary(
+            input_dir=args.input_dir,
+            output_dir=args.output,
+            existing_summary_path=args.summary,
+            year=args.year,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_salary_merge_summary(payload)
+        return 0
+
     parser.print_help(sys.stderr)
     return 2
 
@@ -81,3 +137,24 @@ def _print_salary_split_summary(payload: dict) -> None:
             f"- {item['company']}: {item['employee_count']} 人，"
             f"{len(item['projects'])} 个项目{file_part}"
         )
+
+
+def _print_salary_merge_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"输入文件夹：{payload['input_dir']}")
+    if payload.get("existing_summary_path"):
+        print(f"已有汇总表：{payload['existing_summary_path']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别文件数：{payload['source_file_count']}")
+    print(f"识别月份：{', '.join(payload['months'])}")
+    print(f"识别人员数：{payload['employee_count']}")
+    print(f"工资记录数：{payload['record_count']}")
+    print(f"本次写入记录数：{payload['applied_record_count']}")
+    print(f"已存在未覆盖记录数：{payload['skipped_record_count']}")
+    if payload.get("output_file"):
+        print(f"输出文件：{payload['output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
