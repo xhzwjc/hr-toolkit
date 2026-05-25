@@ -23,7 +23,8 @@ class HRToolkitApp:
         self.root.minsize(720, 460)
 
         self.input_path = StringVar()
-        self.output_dir = StringVar(value=str(Path.cwd() / "outputs" / _default_output_name()))
+        self.output_dir = StringVar(value=str(default_output_dir()))
+        self.output_dir_user_selected = False
         self.status_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.last_output_dir: Path | None = None
 
@@ -96,13 +97,13 @@ class HRToolkitApp:
         )
         if filename:
             self.input_path.set(filename)
-            current_output = self.output_dir.get().strip()
-            if not current_output or current_output.endswith(_default_output_name()):
-                self.output_dir.set(str(Path(filename).parent / "拆分结果" / _default_output_name()))
+            if not self.output_dir_user_selected:
+                self.output_dir.set(str(default_output_dir()))
 
     def _choose_output(self) -> None:
         directory = filedialog.askdirectory(title="选择输出目录")
         if directory:
+            self.output_dir_user_selected = True
             self.output_dir.set(directory)
 
     def _run_salary_split(self) -> None:
@@ -190,6 +191,18 @@ class HRToolkitApp:
 
 def _default_output_name() -> str:
     return "salary_split_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def default_output_dir() -> Path:
+    return desktop_dir() / "HR工具箱输出" / _default_output_name()
+
+
+def desktop_dir() -> Path:
+    home = Path.home()
+    desktop = home / "Desktop"
+    if desktop.exists():
+        return desktop
+    return home / "桌面"
 
 
 def open_path(path: Path) -> None:
