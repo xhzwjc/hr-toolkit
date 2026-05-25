@@ -13,7 +13,6 @@ from openpyxl.worksheet.worksheet import Worksheet
 from ..common.excel import (
     RowSnapshot,
     apply_row_snapshot,
-    clone_style,
     snapshot_row,
     unmerge_ranges_from_row,
 )
@@ -34,22 +33,42 @@ HEADER_SEQ = "序号"
 class EmployeeRow:
     source_row: int
     company: str
-    project: str
+    section: str
     snapshot: RowSnapshot
+
+
+@dataclass(frozen=True)
+class DetailSection:
+    label: str
+    source_start_row: int
+    source_end_row: int
+    subtotal_row: int
+    subtotal_snapshot: RowSnapshot
+
+
+@dataclass(frozen=True)
+class RenderedSection:
+    label: str
+    summary_name: str
+    employee_count: int
+    data_start_row: int
+    data_end_row: int
+    subtotal_row: int
 
 
 @dataclass
 class CompanyOutput:
     company: str
     employee_count: int
-    projects: list[str]
+    sections: list[str]
     file_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "company": self.company,
             "employee_count": self.employee_count,
-            "projects": self.projects,
+            "sections": self.sections,
+            "projects": self.sections,
             "file_path": self.file_path,
         }
 
@@ -104,7 +123,8 @@ def split_salary_by_company(
     workbook = load_workbook(input_path, data_only=False)
     layout = _detect_layout(workbook)
     detail_ws = workbook[layout.detail_sheet_name]
-    employees = _collect_employees(detail_ws, layout)
+    sections = _detect_detail_sections(detail_ws, layout)
+    employees = _collect_employees(detail_ws, layout, sections)
     groups = _group_by_company(employees)
 
     result = SalarySplitResult(input_path=input_path, output_dir=output_dir, dry_run=dry_run)
@@ -113,7 +133,7 @@ def split_salary_by_company(
             CompanyOutput(
                 company=company,
                 employee_count=len(rows),
-                projects=list(_group_projects(rows).keys()),
+                sections=list(_group_sections(rows).keys()),
             )
         )
 
@@ -194,7 +214,11 @@ def _find_data_start_row(ws: Worksheet, header_row: int) -> int:
     return bottom + 1
 
 
-def _collect_employees(ws: Worksheet, layout: SalarySheetLayout) -> list[EmployeeRow]:
+def _collect_employees(
+    ws: Worksheet,
+    layout: SalarySheetLayout,
+    sections: list[DetailSection],
+) -> list[EmployeeRow]:
     employees: list[EmployeeRow] = []
     for row_index in range(layout.data_start_row, ws.max_row + 1):
         company = _cell_text(ws, row_index, layout.company_col)
@@ -204,12 +228,12 @@ def _collect_employees(ws: Worksheet, layout: SalarySheetLayout) -> list[Employe
             continue
         if not name and not id_card:
             continue
-        project = _cell_text(ws, row_index, layout.project_col) or "未填写项目"
+        section = _find_section_for_row(row_index, sections)
         employees.append(
             EmployeeRow(
                 source_row=row_index,
                 company=company,
-                project=project,
+                section=section.label,
                 snapshot=snapshot_row(ws, row_index, layout.max_column),
             )
         )
@@ -225,11 +249,11 @@ def _group_by_company(employees: list[EmployeeRow]) -> OrderedDict[str, list[Emp
     return groups
 
 
-def _group_projects(rows: list[EmployeeRow]) -> OrderedDict[str, list[EmployeeRow]]:
-    projects: OrderedDict[str, list[EmployeeRow]] = OrderedDict()
+def _group_sections(rows: list[EmployeeRow]) -> OrderedDict[str, list[EmployeeRow]]:
+    sections: OrderedDict[str, list[EmployeeRow]] = OrderedDict()
     for row in rows:
-        projects.setdefault(row.project, []).append(row)
-    return projects
+        sections.setdefault(row.section, []).append(row)
+    return sections
 
 
 def _write_company_workbook(
@@ -245,40 +269,97 @@ def _write_company_workbook(
 
     detail_ws = workbook[layout.detail_sheet_name]
     summary_ws = workbook[layout.summary_sheet_name]
-    _rebuild_detail_sheet(detail_ws, layout, company, rows)
-    _rebuild_summary_sheet(summary_ws, layout, company, rows)
+    rendered_sections = _rebuild_detail_sheet(detail_ws, layout, rows)
+    _rebuild_summary_sheet(summary_ws, layout, rendered_sections)
     workbook.save(output_path)
 
 
 def _rebuild_detail_sheet(
     ws: Worksheet,
     layout: SalarySheetLayout,
-    company: str,
     rows: list[EmployeeRow],
-) -> None:
-    title_cell = ws["A1"]
-    if title_cell.value:
-        title_cell.value = f"{title_cell.value}（{company}）"
-
+) -> list[RenderedSection]:
+    sections = _detect_detail_sections(ws, layout)
     total_template_row = _find_last_summary_row(ws, layout.data_start_row)
     total_snapshot = snapshot_row(ws, total_template_row, layout.max_column)
+    total_label = ws.cell(total_template_row, 1).value
 
     unmerge_ranges_from_row(ws, layout.data_start_row)
     ws.delete_rows(layout.data_start_row, ws.max_row - layout.data_start_row + 1)
 
     current_row = layout.data_start_row
-    for index, employee in enumerate(rows, start=1):
-        apply_row_snapshot(ws, current_row, employee.snapshot, translate_formulas=True)
-        ws.cell(current_row, layout.seq_col).value = index
-        if not _cell_text(ws, current_row, layout.project_col):
-            ws.cell(current_row, layout.project_col).value = employee.project
+    employee_index = 1
+    rendered_sections: list[RenderedSection] = []
+    rows_by_section = _group_sections(rows)
+    for section in sections:
+        section_rows = rows_by_section.get(section.label, [])
+        data_start_row = current_row
+        for employee in section_rows:
+            apply_row_snapshot(ws, current_row, employee.snapshot, translate_formulas=True)
+            ws.cell(current_row, layout.seq_col).value = employee_index
+            current_row += 1
+            employee_index += 1
+
+        data_end_row = current_row - 1
+        subtotal_row = current_row
+        apply_row_snapshot(ws, subtotal_row, section.subtotal_snapshot, translate_formulas=False)
+        ws.merge_cells(start_row=subtotal_row, start_column=1, end_row=subtotal_row, end_column=3)
+        ws.cell(subtotal_row, 1).value = section.label
+        _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row)
+        rendered_sections.append(
+            RenderedSection(
+                label=section.label,
+                summary_name=section.label,
+                employee_count=len(section_rows),
+                data_start_row=data_start_row,
+                data_end_row=data_end_row,
+                subtotal_row=subtotal_row,
+            )
+        )
         current_row += 1
 
     total_row = current_row
     apply_row_snapshot(ws, total_row, total_snapshot, translate_formulas=False)
     ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
-    ws.cell(total_row, 1).value = f"{company}合计"
-    _write_detail_total_formulas(ws, layout, total_row)
+    ws.cell(total_row, 1).value = total_label
+    _write_detail_grand_total_formulas(
+        ws,
+        layout,
+        total_row,
+        [section.subtotal_row for section in rendered_sections],
+    )
+    return rendered_sections
+
+
+def _detect_detail_sections(ws: Worksheet, layout: SalarySheetLayout) -> list[DetailSection]:
+    sections: list[DetailSection] = []
+    section_start = layout.data_start_row
+    for row_index in range(layout.data_start_row, ws.max_row + 1):
+        label = _cell_text(ws, row_index, 1)
+        if not label or "合计" not in label:
+            continue
+        if "总计" in label:
+            break
+        sections.append(
+            DetailSection(
+                label=label,
+                source_start_row=section_start,
+                source_end_row=row_index - 1,
+                subtotal_row=row_index,
+                subtotal_snapshot=snapshot_row(ws, row_index, layout.max_column),
+            )
+        )
+        section_start = row_index + 1
+    if not sections:
+        raise ValueError("未识别到明细表中的分段小计行，例如“河源无线代维合计”")
+    return sections
+
+
+def _find_section_for_row(row_index: int, sections: list[DetailSection]) -> DetailSection:
+    for section in sections:
+        if section.source_start_row <= row_index <= section.source_end_row:
+            return section
+    raise ValueError(f"员工数据行 {row_index} 未落在任何分段小计范围内")
 
 
 def _find_last_summary_row(ws: Worksheet, data_start_row: int) -> int:
@@ -293,12 +374,16 @@ def _find_last_summary_row(ws: Worksheet, data_start_row: int) -> int:
     return data_start_row
 
 
-def _write_detail_total_formulas(ws: Worksheet, layout: SalarySheetLayout, total_row: int) -> None:
-    first_data_row = layout.data_start_row
-    last_data_row = total_row - 1
+def _write_detail_section_total_formulas(
+    ws: Worksheet,
+    layout: SalarySheetLayout,
+    subtotal_row: int,
+    first_data_row: int,
+    last_data_row: int,
+) -> None:
     for col_index in range(4, layout.max_column + 1):
         col_letter = get_column_letter(col_index)
-        cell = ws.cell(total_row, col_index)
+        cell = ws.cell(subtotal_row, col_index)
         if col_index == layout.id_card_col:
             cell.value = None
         elif col_index <= 43:
@@ -310,20 +395,45 @@ def _write_detail_total_formulas(ws: Worksheet, layout: SalarySheetLayout, total
             cell.value = None
 
 
+def _write_detail_grand_total_formulas(
+    ws: Worksheet,
+    layout: SalarySheetLayout,
+    total_row: int,
+    subtotal_rows: list[int],
+) -> None:
+    for col_index in range(4, layout.max_column + 1):
+        col_letter = get_column_letter(col_index)
+        cell = ws.cell(total_row, col_index)
+        if col_index == layout.id_card_col:
+            cell.value = None
+        elif col_index <= 43:
+            if subtotal_rows:
+                cell.value = "=" + "+".join(f"{col_letter}{row}" for row in subtotal_rows)
+            else:
+                cell.value = 0
+        else:
+            cell.value = None
+
+
 def _rebuild_summary_sheet(
     ws: Worksheet,
     layout: SalarySheetLayout,
-    company: str,
-    rows: list[EmployeeRow],
+    rendered_sections: list[RenderedSection],
 ) -> None:
-    title_cell = ws["A1"]
-    if title_cell.value:
-        title_cell.value = f"{title_cell.value}（{company}）"
-
     project_template_row = 6
-    total_template_row = 8
-    sign_template_row = 9
-    project_snapshot = snapshot_row(ws, project_template_row, ws.max_column)
+    total_template_row = _find_summary_total_row(ws, project_template_row)
+    sign_template_row = total_template_row + 1
+    project_snapshots = [
+        snapshot_row(ws, row_index, ws.max_column)
+        for row_index in range(project_template_row, total_template_row)
+    ]
+    project_names = [
+        _cell_text(ws, row_index, 1) or section.label
+        for row_index, section in zip(
+            range(project_template_row, project_template_row + len(rendered_sections)),
+            rendered_sections,
+        )
+    ]
     total_snapshot = snapshot_row(ws, total_template_row, ws.max_column)
     sign_snapshot = snapshot_row(ws, sign_template_row, ws.max_column)
     signature_text = ws.cell(sign_template_row, 1).value
@@ -331,13 +441,22 @@ def _rebuild_summary_sheet(
     unmerge_ranges_from_row(ws, project_template_row)
     ws.delete_rows(project_template_row, ws.max_row - project_template_row + 1)
 
-    projects = _group_projects(rows)
     start_row = project_template_row
     current_row = start_row
-    for project in projects:
-        apply_row_snapshot(ws, current_row, project_snapshot, translate_formulas=False)
-        ws.cell(current_row, 1).value = project
-        _write_summary_project_formulas(ws, current_row, layout.detail_sheet_name)
+    for index, section in enumerate(rendered_sections):
+        snapshot = project_snapshots[index] if index < len(project_snapshots) else project_snapshots[-1]
+        summary_name = project_names[index] if index < len(project_names) else section.label
+        rendered_section = RenderedSection(
+            label=section.label,
+            summary_name=summary_name,
+            employee_count=section.employee_count,
+            data_start_row=section.data_start_row,
+            data_end_row=section.data_end_row,
+            subtotal_row=section.subtotal_row,
+        )
+        apply_row_snapshot(ws, current_row, snapshot, translate_formulas=False)
+        ws.cell(current_row, 1).value = rendered_section.summary_name
+        _write_summary_section_formulas(ws, current_row, layout.detail_sheet_name, rendered_section)
         current_row += 1
 
     total_row = current_row
@@ -351,34 +470,47 @@ def _rebuild_summary_sheet(
     ws.cell(signature_row, 1).value = signature_text
 
 
-def _write_summary_project_formulas(ws: Worksheet, row_index: int, detail_sheet_name: str) -> None:
+def _find_summary_total_row(ws: Worksheet, start_row: int) -> int:
+    for row_index in range(start_row, ws.max_row + 1):
+        if _cell_text(ws, row_index, 1) == "合计":
+            return row_index
+    raise ValueError("汇总表中未找到“合计”行")
+
+
+def _write_summary_section_formulas(
+    ws: Worksheet,
+    row_index: int,
+    detail_sheet_name: str,
+    section: RenderedSection,
+) -> None:
     detail = _formula_sheet_name(detail_sheet_name)
-    project_cell = f"A{row_index}"
+    subtotal_row = section.subtotal_row
+    if section.employee_count and section.data_end_row >= section.data_start_row:
+        count_formula: str | int = (
+            f"=COUNT({detail}!$A${section.data_start_row}:$A${section.data_end_row})"
+        )
+    else:
+        count_formula = 0
     formulas = {
-        2: f'=COUNTIF({detail}!$AS:$AS,{project_cell})',
-        3: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$P:$P)',
-        4: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$U:$U)',
-        5: (
-            f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$M:$M)'
-            f'+SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$N:$N)'
-            f'+SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$O:$O)'
-            f'+SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$S:$S)'
-        ),
-        6: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$R:$R)',
-        7: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$X:$X)',
-        8: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$Y:$Y)',
-        9: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AA:$AA)',
-        10: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AB:$AB)',
-        11: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AD:$AD)',
-        12: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AE:$AE)',
-        13: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AG:$AG)',
-        14: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AH:$AH)',
-        15: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AJ:$AJ)',
-        16: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AM:$AM)',
-        17: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AN:$AN)',
-        18: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AO:$AO)',
-        19: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AK:$AK)',
-        20: f'=SUMIF({detail}!$AS:$AS,{project_cell},{detail}!$AP:$AP)',
+        2: count_formula,
+        3: f"={detail}!P{subtotal_row}",
+        4: f"={detail}!U{subtotal_row}",
+        5: f"={detail}!M{subtotal_row}+{detail}!N{subtotal_row}+{detail}!O{subtotal_row}+{detail}!S{subtotal_row}",
+        6: f"={detail}!R{subtotal_row}",
+        7: f"={detail}!X{subtotal_row}",
+        8: f"={detail}!Y{subtotal_row}",
+        9: f"={detail}!AA{subtotal_row}",
+        10: f"={detail}!AB{subtotal_row}",
+        11: f"={detail}!AD{subtotal_row}",
+        12: f"={detail}!AE{subtotal_row}",
+        13: f"={detail}!AG{subtotal_row}",
+        14: f"={detail}!AH{subtotal_row}",
+        15: f"={detail}!AJ{subtotal_row}",
+        16: f"={detail}!AM{subtotal_row}",
+        17: f"={detail}!AN{subtotal_row}",
+        18: f"={detail}!AO{subtotal_row}",
+        19: f"={detail}!AK{subtotal_row}",
+        20: f"={detail}!AP{subtotal_row}",
         21: f"=SUM(D{row_index}:T{row_index})",
     }
     for col_index, formula in formulas.items():

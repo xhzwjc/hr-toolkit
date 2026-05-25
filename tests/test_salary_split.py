@@ -35,11 +35,21 @@ class SalarySplitTest(unittest.TestCase):
 
             wb = load_workbook(companies["春苗北京"]["file_path"], data_only=False)
             detail = wb["明细表"]
-            self.assertEqual(detail["A24"].value, "春苗北京合计")
+            self.assertEqual(detail["A18"].value, "河源无线代维合计")
+            self.assertEqual(detail["A25"].value, "河源传输代维合计")
+            self.assertEqual(detail["A26"].value, "广东分公司（河源项目部）总计")
             self.assertEqual(detail["B6"].value, "员工1")
-            self.assertEqual(detail["B23"].value, "员工23")
+            self.assertEqual(detail["B24"].value, "员工23")
             self.assertEqual(detail["AU6"].value, "春苗北京")
-            self.assertEqual(detail["AS6"].value, "未填写项目")
+            self.assertEqual(detail["P18"].value, "=SUM(P6:P17)")
+            self.assertEqual(detail["P25"].value, "=SUM(P19:P24)")
+            self.assertEqual(detail["P26"].value, "=P18+P25")
+
+            summary = wb["汇总表"]
+            self.assertEqual(summary["A6"].value, "广东河源市2026年4月移动基站代维项目")
+            self.assertEqual(summary["A7"].value, "广东河源市2026年4月移动线路代维项目")
+            self.assertEqual(summary["C6"].value, "='明细表'!P18")
+            self.assertEqual(summary["C7"].value, "='明细表'!P25")
 
 
 if __name__ == "__main__":
