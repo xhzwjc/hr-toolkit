@@ -13,8 +13,24 @@
 - 每个入职公司一个独立 `.xlsx`
 - 保留原工资表的主要样式、表头、公式结构
 - 明细表只保留对应公司的员工行
-- 汇总表按项目重新生成汇总行
+- 明细表保留原模板分段小计和底部总计文案
+- 汇总表引用拆分后明细表中的分段小计
 - 输出 `_salary_split_manifest.json`，便于系统集成和测试核对
+
+## 桌面版使用
+
+无参数启动时会打开图形界面：
+
+```bash
+python3 -m hr_toolkit
+```
+
+界面操作流程：
+
+1. 选择工资表文件
+2. 选择输出目录
+3. 点击 `开始拆分`
+4. 点击 `打开输出目录` 查看结果
 
 ## Mac 本机验证
 
@@ -56,3 +72,27 @@ python3 -m hr_toolkit salary-split \
 
 CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 
+## Windows 打包
+
+命令行版调试包：
+
+```powershell
+python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." hr_toolkit\__main__.py
+```
+
+给人事双击使用的桌面版：
+
+```powershell
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." hr_toolkit\__main__.py
+```
+
+打包完成后，把整个目录发给使用者：
+
+```text
+dist/
+  HRToolkit/
+    HRToolkit.exe
+    _internal/
+```
+
+不要只发送 `.exe`，`_internal` 目录也是程序运行必需的。
