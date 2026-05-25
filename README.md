@@ -77,13 +77,13 @@ CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 命令行版调试包：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." hr_toolkit\__main__.py
+python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." hr_toolkit_app.py
 ```
 
 给人事双击使用的桌面版：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." hr_toolkit\__main__.py
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." hr_toolkit_app.py
 ```
 
 打包完成后，把整个目录发给使用者：
