@@ -23,6 +23,13 @@ from hr_toolkit.update_runner import main as update_runner_main
 
 
 class AppUpdateTests(unittest.TestCase):
+    def _run_update_runner(self, args: list[str]) -> int:
+        old_cwd = Path.cwd()
+        try:
+            return update_runner_main(args)
+        finally:
+            os.chdir(old_cwd)
+
     def test_version_compare(self) -> None:
         self.assertTrue(is_newer_version("0.2.0", "0.1.9"))
         self.assertTrue(is_newer_version("v1.0.1", "1.0.0"))
@@ -145,6 +152,7 @@ class AppUpdateTests(unittest.TestCase):
             updater_path = Path(args[0])
             self.assertEqual(updater_path.read_text(encoding="utf-8"), "new updater")
             self.assertIn("--log-file", args)
+            self.assertEqual(captured["kwargs"].get("cwd"), str(tmp_dir))
             self.assertTrue((tmp_dir / "HRToolkit_update.log").exists())
 
     def test_update_runner_replaces_app_directory(self) -> None:
@@ -166,18 +174,22 @@ class AppUpdateTests(unittest.TestCase):
                     if file_path.is_file():
                         archive.write(file_path, file_path.relative_to(payload_dir))
 
-            exit_code = update_runner_main([
+            log_file = tmp_dir / "HRToolkit_update.log"
+            exit_code = self._run_update_runner([
                 "--zip",
                 str(package),
                 "--app-dir",
                 str(app_dir),
                 "--launcher",
                 "HRToolkit.exe",
+                "--log-file",
+                str(log_file),
             ])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "new")
             self.assertTrue((app_dir / "_internal" / "data.txt").exists())
+            self.assertIn("工作目录已切换到：", log_file.read_text(encoding="utf-8"))
 
     def test_update_runner_handles_empty_target_reappearing_during_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,17 +211,17 @@ class AppUpdateTests(unittest.TestCase):
                     if file_path.is_file():
                         archive.write(file_path, file_path.relative_to(payload_dir))
 
-            original_move = update_runner.shutil.move
+            original_rename = update_runner.os.rename
 
-            def move_and_recreate_empty_target(source, target):  # type: ignore[no-untyped-def]
-                result = original_move(source, target)
+            def rename_and_recreate_empty_target(source, target):  # type: ignore[no-untyped-def]
+                result = original_rename(source, target)
                 if Path(source) == app_dir and "HRToolkit_backup_" in Path(target).name:
                     app_dir.mkdir()
                 return result
 
             try:
-                update_runner.shutil.move = move_and_recreate_empty_target
-                exit_code = update_runner_main([
+                update_runner.os.rename = rename_and_recreate_empty_target
+                exit_code = self._run_update_runner([
                     "--zip",
                     str(package),
                     "--app-dir",
@@ -220,7 +232,7 @@ class AppUpdateTests(unittest.TestCase):
                     str(tmp_dir / "HRToolkit_update.log"),
                 ])
             finally:
-                update_runner.shutil.move = original_move
+                update_runner.os.rename = original_rename
 
             self.assertEqual(exit_code, 0)
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "new")
@@ -244,7 +256,7 @@ class AppUpdateTests(unittest.TestCase):
             with zipfile.ZipFile(package, "w") as archive:
                 archive.write(payload_dir / "readme.txt", "readme.txt")
 
-            exit_code = update_runner_main([
+            exit_code = self._run_update_runner([
                 "--zip",
                 str(package),
                 "--app-dir",

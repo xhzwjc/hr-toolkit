@@ -203,7 +203,7 @@ def launch_update_replacement(
         "--relaunch",
     ]
     _append_update_log(log_file, "更新程序参数：" + " ".join(args[1:]))
-    subprocess.Popen(args, close_fds=True)
+    subprocess.Popen(args, cwd=str(app_dir.parent), close_fds=True)
 
 
 def find_updater_executable(app_dir: Path) -> Path:

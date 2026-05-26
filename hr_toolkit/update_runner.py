@@ -49,6 +49,7 @@ def _run_update(args: argparse.Namespace, log_file: Path) -> None:
     _append_log(log_file, f"更新包路径：{package_path}")
     _append_log(log_file, f"程序目录：{app_dir}")
     _append_log(log_file, f"主程序文件：{args.launcher}")
+    _switch_working_dir(app_dir.parent, log_file)
     if args.wait_pid:
         _append_log(log_file, f"等待主程序退出，PID：{args.wait_pid}")
         _wait_for_process(args.wait_pid, timeout_seconds=120)
@@ -73,7 +74,7 @@ def _run_update(args: argparse.Namespace, log_file: Path) -> None:
         launcher = app_dir / args.launcher
         if launcher.exists():
             _append_log(log_file, f"重新打开主程序：{launcher}")
-            subprocess.Popen([str(launcher)], close_fds=True)
+            subprocess.Popen([str(launcher)], cwd=str(app_dir.parent), close_fds=True)
         else:
             _append_log(log_file, f"跳过重新打开，未找到主程序：{launcher}")
 
@@ -164,6 +165,15 @@ def _wait_for_process(pid: int, timeout_seconds: int) -> None:
     raise RuntimeError("等待主程序退出超时。")
 
 
+def _switch_working_dir(target_dir: Path, log_file: Path) -> None:
+    try:
+        os.chdir(target_dir)
+    except OSError as exc:
+        _append_log(log_file, f"切换工作目录失败：{target_dir}，原因：{exc}")
+        raise
+    _append_log(log_file, f"工作目录已切换到：{Path.cwd()}")
+
+
 def _wait_for_windows_process(pid: int, timeout_seconds: int) -> None:
     synchronize = 0x00100000
     wait_timeout = 0x00000102
@@ -188,13 +198,13 @@ def _copytree_with_retry(source: Path, target: Path, log_file: Path, attempts: i
     _run_with_retry(copy_action, f"复制目录 {source} -> {target}", log_file, attempts=attempts)
 
 
-def _move_with_retry(source: Path, target: Path, log_file: Path, attempts: int = 10) -> None:
-    _run_with_retry(lambda: shutil.move(str(source), str(target)), f"移动目录 {source} -> {target}", log_file, attempts=attempts)
+def _rename_with_retry(source: Path, target: Path, log_file: Path, attempts: int = 10) -> None:
+    _run_with_retry(lambda: os.rename(source, target), f"重命名目录 {source} -> {target}", log_file, attempts=attempts)
 
 
 def _move_to_exact_path(source: Path, target: Path, log_file: Path) -> None:
     _ensure_target_missing(target, log_file)
-    _move_with_retry(source, target, log_file)
+    _rename_with_retry(source, target, log_file)
 
 
 def _ensure_target_missing(target: Path, log_file: Path) -> None:
