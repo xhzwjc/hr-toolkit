@@ -321,6 +321,7 @@ python scripts\release_windows.py --bump major --notes "正式版发布"
 - 更新 `release/latest.json` 里的 `version`、`file_url`、`sha256`
 - 生成可一次性复制到 ScriptHub 的 `release/scripthub_static/hr-toolkit/`
 - 额外生成一个单独的更新器修复文件，放在 `release/scripthub_static/hr-toolkit/tools/`
+- 自动清理历史发布文件，每个平台只保留最新版本和最近一个旧版本
 
 发布脚本生成后，会得到：
 

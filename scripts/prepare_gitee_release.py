@@ -19,6 +19,7 @@ SCRIPT_HUB_MANIFEST_URL = "http://hr.seedlingintl.com/api/static/hr-toolkit/late
 SCRIPT_HUB_RELEASE_BASE_URL = "http://hr.seedlingintl.com/api/static/hr-toolkit/releases"
 DEFAULT_BUNDLE_DIR = REPO_ROOT / "release" / "scripthub_static" / "hr-toolkit"
 UPDATE_URL = SCRIPT_HUB_MANIFEST_URL
+KEEP_RELEASE_COUNT = 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,9 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         "sha256": digest,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _prune_release_dir(args.output_dir, args.platform)
     bundle_dir = _write_static_bundle(args.bundle_dir, manifest_path, zip_path, updater, args.version, args.platform)
     if args.publish_dir is not None:
         _copy_static_bundle(bundle_dir, args.publish_dir)
+        _prune_static_dir(args.publish_dir, args.platform)
 
     print(f"已生成更新包：{zip_path}")
     print(f"SHA256：{digest}")
@@ -134,6 +137,7 @@ def _write_static_bundle(bundle_dir: Path, manifest_path: Path, zip_path: Path, 
     updater_suffix = "exe" if platform == "windows" else "bin"
     updater_name = f"HRToolkitUpdater-{version}-{_platform_suffix(platform)}.{updater_suffix}"
     shutil.copy2(updater, tools_dir / updater_name)
+    _prune_static_dir(bundle_dir, platform)
     return bundle_dir
 
 
@@ -148,6 +152,39 @@ def _copy_static_bundle(bundle_dir: Path, publish_dir: Path) -> None:
     for file_path in (bundle_dir / "tools").glob("*"):
         if file_path.is_file():
             shutil.copy2(file_path, tools_dir / file_path.name)
+
+
+def _prune_static_dir(static_dir: Path, platform: str) -> None:
+    _prune_release_dir(static_dir / "releases", platform)
+    _prune_tool_dir(static_dir / "tools", platform)
+
+
+def _prune_release_dir(release_dir: Path, platform: str) -> None:
+    suffix = _platform_suffix(platform)
+    _prune_versioned_files(release_dir, f"HRToolkit-*-{suffix}.zip")
+
+
+def _prune_tool_dir(tool_dir: Path, platform: str) -> None:
+    suffix = _platform_suffix(platform)
+    extension = "exe" if platform == "windows" else "bin"
+    _prune_versioned_files(tool_dir, f"HRToolkitUpdater-*-{suffix}.{extension}")
+
+
+def _prune_versioned_files(directory: Path, pattern: str) -> None:
+    if not directory.exists():
+        return
+    files = [file_path for file_path in directory.glob(pattern) if file_path.is_file()]
+    files.sort(key=_version_sort_key, reverse=True)
+    for file_path in files[KEEP_RELEASE_COUNT:]:
+        file_path.unlink(missing_ok=True)
+
+
+def _version_sort_key(file_path: Path) -> tuple[int, int, int]:
+    for part in file_path.name.split("-"):
+        values = part.split(".")
+        if len(values) == 3 and all(value.isdigit() for value in values):
+            return int(values[0]), int(values[1]), int(values[2])
+    return 0, 0, 0
 
 
 if __name__ == "__main__":
