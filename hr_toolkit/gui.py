@@ -241,11 +241,19 @@ class HRToolkitApp:
 
         title_row = ttk.Frame(right_frame, style="Content.TFrame")
         title_row.pack(fill="x")
-        ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").pack(side=LEFT, anchor="w")
-        self.tutorial_toggle_button = ttk.Button(title_row, text="使用教程", style="Secondary.TButton")
-        self.tutorial_toggle_button.pack(side=RIGHT)
-        self.check_update_button = ttk.Button(title_row, text="检查更新", command=self._check_updates_manually, style="Secondary.TButton")
-        self.check_update_button.pack(side=RIGHT, padx=(0, 8))
+        title_row.columnconfigure(0, weight=1)
+        ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        title_actions = ttk.Frame(title_row, style="Content.TFrame")
+        title_actions.grid(row=0, column=1, sticky="e")
+        self.check_update_button = ttk.Button(
+            title_actions,
+            text="检查更新",
+            command=self._check_updates_manually,
+            style="Secondary.TButton",
+        )
+        self.check_update_button.pack(side=LEFT)
+        self.tutorial_toggle_button = ttk.Button(title_actions, text="使用教程", style="Secondary.TButton")
+        self.tutorial_toggle_button.pack(side=LEFT, padx=(8, 0))
         ttk.Label(
             right_frame,
             textvariable=self.tool_description,

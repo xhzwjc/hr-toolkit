@@ -59,10 +59,10 @@ def update_manifest_url() -> str:
 def check_for_update(current_version: str, manifest_url: str | None = None, platform: str | None = None) -> UpdateInfo | None:
     manifest_url = manifest_url or update_manifest_url()
     manifest = fetch_update_manifest(manifest_url)
-    update = parse_update_manifest(manifest, manifest_url=manifest_url, platform=platform or platform_key())
-    if is_newer_version(update.version, current_version):
-        return update
-    return None
+    remote_version = manifest_version(manifest, platform=platform or platform_key())
+    if not is_newer_version(remote_version, current_version):
+        return None
+    return parse_update_manifest(manifest, manifest_url=manifest_url, platform=platform or platform_key())
 
 
 def fetch_update_manifest(manifest_url: str, timeout: int = 10) -> dict[str, Any]:
@@ -83,7 +83,7 @@ def fetch_update_manifest(manifest_url: str, timeout: int = 10) -> dict[str, Any
 
 def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform: str) -> UpdateInfo:
     platform_payload = _platform_payload(manifest, platform)
-    version = str(platform_payload.get("version") or manifest.get("version") or "").strip()
+    version = _manifest_version_from_payload(platform_payload, manifest)
     file_url = str(
         platform_payload.get("file_url")
         or platform_payload.get("url")
@@ -112,6 +112,11 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
         mandatory=mandatory,
         manifest_url=manifest_url,
     )
+
+
+def manifest_version(manifest: dict[str, Any], platform: str) -> str:
+    platform_payload = _platform_payload(manifest, platform)
+    return _manifest_version_from_payload(platform_payload, manifest)
 
 
 def download_update_package(
@@ -282,6 +287,13 @@ def _normalize_notes(value: Any) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return ()
+
+
+def _manifest_version_from_payload(platform_payload: dict[str, Any], manifest: dict[str, Any]) -> str:
+    version = str(platform_payload.get("version") or manifest.get("version") or "").strip()
+    if not version:
+        raise UpdateError("更新配置缺少 version。")
+    return version
 
 
 def _version_parts(value: str) -> tuple[int, ...]:

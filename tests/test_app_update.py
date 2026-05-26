@@ -9,6 +9,7 @@ from pathlib import Path
 
 from hr_toolkit.app_update import (
     UpdateError,
+    check_for_update,
     download_update_package,
     is_newer_version,
     parse_update_manifest,
@@ -53,6 +54,14 @@ class AppUpdateTests(unittest.TestCase):
 
         with self.assertRaises(UpdateError):
             parse_update_manifest(manifest, manifest_url="http://example.test/latest.json", platform="windows")
+
+    def test_check_for_update_allows_current_version_without_package_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "latest.json"
+            manifest.write_text('{"version": "0.1.0"}', encoding="utf-8")
+            manifest_url = "file://" + urllib.request.pathname2url(str(manifest))
+
+            self.assertIsNone(check_for_update("0.1.0", manifest_url=manifest_url, platform="windows"))
 
     def test_download_package_verifies_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
