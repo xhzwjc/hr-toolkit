@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import shutil
 import sys
 import zipfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from versioning import read_project_version
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +21,7 @@ UPDATE_URL = f"{GITEE_RAW_BASE}/release/latest.json"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成 Gitee 自动更新发布文件")
     parser.add_argument("--platform", choices=["windows", "macos"], default=_default_platform())
-    parser.add_argument("--version", default=_read_project_version(), help="发布版本号，默认读取 hr_toolkit.__version__")
+    parser.add_argument("--version", default=read_project_version(), help="发布版本号，默认读取 hr_toolkit.__version__")
     parser.add_argument("--notes", nargs="*", default=["更新 HR工具箱"], help="更新说明，可写多条")
     parser.add_argument("--app-dir", type=Path, default=REPO_ROOT / "dist" / "HRToolkit", help="PyInstaller 输出目录")
     parser.add_argument("--updater", type=Path, help="HRToolkitUpdater 文件路径；默认从 dist 中查找")
@@ -57,14 +60,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"已更新配置：{manifest_path}")
     print("下一步提交并推送 release/latest.json 和 release/downloads/ 下的 zip。")
     return 0
-
-
-def _read_project_version() -> str:
-    init_file = REPO_ROOT / "hr_toolkit" / "__init__.py"
-    match = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
-    if not match:
-        raise SystemExit("未找到 hr_toolkit.__version__。")
-    return match.group(1)
 
 
 def _default_platform() -> str:

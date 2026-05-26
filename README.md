@@ -269,18 +269,49 @@ https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.j
 
 ### 只用 Gitee 发布
 
-可以不用 ScriptHub，直接用 Gitee。推荐用发布脚本，不要手写 `file_url` 和 `sha256`。
+可以不用 ScriptHub，直接用 Gitee。推荐用一键发布脚本，不要手写 `version`、`file_url` 和 `sha256`。
 
-1. 修改 `hr_toolkit/__init__.py` 里的版本号，例如 `0.2.0`。
-2. 打包新的 `dist\HRToolkit` 和 `dist\HRToolkitUpdater.exe`。
-3. 运行发布脚本：
+Windows 版必须在 Windows 上执行。日常发布用补丁版本：
 
 ```powershell
-python scripts\prepare_gitee_release.py --platform windows --notes "修复更新按钮位置" "优化更新检查"
+python scripts\release_windows.py --bump patch --notes "本次更新说明"
 ```
 
-脚本会自动完成这些事：
+版本变化：
 
+```text
+0.1.0 -> 0.1.1 -> 0.1.2
+```
+
+阶段性小版本用：
+
+```powershell
+python scripts\release_windows.py --bump minor --notes "完成一批新需求"
+```
+
+版本变化：
+
+```text
+0.1.9 -> 0.2.0
+```
+
+大版本用：
+
+```powershell
+python scripts\release_windows.py --bump major --notes "正式版发布"
+```
+
+版本变化：
+
+```text
+0.9.9 -> 1.0.0
+```
+
+一键发布脚本会自动完成这些事：
+
+- 先递增 `hr_toolkit/__init__.py` 里的版本号
+- 打包 `HRToolkit.exe`
+- 打包 `HRToolkitUpdater.exe`
 - 把 `HRToolkitUpdater.exe` 复制进 `dist\HRToolkit\`
 - 在 `dist\HRToolkit\` 写入 `update_url.txt`
 - 把 `dist\HRToolkit\*` 压缩到 `release/downloads/HRToolkit-版本号-win.zip`
@@ -296,9 +327,3 @@ git push gitee main
 ```
 
 只推源码不会触发客户端更新。客户端只看 `latest.json` 里的 `version` 是否大于当前程序版本，并按 `file_url` 下载 zip。
-
-版本号目前需要手动增加，建议每次发布前改：
-
-```python
-__version__ = "0.2.0"
-```
