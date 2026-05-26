@@ -7,11 +7,18 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, filedialog, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, DoubleVar, Toplevel, filedialog, messagebox
 from tkinter import Tk, StringVar, Text
 from tkinter import ttk
 
 from hr_toolkit import __version__
+from hr_toolkit.app_update import (
+    UpdateInfo,
+    check_for_update,
+    download_update_package,
+    launch_update_replacement,
+    update_check_enabled,
+)
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
     MODE_REMOVE,
@@ -81,12 +88,21 @@ class HRToolkitApp:
         self.output_dir = StringVar(value=str(default_output_parent_dir(self.current_tool)))
         self.output_dir_user_selected = False
         self.status_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
+        self.update_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.last_output_dir: Path | None = None
+        self.pending_update: UpdateInfo | None = None
+        self.update_window: Toplevel | None = None
+        self.update_progress_var: DoubleVar | None = None
+        self.update_progress_label: ttk.Label | None = None
+        self.update_check_in_progress = False
+        self.manual_update_check_active = False
 
         self._configure_style()
         self._set_tool_texts()
         self._build_layout()
         self._poll_status_queue()
+        self._poll_update_queue()
+        self.root.after(600, self._check_updates_on_startup)
 
     def _configure_style(self) -> None:
         if sys.platform == "darwin":
@@ -228,6 +244,8 @@ class HRToolkitApp:
         ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").pack(side=LEFT, anchor="w")
         self.tutorial_toggle_button = ttk.Button(title_row, text="使用教程", style="Secondary.TButton")
         self.tutorial_toggle_button.pack(side=RIGHT)
+        self.check_update_button = ttk.Button(title_row, text="检查更新", command=self._check_updates_manually, style="Secondary.TButton")
+        self.check_update_button.pack(side=RIGHT, padx=(0, 8))
         ttk.Label(
             right_frame,
             textvariable=self.tool_description,
@@ -370,6 +388,201 @@ class HRToolkitApp:
         scrollbar.pack(side=RIGHT, fill=Y)
 
         self._write_log(self._initial_log_text())
+
+    def _check_updates_on_startup(self) -> None:
+        if not update_check_enabled():
+            return
+        self._start_update_check(manual=False)
+
+    def _check_updates_manually(self) -> None:
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, manual: bool) -> None:
+        if self.update_check_in_progress:
+            if manual:
+                messagebox.showinfo("正在检查更新", "更新检查正在进行，请稍候。", parent=self.root)
+            return
+        self.update_check_in_progress = True
+        self.manual_update_check_active = manual
+        if hasattr(self, "check_update_button"):
+            self.check_update_button.config(state="disabled")
+        self._write_log("正在检查更新...")
+        self._show_update_checking_window()
+        worker = threading.Thread(target=self._update_check_worker, daemon=True)
+        worker.start()
+
+    def _update_check_worker(self) -> None:
+        try:
+            update = check_for_update(__version__)
+        except Exception as exc:
+            self.update_queue.put(("check_error", exc))
+            return
+        if update is None:
+            self.update_queue.put(("no_update", None))
+        else:
+            self.update_queue.put(("available", update))
+
+    def _poll_update_queue(self) -> None:
+        try:
+            while True:
+                status, payload = self.update_queue.get_nowait()
+                if status == "no_update":
+                    manual = self.manual_update_check_active
+                    self._finish_update_check()
+                    self._close_update_window()
+                    self._write_log("已是最新版本。")
+                    if manual:
+                        messagebox.showinfo("检查更新", "当前已经是最新版本。", parent=self.root)
+                elif status == "check_error":
+                    manual = self.manual_update_check_active
+                    self._finish_update_check()
+                    self._close_update_window()
+                    self._write_log(f"更新检查失败，可继续使用：{payload}")
+                    if manual:
+                        messagebox.showerror("检查更新失败", str(payload), parent=self.root)
+                elif status == "available":
+                    self._finish_update_check()
+                    self._close_update_window()
+                    self._show_required_update(payload)
+                elif status == "download_progress":
+                    downloaded, total = payload
+                    self._update_download_progress(downloaded, total)
+                elif status == "download_ready":
+                    self._finish_update_download(payload)
+                elif status == "download_error":
+                    self._handle_update_failure(payload)
+        except queue.Empty:
+            pass
+        self.root.after(150, self._poll_update_queue)
+
+    def _finish_update_check(self) -> None:
+        self.update_check_in_progress = False
+        self.manual_update_check_active = False
+        if hasattr(self, "check_update_button"):
+            self.check_update_button.config(state="normal")
+
+    def _show_update_checking_window(self) -> None:
+        self._close_update_window()
+        self.update_window = Toplevel(self.root)
+        self.update_window.title("检查更新")
+        self.update_window.geometry("360x120")
+        self.update_window.resizable(False, False)
+        self.update_window.configure(bg=COLOR_BG)
+        self.update_window.transient(self.root)
+        self.update_window.grab_set()
+        self.update_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        frame = ttk.Frame(self.update_window, padding=18, style="Content.TFrame")
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="正在检查更新，请稍候...", style="App.TLabel").pack(anchor="w", pady=(2, 10))
+        ttk.Progressbar(frame, orient="horizontal", mode="indeterminate").pack(fill="x")
+        for child in frame.winfo_children():
+            if isinstance(child, ttk.Progressbar):
+                child.start(12)
+
+    def _close_update_window(self) -> None:
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.grab_release()
+            self.update_window.destroy()
+        self.update_window = None
+        self.update_progress_var = None
+        self.update_progress_label = None
+
+    def _show_required_update(self, update: object | None) -> None:
+        if not isinstance(update, UpdateInfo):
+            return
+        self.pending_update = update
+        notes = "\n".join(f"- {line}" for line in update.notes[:6]) or "- 本次发布未填写更新说明"
+        message = (
+            f"发现新版本 v{update.version}，必须更新后才能继续使用。\n\n"
+            f"更新内容：\n{notes}\n\n"
+            "点击“确定”开始更新；点击“取消”将退出程序。"
+        )
+        if not messagebox.askokcancel("发现新版本", message, parent=self.root):
+            self.root.destroy()
+            return
+        self._start_update_download(update)
+
+    def _start_update_download(self, update: UpdateInfo) -> None:
+        self._close_update_window()
+        self._write_log(f"开始下载更新包：v{update.version}")
+        self.update_window = Toplevel(self.root)
+        self.update_window.title("正在更新 HR工具箱")
+        self.update_window.geometry("420x160")
+        self.update_window.resizable(False, False)
+        self.update_window.configure(bg=COLOR_BG)
+        self.update_window.transient(self.root)
+        self.update_window.grab_set()
+        self.update_window.protocol("WM_DELETE_WINDOW", self.root.destroy)
+
+        frame = ttk.Frame(self.update_window, padding=18, style="Content.TFrame")
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text="正在下载更新，请不要关闭程序", style="App.TLabel").pack(anchor="w")
+        self.update_progress_label = ttk.Label(frame, text="准备下载...", style="Section.TLabel")
+        self.update_progress_label.pack(anchor="w", pady=(10, 6))
+        self.update_progress_var = DoubleVar(value=0)
+        ttk.Progressbar(
+            frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100,
+            variable=self.update_progress_var,
+        ).pack(fill="x")
+        ttk.Button(frame, text="取消并退出", command=self.root.destroy, style="Secondary.TButton").pack(anchor="e", pady=(16, 0))
+
+        worker = threading.Thread(target=self._download_update_worker, args=(update,), daemon=True)
+        worker.start()
+
+    def _download_update_worker(self, update: UpdateInfo) -> None:
+        def progress(downloaded: int, total: int) -> None:
+            self.update_queue.put(("download_progress", (downloaded, total)))
+
+        try:
+            package_path = download_update_package(update, progress_callback=progress)
+        except Exception as exc:
+            self.update_queue.put(("download_error", exc))
+            return
+        self.update_queue.put(("download_ready", package_path))
+
+    def _update_download_progress(self, downloaded: int, total: int) -> None:
+        downloaded_mb = downloaded / 1024 / 1024
+        if total > 0:
+            percent = min(downloaded / total * 100, 100)
+            total_mb = total / 1024 / 1024
+            text = f"已下载 {downloaded_mb:.1f} MB / {total_mb:.1f} MB"
+        else:
+            percent = 0
+            text = f"已下载 {downloaded_mb:.1f} MB"
+        if self.update_progress_var is not None:
+            self.update_progress_var.set(percent)
+        if self.update_progress_label is not None:
+            self.update_progress_label.configure(text=text)
+
+    def _finish_update_download(self, package_path: object | None) -> None:
+        if not isinstance(package_path, Path):
+            return
+        if self.update_progress_var is not None:
+            self.update_progress_var.set(100)
+        if self.update_progress_label is not None:
+            self.update_progress_label.configure(text="下载完成，正在准备安装...")
+        self._write_log("更新包下载完成，正在启动更新程序...")
+        try:
+            launch_update_replacement(package_path)
+        except Exception as exc:
+            self._handle_update_failure(exc)
+            return
+        if self.update_progress_label is not None:
+            self.update_progress_label.configure(text="更新程序已启动，当前程序即将退出。")
+        self.root.after(700, self.root.destroy)
+
+    def _handle_update_failure(self, exc: object | None) -> None:
+        self._write_log(f"更新失败：{exc}")
+        messagebox.showerror(
+            "更新失败",
+            f"更新没有完成，程序将退出。\n\n原因：{exc}\n\n请联系开发重新处理安装包。",
+            parent=self.root,
+        )
+        self.root.destroy()
 
     def _select_tool(self, tool_id: str) -> None:
         if tool_id == self.current_tool:

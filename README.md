@@ -199,13 +199,102 @@ python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "RE
 python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." hr_toolkit_app.py
 ```
 
+自动更新程序：
+
+```powershell
+python -m PyInstaller --name HRToolkitUpdater --onefile --console --clean hr_toolkit_updater.py
+Copy-Item dist\HRToolkitUpdater.exe dist\HRToolkit\ -Force
+```
+
+Mac 打包时把 `;` 改成 `:`，更新程序复制无后缀文件：
+
+```bash
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." hr_toolkit_app.py
+python -m PyInstaller --name HRToolkitUpdater --onefile --console --clean hr_toolkit_updater.py
+cp dist/HRToolkitUpdater dist/HRToolkit/
+```
+
 打包完成后，把整个目录发给使用者：
 
 ```text
 dist/
   HRToolkit/
     HRToolkit.exe
+    HRToolkitUpdater.exe
+    update_url.txt
     _internal/
 ```
 
 不要只发送 `.exe`，`_internal` 目录也是程序运行必需的。
+
+## 自动更新发布
+
+程序启动后会检查：
+
+```text
+https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
+```
+
+也可以在 `HRToolkit.exe` 同目录放一个 `update_url.txt`，第一行写 Gitee 上的 `latest.json` 地址。程序会优先读取这个文件，例如：
+
+```text
+https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
+```
+
+如果发现新版本，用户必须点击更新；取消会直接退出程序。下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 `HRToolkit` 目录，再自动重新打开。主界面右上角也有“检查更新”，可手动检查。
+
+发布步骤：
+
+1. 修改 `hr_toolkit/__init__.py` 里的 `__version__`。
+2. 按上面的命令打包 `HRToolkit` 和 `HRToolkitUpdater`。
+3. 如果使用 Gitee，把 `release/update_url.txt.example` 复制为 `dist\HRToolkit\update_url.txt`，并把里面的地址改成你的 Gitee `latest.json` 地址。
+4. 把 `dist\HRToolkit\*` 压缩成 zip，例如 `HRToolkit-0.2.0-win.zip`。
+5. 计算 zip 的 SHA256：
+
+```powershell
+Get-FileHash .\HRToolkit-0.2.0-win.zip -Algorithm SHA256
+```
+
+6. 上传 zip 到 ScriptHub 或 Gitee 可公开访问的位置，例如：
+
+```text
+https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.2.0-win.zip
+```
+
+7. 按 `release/latest.json.example` 生成 `latest.json`，填好 `version`、`file_url`、`sha256`，上传到：
+
+```text
+https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
+```
+
+不建议把每次发布的 zip 直接提交到 ScriptHub 的普通 git 仓库；zip 是大二进制文件，版本多了会让仓库变慢。更合适的方式是：`latest.json` 可以跟 ScriptHub 项目一起提交，zip 放服务器静态目录、对象存储，或专门的 release 下载目录。
+
+### 只用 Gitee 发布
+
+可以不用 ScriptHub，直接用 Gitee。推荐做法：
+
+1. 把源码推送到 Gitee。
+2. 打包新的 `dist\HRToolkit`。
+3. 把 `dist\HRToolkit\*` 压缩成 `HRToolkit-版本号-win.zip`。
+4. 把 zip 上传到 Gitee Releases，或放到仓库的 `release/downloads/` 目录。
+5. 计算 zip 的 SHA256。
+6. 修改仓库里的 `release/latest.json`，把 `version`、`file_url`、`sha256` 改成新版本。
+7. 推送 `release/latest.json` 到 Gitee。
+
+如果 zip 放仓库里，`file_url` 可以写 Gitee 原始文件地址：
+
+```text
+https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.2.0-win.zip
+```
+
+如果 zip 放 Gitee Releases，`file_url` 写 Releases 附件的下载地址。这个方式更推荐，因为每个版本的 zip 不会反复塞进 git 历史里。
+
+只推源码不会触发客户端更新。客户端只看 `latest.json` 里的 `version` 是否大于当前程序版本，并按 `file_url` 下载 zip。
+
+版本号目前需要手动增加，建议每次发布前改：
+
+```python
+__version__ = "0.2.0"
+```
+
+后面可以再加“一键发布脚本”，自动修改版本号、打包、算 SHA256、生成 `latest.json`。
