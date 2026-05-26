@@ -7,11 +7,11 @@
   ],
   "platforms": {
     "windows": {
-      "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.2.0-win.zip",
+      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.2.0-win.zip",
       "sha256": "把发布zip的SHA256填到这里"
     },
     "macos": {
-      "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.2.0-mac.zip",
+      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.2.0-mac.zip",
       "sha256": "把发布zip的SHA256填到这里"
     }
   }

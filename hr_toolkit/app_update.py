@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-DEFAULT_UPDATE_MANIFEST_URL = "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json"
+DEFAULT_UPDATE_MANIFEST_URL = "http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json"
 UPDATE_URL_ENV = "HR_TOOLKIT_UPDATE_URL"
 SKIP_UPDATE_ENV = "HR_TOOLKIT_SKIP_UPDATE"
 FORCE_UPDATE_ENV = "HR_TOOLKIT_FORCE_UPDATE_CHECK"

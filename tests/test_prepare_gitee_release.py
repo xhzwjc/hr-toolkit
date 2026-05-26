@@ -25,6 +25,8 @@ class PrepareGiteeReleaseTest(unittest.TestCase):
             updater = tmp_dir / "HRToolkitUpdater.exe"
             updater.write_text("updater", encoding="utf-8")
             output_dir = tmp_dir / "downloads"
+            bundle_dir = tmp_dir / "bundle" / "hr-toolkit"
+            publish_dir = tmp_dir / "scripthub" / "hr-toolkit"
             manifest_path = prepare_gitee_release.REPO_ROOT / "release" / "latest.json"
             original_manifest = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else None
 
@@ -42,9 +44,13 @@ class PrepareGiteeReleaseTest(unittest.TestCase):
                     str(updater),
                     "--output-dir",
                     str(output_dir),
+                    "--bundle-dir",
+                    str(bundle_dir),
+                    "--publish-dir",
+                    str(publish_dir),
                 ])
                 self.assertEqual(exit_code, 0)
-                self.assertEqual((app_dir / "update_url.txt").read_text(encoding="utf-8").strip(), prepare_gitee_release.UPDATE_URL)
+                self.assertEqual((app_dir / "update_url.txt").read_text(encoding="utf-8").strip(), prepare_gitee_release.SCRIPT_HUB_MANIFEST_URL)
                 self.assertTrue((app_dir / "HRToolkitUpdater.exe").exists())
 
                 zip_path = output_dir / "HRToolkit-9.9.9-win.zip"
@@ -57,7 +63,14 @@ class PrepareGiteeReleaseTest(unittest.TestCase):
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 self.assertEqual(manifest["version"], "9.9.9")
                 self.assertEqual(manifest["notes"], ["测试发布"])
-                self.assertTrue(manifest["platforms"]["windows"]["file_url"].endswith("/release/downloads/HRToolkit-9.9.9-win.zip"))
+                self.assertEqual(
+                    manifest["platforms"]["windows"]["file_url"],
+                    "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-9.9.9-win.zip",
+                )
+                self.assertTrue((bundle_dir / "latest.json").exists())
+                self.assertTrue((bundle_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
+                self.assertTrue((publish_dir / "latest.json").exists())
+                self.assertTrue((publish_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
             finally:
                 if original_manifest is None:
                     manifest_path.unlink(missing_ok=True)

@@ -232,13 +232,13 @@ dist/
 程序启动后会检查：
 
 ```text
-https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
+http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 ```
 
 也可以在 `HRToolkit.exe` 同目录放一个 `update_url.txt`，第一行写 Gitee 上的 `latest.json` 地址。程序会优先读取这个文件，例如：
 
 ```text
-https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
+http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 ```
 
 如果发现新版本，用户必须点击更新；取消会直接退出程序。下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 `HRToolkit` 目录，再自动重新打开。主界面右上角也有“检查更新”，可手动检查。
@@ -269,7 +269,7 @@ https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.j
 
 ### 只用 Gitee 发布
 
-可以不用 ScriptHub，直接用 Gitee。推荐用一键发布脚本，不要手写 `version`、`file_url` 和 `sha256`。
+更新包放在 ScriptHub 静态目录中。推荐用一键发布脚本，不要手写 `version`、`file_url` 和 `sha256`。
 
 Windows 版必须在 Windows 上执行。日常发布用补丁版本：
 
@@ -317,13 +317,48 @@ python scripts\release_windows.py --bump major --notes "正式版发布"
 - 把 `dist\HRToolkit\*` 压缩到 `release/downloads/HRToolkit-版本号-win.zip`
 - 计算 zip 的 SHA256
 - 更新 `release/latest.json` 里的 `version`、`file_url`、`sha256`
+- 生成可一次性复制到 ScriptHub 的 `release/scripthub_static/hr-toolkit/`
+
+发布脚本生成后，会得到：
+
+```text
+release/scripthub_static/hr-toolkit/
+  latest.json
+  releases/
+    HRToolkit-版本号-win.zip
+```
+
+把整个 `hr-toolkit` 文件夹复制到 ScriptHub 项目的：
+
+```text
+fastApiProject/static/
+```
+
+最终目录应为：
+
+```text
+fastApiProject/static/hr-toolkit/latest.json
+fastApiProject/static/hr-toolkit/releases/HRToolkit-版本号-win.zip
+```
+
+如果打包机上也有 ScriptHub 项目，可以直接让脚本复制过去：
+
+```powershell
+python scripts\release_windows.py --bump patch --notes "本次更新说明" --publish-dir "E:\path\to\Nexus-Scripts\fastApiProject\static\hr-toolkit"
+```
 
 4. 提交并推送：
 
 ```bash
-git add hr_toolkit/__init__.py release/latest.json release/downloads/
+git add hr_toolkit/__init__.py release/latest.json release/downloads/ release/scripthub_static/
 git commit -m "发布 HR工具箱 0.2.0"
 git push gitee main
+```
+
+旧版本客户端如果还在读取 Gitee 的 `release/latest.json`，推送 Gitee 后仍能作为桥接入口；真正的 zip 下载会走 ScriptHub：
+
+```text
+http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-版本号-win.zip
 ```
 
 只推源码不会触发客户端更新。客户端只看 `latest.json` 里的 `version` 是否大于当前程序版本，并按 `file_url` 下载 zip。
