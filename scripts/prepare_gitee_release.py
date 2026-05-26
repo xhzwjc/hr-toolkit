@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         "sha256": digest,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    bundle_dir = _write_static_bundle(args.bundle_dir, manifest_path, zip_path)
+    bundle_dir = _write_static_bundle(args.bundle_dir, manifest_path, zip_path, updater, args.version, args.platform)
     if args.publish_dir is not None:
         _copy_static_bundle(bundle_dir, args.publish_dir)
 
@@ -124,20 +124,30 @@ def _load_manifest(path: Path) -> dict:
     return {"version": "0.0.0", "mandatory": True, "notes": [], "platforms": {}}
 
 
-def _write_static_bundle(bundle_dir: Path, manifest_path: Path, zip_path: Path) -> Path:
+def _write_static_bundle(bundle_dir: Path, manifest_path: Path, zip_path: Path, updater: Path, version: str, platform: str) -> Path:
     releases_dir = bundle_dir / "releases"
+    tools_dir = bundle_dir / "tools"
     releases_dir.mkdir(parents=True, exist_ok=True)
+    tools_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(manifest_path, bundle_dir / "latest.json")
     shutil.copy2(zip_path, releases_dir / zip_path.name)
+    updater_suffix = "exe" if platform == "windows" else "bin"
+    updater_name = f"HRToolkitUpdater-{version}-{_platform_suffix(platform)}.{updater_suffix}"
+    shutil.copy2(updater, tools_dir / updater_name)
     return bundle_dir
 
 
 def _copy_static_bundle(bundle_dir: Path, publish_dir: Path) -> None:
     releases_dir = publish_dir / "releases"
+    tools_dir = publish_dir / "tools"
     releases_dir.mkdir(parents=True, exist_ok=True)
+    tools_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(bundle_dir / "latest.json", publish_dir / "latest.json")
     for file_path in (bundle_dir / "releases").glob("*.zip"):
         shutil.copy2(file_path, releases_dir / file_path.name)
+    for file_path in (bundle_dir / "tools").glob("*"):
+        if file_path.is_file():
+            shutil.copy2(file_path, tools_dir / file_path.name)
 
 
 if __name__ == "__main__":

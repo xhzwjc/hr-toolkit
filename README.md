@@ -320,6 +320,7 @@ python scripts\release_windows.py --bump major --notes "正式版发布"
 - 计算 zip 的 SHA256
 - 更新 `release/latest.json` 里的 `version`、`file_url`、`sha256`
 - 生成可一次性复制到 ScriptHub 的 `release/scripthub_static/hr-toolkit/`
+- 额外生成一个单独的更新器修复文件，放在 `release/scripthub_static/hr-toolkit/tools/`
 
 发布脚本生成后，会得到：
 
@@ -328,6 +329,8 @@ release/scripthub_static/hr-toolkit/
   latest.json
   releases/
     HRToolkit-版本号-win.zip
+  tools/
+    HRToolkitUpdater-版本号-win.exe
 ```
 
 把整个 `hr-toolkit` 文件夹复制到 ScriptHub 项目的：
@@ -341,7 +344,10 @@ fastApiProject/static/
 ```text
 fastApiProject/static/hr-toolkit/latest.json
 fastApiProject/static/hr-toolkit/releases/HRToolkit-版本号-win.zip
+fastApiProject/static/hr-toolkit/tools/HRToolkitUpdater-版本号-win.exe
 ```
+
+如果旧版本更新失败后只剩 `HRToolkit_backup_时间`，先把这个文件夹改名回 `HRToolkit`。然后下载 `tools/HRToolkitUpdater-版本号-win.exe`，改名为 `HRToolkitUpdater.exe`，覆盖放进 `HRToolkit` 文件夹，再重新打开 `HRToolkit.exe` 检查更新。这个步骤只用于修复旧版更新器，后续正常版本不需要这样操作。
 
 如果打包机上也有 ScriptHub 项目，可以直接让脚本复制过去：
 

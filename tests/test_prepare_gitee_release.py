@@ -69,8 +69,10 @@ class PrepareGiteeReleaseTest(unittest.TestCase):
                 )
                 self.assertTrue((bundle_dir / "latest.json").exists())
                 self.assertTrue((bundle_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
+                self.assertTrue((bundle_dir / "tools" / "HRToolkitUpdater-9.9.9-win.exe").exists())
                 self.assertTrue((publish_dir / "latest.json").exists())
                 self.assertTrue((publish_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
+                self.assertTrue((publish_dir / "tools" / "HRToolkitUpdater-9.9.9-win.exe").exists())
             finally:
                 if original_manifest is None:
                     manifest_path.unlink(missing_ok=True)
