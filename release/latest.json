@@ -1,13 +1,13 @@
 {
-  "version": "0.1.4",
+  "version": "0.1.5",
   "mandatory": true,
   "notes": [
-    "修复更新器"
+    "修复更新问题 添加日志文件"
   ],
   "platforms": {
     "windows": {
-      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.1.4-win.zip",
-      "sha256": "8354117682fc68f94e9d5929623188dea261e85585149240e80aa789bec0bd04"
+      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.1.5-win.zip",
+      "sha256": "8044eb0060c433e8341322d63d76f7d57dc1f1066f0973023fc2e7536fdf3aae"
     },
     "macos": {
       "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.1.0-mac.zip",
