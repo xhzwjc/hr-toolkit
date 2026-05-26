@@ -10,6 +10,7 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,7 @@ SKIP_UPDATE_ENV = "HR_TOOLKIT_SKIP_UPDATE"
 FORCE_UPDATE_ENV = "HR_TOOLKIT_FORCE_UPDATE_CHECK"
 UPDATER_PATH_ENV = "HR_TOOLKIT_UPDATER_PATH"
 UPDATE_URL_FILE = "update_url.txt"
+UPDATE_LOG_FILE = "HRToolkit_update.log"
 USER_AGENT = "HRToolkit-Updater/1.0"
 
 
@@ -168,10 +170,21 @@ def launch_update_replacement(
 ) -> None:
     app_dir = app_dir or current_app_dir()
     launcher_path = launcher_path or current_launcher_path()
-    updater_path = find_updater_executable(app_dir)
     temp_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_updater_"))
-    temp_updater = temp_dir / updater_path.name
-    shutil.copy2(updater_path, temp_updater)
+    log_file = app_dir.parent / UPDATE_LOG_FILE
+    _append_update_log(log_file, "准备启动更新程序。")
+    _append_update_log(log_file, f"程序目录：{app_dir}")
+    _append_update_log(log_file, f"更新包：{package_path}")
+
+    temp_updater = _extract_package_updater(package_path, temp_dir)
+    if temp_updater is None:
+        updater_path = find_updater_executable(app_dir)
+        temp_updater = temp_dir / updater_path.name
+        shutil.copy2(updater_path, temp_updater)
+        _append_update_log(log_file, f"未在更新包中找到更新程序，使用当前目录更新程序：{updater_path}")
+    else:
+        _append_update_log(log_file, f"使用更新包中的更新程序：{temp_updater}")
+
     if not sys.platform.startswith("win"):
         temp_updater.chmod(temp_updater.stat().st_mode | 0o111)
 
@@ -185,8 +198,11 @@ def launch_update_replacement(
         launcher_path.name,
         "--wait-pid",
         str(wait_pid or os.getpid()),
+        "--log-file",
+        str(log_file),
         "--relaunch",
     ]
+    _append_update_log(log_file, "更新程序参数：" + " ".join(args[1:]))
     subprocess.Popen(args, close_fds=True)
 
 
@@ -205,6 +221,34 @@ def find_updater_executable(app_dir: Path) -> Path:
         if candidate.exists():
             return candidate
     raise UpdateError("未找到更新程序 HRToolkitUpdater，请重新打包发布。")
+
+
+def _extract_package_updater(package_path: Path, temp_dir: Path) -> Path | None:
+    names = ["HRToolkitUpdater.exe"] if sys.platform.startswith("win") else ["HRToolkitUpdater"]
+    try:
+        with zipfile.ZipFile(package_path) as archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                member_name = Path(member.filename).name
+                if member_name not in names:
+                    continue
+                target = temp_dir / member_name
+                with archive.open(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                return target
+    except zipfile.BadZipFile as exc:
+        raise UpdateError("更新包不是有效的 zip 文件。") from exc
+    return None
+
+
+def _append_update_log(log_file: Path, text: str) -> None:
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+    except OSError:
+        pass
 
 
 def current_app_dir() -> Path:

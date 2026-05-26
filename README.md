@@ -202,7 +202,7 @@ python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "R
 自动更新程序：
 
 ```powershell
-python -m PyInstaller --name HRToolkitUpdater --onefile --console --clean hr_toolkit_updater.py
+python -m PyInstaller --name HRToolkitUpdater --onefile --windowed --clean hr_toolkit_updater.py
 Copy-Item dist\HRToolkitUpdater.exe dist\HRToolkit\ -Force
 ```
 
@@ -210,7 +210,7 @@ Mac 打包时把 `;` 改成 `:`，更新程序复制无后缀文件：
 
 ```bash
 python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." hr_toolkit_app.py
-python -m PyInstaller --name HRToolkitUpdater --onefile --console --clean hr_toolkit_updater.py
+python -m PyInstaller --name HRToolkitUpdater --onefile --windowed --clean hr_toolkit_updater.py
 cp dist/HRToolkitUpdater dist/HRToolkit/
 ```
 
@@ -241,7 +241,9 @@ http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 ```
 
-如果发现新版本，用户必须点击更新；取消会直接退出程序。下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 `HRToolkit` 目录，再自动重新打开。主界面右上角也有“检查更新”，可手动检查。
+如果发现新版本，用户必须点击更新；取消会直接退出程序。下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 `HRToolkit` 目录，再自动重新打开。更新过程不会弹出黑色命令窗口。主界面右上角也有“检查更新”，可手动检查。
+
+更新失败时，程序会在 `HRToolkit` 文件夹同级目录写入 `HRToolkit_update.log`。这个日志会记录下载包路径、解压目录、备份目录、替换步骤和具体错误，方便直接定位是哪一步失败。
 
 发布步骤：
 

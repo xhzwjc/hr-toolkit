@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         "--name",
         "HRToolkitUpdater",
         "--onefile",
-        "--console",
+        "--windowed",
         "--clean",
         "hr_toolkit_updater.py",
     ])

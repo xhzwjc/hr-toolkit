@@ -5,6 +5,7 @@ import unittest
 import urllib.request
 import zipfile
 import os
+import sys
 from pathlib import Path
 
 from hr_toolkit.app_update import (
@@ -12,10 +13,12 @@ from hr_toolkit.app_update import (
     check_for_update,
     download_update_package,
     is_newer_version,
+    launch_update_replacement,
     parse_update_manifest,
     sha256_file,
     update_manifest_url,
 )
+from hr_toolkit import update_runner
 from hr_toolkit.update_runner import main as update_runner_main
 
 
@@ -103,6 +106,47 @@ class AppUpdateTests(unittest.TestCase):
                 if old_env is not None:
                     os.environ["HR_TOOLKIT_UPDATE_URL"] = old_env
 
+    def test_launch_update_prefers_updater_from_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            app_dir.mkdir()
+            updater_name = "HRToolkitUpdater.exe" if sys.platform.startswith("win") else "HRToolkitUpdater"
+            (app_dir / updater_name).write_text("old updater", encoding="utf-8")
+            launcher = app_dir / ("HRToolkit.exe" if sys.platform.startswith("win") else "HRToolkit")
+            launcher.write_text("old app", encoding="utf-8")
+
+            package = tmp_dir / "update.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr(updater_name, "new updater")
+                archive.writestr(launcher.name, "new app")
+                archive.writestr("_internal/data.txt", "data")
+
+            captured: dict[str, object] = {}
+            original_popen = __import__("subprocess").Popen
+
+            def fake_popen(args, **kwargs):  # type: ignore[no-untyped-def]
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+
+                class Process:
+                    pid = 123
+
+                return Process()
+
+            try:
+                __import__("subprocess").Popen = fake_popen
+                launch_update_replacement(package, app_dir=app_dir, launcher_path=launcher, wait_pid=99)
+            finally:
+                __import__("subprocess").Popen = original_popen
+
+            args = captured["args"]
+            self.assertIsInstance(args, list)
+            updater_path = Path(args[0])
+            self.assertEqual(updater_path.read_text(encoding="utf-8"), "new updater")
+            self.assertIn("--log-file", args)
+            self.assertTrue((tmp_dir / "HRToolkit_update.log").exists())
+
     def test_update_runner_replaces_app_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -135,6 +179,54 @@ class AppUpdateTests(unittest.TestCase):
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "new")
             self.assertTrue((app_dir / "_internal" / "data.txt").exists())
 
+    def test_update_runner_handles_empty_target_reappearing_during_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            app_dir.mkdir()
+            (app_dir / "HRToolkit.exe").write_text("old", encoding="utf-8")
+            (app_dir / "_internal").mkdir()
+
+            payload_dir = tmp_dir / "payload"
+            payload_dir.mkdir()
+            (payload_dir / "HRToolkit.exe").write_text("new", encoding="utf-8")
+            (payload_dir / "_internal").mkdir()
+            (payload_dir / "_internal" / "data.txt").write_text("data", encoding="utf-8")
+
+            package = tmp_dir / "update.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                for file_path in payload_dir.rglob("*"):
+                    if file_path.is_file():
+                        archive.write(file_path, file_path.relative_to(payload_dir))
+
+            original_move = update_runner.shutil.move
+
+            def move_and_recreate_empty_target(source, target):  # type: ignore[no-untyped-def]
+                result = original_move(source, target)
+                if Path(source) == app_dir and "HRToolkit_backup_" in Path(target).name:
+                    app_dir.mkdir()
+                return result
+
+            try:
+                update_runner.shutil.move = move_and_recreate_empty_target
+                exit_code = update_runner_main([
+                    "--zip",
+                    str(package),
+                    "--app-dir",
+                    str(app_dir),
+                    "--launcher",
+                    "HRToolkit.exe",
+                    "--log-file",
+                    str(tmp_dir / "HRToolkit_update.log"),
+                ])
+            finally:
+                update_runner.shutil.move = original_move
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "new")
+            self.assertTrue((app_dir / "_internal" / "data.txt").exists())
+            self.assertFalse(any(item.name.startswith("HRToolkit_new_") for item in app_dir.iterdir()))
+
     def test_update_runner_restores_backup_when_payload_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -148,6 +240,7 @@ class AppUpdateTests(unittest.TestCase):
             (payload_dir / "readme.txt").write_text("bad", encoding="utf-8")
 
             package = tmp_dir / "bad_update.zip"
+            log_file = tmp_dir / "HRToolkit_update.log"
             with zipfile.ZipFile(package, "w") as archive:
                 archive.write(payload_dir / "readme.txt", "readme.txt")
 
@@ -158,11 +251,14 @@ class AppUpdateTests(unittest.TestCase):
                 str(app_dir),
                 "--launcher",
                 "HRToolkit.exe",
+                "--log-file",
+                str(log_file),
             ])
 
             self.assertEqual(exit_code, 1)
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "old")
             self.assertTrue((app_dir / "_internal").exists())
+            self.assertIn("更新失败", log_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
