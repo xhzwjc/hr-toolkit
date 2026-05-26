@@ -2,12 +2,12 @@
   "version": "0.1.0",
   "mandatory": true,
   "notes": [
-    "当前为最新版本"
+    "测试11更新"
   ],
   "platforms": {
     "windows": {
       "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.1.0-win.zip",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      "sha256": "b4542bff441aff00d96ad3a096d77fcd6b790faba20cec9ce5d9fd2517061491"
     },
     "macos": {
       "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.1.0-mac.zip",
