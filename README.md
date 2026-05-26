@@ -267,27 +267,33 @@ https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/download
 https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
 ```
 
-不建议把每次发布的 zip 直接提交到 ScriptHub 的普通 git 仓库；zip 是大二进制文件，版本多了会让仓库变慢。更合适的方式是：`latest.json` 可以跟 ScriptHub 项目一起提交，zip 放服务器静态目录、对象存储，或专门的 release 下载目录。
-
 ### 只用 Gitee 发布
 
-可以不用 ScriptHub，直接用 Gitee。推荐做法：
+可以不用 ScriptHub，直接用 Gitee。推荐用发布脚本，不要手写 `file_url` 和 `sha256`。
 
-1. 把源码推送到 Gitee。
-2. 打包新的 `dist\HRToolkit`。
-3. 把 `dist\HRToolkit\*` 压缩成 `HRToolkit-版本号-win.zip`。
-4. 把 zip 上传到 Gitee Releases，或放到仓库的 `release/downloads/` 目录。
-5. 计算 zip 的 SHA256。
-6. 修改仓库里的 `release/latest.json`，把 `version`、`file_url`、`sha256` 改成新版本。
-7. 推送 `release/latest.json` 到 Gitee。
+1. 修改 `hr_toolkit/__init__.py` 里的版本号，例如 `0.2.0`。
+2. 打包新的 `dist\HRToolkit` 和 `dist\HRToolkitUpdater.exe`。
+3. 运行发布脚本：
 
-如果 zip 放仓库里，`file_url` 可以写 Gitee 原始文件地址：
-
-```text
-https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.2.0-win.zip
+```powershell
+python scripts\prepare_gitee_release.py --platform windows --notes "修复更新按钮位置" "优化更新检查"
 ```
 
-如果 zip 放 Gitee Releases，`file_url` 写 Releases 附件的下载地址。这个方式更推荐，因为每个版本的 zip 不会反复塞进 git 历史里。
+脚本会自动完成这些事：
+
+- 把 `HRToolkitUpdater.exe` 复制进 `dist\HRToolkit\`
+- 在 `dist\HRToolkit\` 写入 `update_url.txt`
+- 把 `dist\HRToolkit\*` 压缩到 `release/downloads/HRToolkit-版本号-win.zip`
+- 计算 zip 的 SHA256
+- 更新 `release/latest.json` 里的 `version`、`file_url`、`sha256`
+
+4. 提交并推送：
+
+```bash
+git add hr_toolkit/__init__.py release/latest.json release/downloads/
+git commit -m "发布 HR工具箱 0.2.0"
+git push gitee main
+```
 
 只推源码不会触发客户端更新。客户端只看 `latest.json` 里的 `version` 是否大于当前程序版本，并按 `file_url` 下载 zip。
 
@@ -296,5 +302,3 @@ https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/download
 ```python
 __version__ = "0.2.0"
 ```
-
-后面可以再加“一键发布脚本”，自动修改版本号、打包、算 SHA256、生成 `latest.json`。
