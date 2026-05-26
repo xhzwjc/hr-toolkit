@@ -18,6 +18,7 @@ from hr_toolkit.app_update import (
     download_update_package,
     launch_update_replacement,
     update_check_enabled,
+    update_manifest_url,
 )
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
@@ -412,9 +413,11 @@ class HRToolkitApp:
             return
         self.update_check_in_progress = True
         self.manual_update_check_active = manual
+        manifest_url = update_manifest_url()
         if hasattr(self, "check_update_button"):
             self.check_update_button.config(state="disabled")
         self._write_log("正在检查更新...")
+        self._write_log(f"更新配置：{manifest_url}")
         self._show_update_checking_window()
         worker = threading.Thread(target=self._update_check_worker, daemon=True)
         worker.start()
@@ -500,6 +503,8 @@ class HRToolkitApp:
         if not isinstance(update, UpdateInfo):
             return
         self.pending_update = update
+        self._write_log(f"发现新版本：v{update.version}")
+        self._write_log(f"下载地址：{update.file_url}")
         notes = "\n".join(f"- {line}" for line in update.notes[:6]) or "- 本次发布未填写更新说明"
         message = (
             f"发现新版本 v{update.version}，必须更新后才能继续使用。\n\n"
@@ -514,6 +519,7 @@ class HRToolkitApp:
     def _start_update_download(self, update: UpdateInfo) -> None:
         self._close_update_window()
         self._write_log(f"开始下载更新包：v{update.version}")
+        self._write_log(f"下载地址：{update.file_url}")
         self.update_window = Toplevel(self.root)
         self.update_window.title("正在更新 HR工具箱")
         self._center_window(self.update_window, 420, 160)

@@ -45,6 +45,7 @@ def _run_update(args: argparse.Namespace) -> None:
     extract_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_extract_"))
     _safe_extract_zip(package_path, extract_dir)
     payload_root = _find_payload_root(extract_dir)
+    _validate_payload_root(payload_root, args.launcher)
     _replace_app_dir(payload_root, app_dir)
 
     if args.relaunch:
@@ -77,16 +78,40 @@ def _find_payload_root(extract_dir: Path) -> Path:
 def _replace_app_dir(payload_root: Path, app_dir: Path) -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_dir = app_dir.parent / f"{app_dir.name}_backup_{timestamp}"
-    shutil.move(str(app_dir), str(backup_dir))
+    new_dir = app_dir.parent / f"{app_dir.name}_new_{timestamp}"
     try:
-        shutil.copytree(payload_root, app_dir)
+        shutil.copytree(payload_root, new_dir)
+        _validate_copied_app_dir(new_dir)
+        shutil.move(str(app_dir), str(backup_dir))
+        shutil.move(str(new_dir), str(app_dir))
     except Exception:
-        if app_dir.exists():
+        if new_dir.exists():
+            shutil.rmtree(new_dir, ignore_errors=True)
+        if not app_dir.exists() and backup_dir.exists():
+            shutil.move(str(backup_dir), str(app_dir))
+        elif app_dir.exists() and not any(app_dir.iterdir()) and backup_dir.exists():
             shutil.rmtree(app_dir, ignore_errors=True)
-        if backup_dir.exists():
             shutil.move(str(backup_dir), str(app_dir))
         raise
-    shutil.rmtree(backup_dir, ignore_errors=True)
+    if _validate_copied_app_dir(app_dir):
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def _validate_payload_root(payload_root: Path, launcher: str) -> None:
+    launcher_path = payload_root / launcher
+    if not launcher_path.exists():
+        raise RuntimeError(f"更新包缺少主程序：{launcher}")
+    if not (payload_root / "_internal").exists():
+        raise RuntimeError("更新包缺少 _internal 目录。")
+
+
+def _validate_copied_app_dir(app_dir: Path) -> bool:
+    launchers = ("HRToolkit.exe", "HRToolkit")
+    if not any((app_dir / launcher).exists() for launcher in launchers):
+        raise RuntimeError("更新后目录缺少 HRToolkit 主程序。")
+    if not (app_dir / "_internal").exists():
+        raise RuntimeError("更新后目录缺少 _internal 目录。")
+    return True
 
 
 def _wait_for_process(pid: int, timeout_seconds: int) -> None:

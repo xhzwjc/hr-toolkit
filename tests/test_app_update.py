@@ -135,6 +135,35 @@ class AppUpdateTests(unittest.TestCase):
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "new")
             self.assertTrue((app_dir / "_internal" / "data.txt").exists())
 
+    def test_update_runner_restores_backup_when_payload_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            app_dir.mkdir()
+            (app_dir / "HRToolkit.exe").write_text("old", encoding="utf-8")
+            (app_dir / "_internal").mkdir()
+
+            payload_dir = tmp_dir / "bad_payload"
+            payload_dir.mkdir()
+            (payload_dir / "readme.txt").write_text("bad", encoding="utf-8")
+
+            package = tmp_dir / "bad_update.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.write(payload_dir / "readme.txt", "readme.txt")
+
+            exit_code = update_runner_main([
+                "--zip",
+                str(package),
+                "--app-dir",
+                str(app_dir),
+                "--launcher",
+                "HRToolkit.exe",
+            ])
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "old")
+            self.assertTrue((app_dir / "_internal").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

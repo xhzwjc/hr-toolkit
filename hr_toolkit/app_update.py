@@ -151,7 +151,7 @@ def download_update_package(
     except Exception as exc:
         if temp_path.exists():
             temp_path.unlink()
-        raise UpdateError(f"更新包下载失败：{exc}") from exc
+        raise UpdateError(f"更新包下载失败：{exc}；下载地址：{update.file_url}") from exc
 
     actual_sha256 = sha256_file(final_path)
     if actual_sha256.lower() != update.sha256.lower():
