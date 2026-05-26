@@ -29,15 +29,39 @@ RENAME_MODE_LABELS = {
     "修改单人名称": MODE_REPLACE,
 }
 
+TOOL_NAV_ITEMS = (
+    ("salary_split", "需求4  工资表拆分"),
+    ("salary_merge", "需求5  工资表合并"),
+    ("personnel_change_merge", "需求6  异动表汇总"),
+    ("folder_rename", "需求8  文件夹改名"),
+    ("archive_import", "需求7  档案入库（待实现）"),
+)
+
+COLOR_BG = "#f7f8fa"
+COLOR_SIDEBAR = "#f0f2f5"
+COLOR_SURFACE = "#ffffff"
+COLOR_BORDER = "#e4e7ec"
+COLOR_TEXT = "#1a1d23"
+COLOR_MUTED = "#8c95a6"
+COLOR_PRIMARY = "#2d6ef5"
+COLOR_PRIMARY_ACTIVE = "#1a5ae0"
+COLOR_NAV_SELECTED = "#ffffff"
+COLOR_SUCCESS = "#0a7c4e"
+COLOR_WARNING = "#c0392b"
+COLOR_TUTORIAL_BG = "#f0f4ff"
+COLOR_TUTORIAL_BORDER = "#c7d7fb"
+
 
 class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(f"HR工具箱 v{__version__}")
-        self.root.geometry("860x700")
-        self.root.minsize(800, 620)
+        self.root.geometry("1000x680")
+        self.root.minsize(900, 620)
+        self.root.configure(bg=COLOR_BG)
 
         self.current_tool = "salary_split"
+        self.nav_buttons: dict[str, ttk.Button] = {}
         self.tool_title = StringVar()
         self.tool_description = StringVar()
         self.input_label = StringVar()
@@ -59,132 +83,299 @@ class HRToolkitApp:
         self.status_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.last_output_dir: Path | None = None
 
+        self._configure_style()
         self._set_tool_texts()
         self._build_layout()
         self._poll_status_queue()
 
+    def _configure_style(self) -> None:
+        if sys.platform == "darwin":
+            family = "PingFang SC"
+            mono_family = "Menlo"
+        elif sys.platform.startswith("win"):
+            family = "Microsoft YaHei UI"
+            mono_family = "Consolas"
+        else:
+            family = "Arial"
+            mono_family = "DejaVu Sans Mono"
+        self.base_font = (family, 10)
+        self.small_font = (family, 9)
+        self.tiny_font = (family, 8)
+        self.title_font = (family, 18, "bold")
+        self.section_font = (family, 10, "bold")
+        self.nav_font = (family, 10)
+        self.nav_selected_font = (family, 10, "bold")
+        self.mono_font = (mono_family, 10)
+
+        style = ttk.Style(self.root)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        style.configure(".", font=self.base_font, background=COLOR_BG, foreground=COLOR_TEXT)
+        style.configure("App.TFrame", background=COLOR_BG)
+        style.configure("Sidebar.TFrame", background=COLOR_SIDEBAR)
+        style.configure("Content.TFrame", background=COLOR_BG)
+        style.configure("Card.TFrame", background=COLOR_SURFACE)
+        style.configure("InputWrap.TFrame", background=COLOR_SURFACE)
+        style.configure(
+            "Tutorial.TFrame",
+            background=COLOR_TUTORIAL_BG,
+            bordercolor=COLOR_TUTORIAL_BORDER,
+            lightcolor=COLOR_TUTORIAL_BORDER,
+            darkcolor=COLOR_TUTORIAL_BORDER,
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=1, bordercolor=COLOR_BORDER)
+        style.configure("NavRow.TFrame", background=COLOR_SIDEBAR)
+        style.configure("NavIndicator.TFrame", background=COLOR_SIDEBAR)
+        style.configure("NavIndicatorSelected.TFrame", background=COLOR_PRIMARY)
+        style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
+        style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
+        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.small_font)
+        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 14, "bold"))
+        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
+        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.tiny_font)
+        style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
+        style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=(8, 6))
+        style.configure(
+            "Card.TLabelframe",
+            background=COLOR_SURFACE,
+            bordercolor=COLOR_BORDER,
+            lightcolor=COLOR_BORDER,
+            darkcolor=COLOR_BORDER,
+            relief="solid",
+        )
+        style.configure("Card.TLabelframe.Label", background=COLOR_BG, foreground=COLOR_TEXT, font=self.section_font)
+        style.configure("Rename.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid")
+        style.configure("Rename.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
+        style.configure("App.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.base_font)
+        style.configure(
+            "App.TEntry",
+            fieldbackground=COLOR_SURFACE,
+            foreground=COLOR_TEXT,
+            insertcolor=COLOR_TEXT,
+            bordercolor=COLOR_BORDER,
+            lightcolor=COLOR_BORDER,
+            darkcolor=COLOR_BORDER,
+            padding=(8, 6),
+            relief="solid",
+        )
+        style.map(
+            "App.TEntry",
+            bordercolor=[("focus", COLOR_PRIMARY)],
+            lightcolor=[("focus", COLOR_PRIMARY)],
+            darkcolor=[("focus", COLOR_PRIMARY)],
+        )
+        style.configure(
+            "App.TCombobox",
+            fieldbackground=COLOR_SURFACE,
+            foreground=COLOR_TEXT,
+            bordercolor=COLOR_BORDER,
+            arrowcolor=COLOR_MUTED,
+            padding=(8, 5),
+        )
+        style.configure("Nav.TButton", anchor="w", padding=(10, 8), background=COLOR_SIDEBAR, foreground=COLOR_MUTED, borderwidth=0, font=self.nav_font, relief="flat")
+        style.configure("NavSelected.TButton", anchor="w", padding=(10, 8), background=COLOR_NAV_SELECTED, foreground=COLOR_TEXT, borderwidth=0, font=self.nav_selected_font, relief="flat")
+        style.map("Nav.TButton", background=[("active", "#e8ebf0")], foreground=[("active", COLOR_TEXT)])
+        style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)])
+        style.configure("Primary.TButton", padding=(14, 7), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
+        style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
+        style.configure("Secondary.TButton", padding=(10, 6), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid")
+        style.map("Secondary.TButton", background=[("active", "#e8ebf0")], bordercolor=[("active", COLOR_PRIMARY)])
+        style.configure("Icon.TButton", padding=(7, 5), background=COLOR_SURFACE, foreground=COLOR_MUTED, borderwidth=0, relief="flat", font=(self.base_font[0], 10, "bold"))
+        style.map("Icon.TButton", background=[("active", "#e8ebf0")], foreground=[("active", COLOR_TEXT)])
+
     def _build_layout(self) -> None:
-        root_frame = ttk.Frame(self.root, padding=12)
+        root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(root_frame, width=220)
-        left_frame.pack(side=LEFT, fill=Y, padx=(0, 12))
+        left_frame = ttk.Frame(root_frame, width=200, padding=(18, 22, 14, 18), style="Sidebar.TFrame")
+        left_frame.pack(side=LEFT, fill=Y)
         left_frame.pack_propagate(False)
 
-        ttk.Label(left_frame, text="工具列表", font=("", 11, "bold")).pack(anchor="w")
-        self.tool_list = ttk.Treeview(left_frame, show="tree", height=14)
-        self.tool_list.pack(fill=BOTH, expand=True, pady=(8, 0))
-        self.tool_list.insert("", END, iid="salary_split", text="需求4 工资表拆分")
-        self.tool_list.insert("", END, iid="salary_merge", text="需求5 工资表合并")
-        self.tool_list.insert("", END, iid="personnel_change_merge", text="需求6 异动表汇总")
-        self.tool_list.insert("", END, iid="folder_rename", text="需求8 文件夹改名")
-        self.tool_list.insert("", END, iid="archive_import", text="需求7 档案入库（待实现）")
-        self.tool_list.selection_set("salary_split")
-        self.tool_list.bind("<<TreeviewSelect>>", self._on_tool_selected)
+        ttk.Label(left_frame, text="HR工具箱", style="SidebarTitle.TLabel").pack(anchor="w")
+        self.nav_indicators = {}
 
-        right_frame = ttk.Frame(root_frame)
+        nav_frame = ttk.Frame(left_frame, style="Sidebar.TFrame")
+        nav_frame.pack(fill="x", pady=(28, 0))
+        for tool_id, label in TOOL_NAV_ITEMS:
+            row = ttk.Frame(nav_frame, style="NavRow.TFrame")
+            row.pack(fill="x", pady=2)
+            indicator = ttk.Frame(
+                row,
+                width=3,
+                style="NavIndicatorSelected.TFrame" if tool_id == self.current_tool else "NavIndicator.TFrame",
+            )
+            indicator.pack(side=LEFT, fill=Y, padx=(0, 6))
+            button = ttk.Button(
+                row,
+                text=label,
+                style="NavSelected.TButton" if tool_id == self.current_tool else "Nav.TButton",
+                command=lambda selected=tool_id: self._select_tool(selected),
+            )
+            button.pack(side=LEFT, fill="x", expand=True)
+            self.nav_buttons[tool_id] = button
+            self.nav_indicators[tool_id] = indicator
+
+        ttk.Label(left_frame, text=f"v{__version__}", style="Version.TLabel").pack(side="bottom", anchor="w")
+
+        right_frame = ttk.Frame(root_frame, padding=(32, 28, 28, 24), style="Content.TFrame")
         right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
 
-        ttk.Label(
-            right_frame,
-            textvariable=self.tool_title,
-            font=("", 13, "bold"),
-        ).pack(anchor="w")
+        title_row = ttk.Frame(right_frame, style="Content.TFrame")
+        title_row.pack(fill="x")
+        ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").pack(side=LEFT, anchor="w")
+        self.tutorial_toggle_button = ttk.Button(title_row, text="使用教程", style="Secondary.TButton")
+        self.tutorial_toggle_button.pack(side=RIGHT)
         ttk.Label(
             right_frame,
             textvariable=self.tool_description,
-        ).pack(anchor="w", pady=(4, 14))
+            style="Subtitle.TLabel",
+        ).pack(anchor="w", pady=(6, 18))
 
-        self.tutorial_frame = ttk.LabelFrame(right_frame, text="使用教程", padding=8)
-        self.tutorial_frame.pack(fill="x", pady=(0, 12))
+        self.tutorial_frame = ttk.Frame(right_frame, padding=12, style="Tutorial.TFrame")
+        ttk.Label(self.tutorial_frame, text="使用教程", style="TutorialTitle.TLabel").pack(anchor="w", pady=(0, 6))
         self.tutorial_text = Text(
             self.tutorial_frame,
-            height=8,
+            height=6,
             wrap="word",
-            padx=8,
-            pady=6,
-            bg="#fff7d6",
-            relief="solid",
-            bd=1,
+            padx=10,
+            pady=8,
+            bg=COLOR_TUTORIAL_BG,
+            fg=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=COLOR_TUTORIAL_BORDER,
+            highlightcolor=COLOR_TUTORIAL_BORDER,
+            font=self.base_font,
         )
         self.tutorial_text.pack(fill="x")
-        self.tutorial_text.tag_configure("strong", font=("", 10, "bold"))
-        self.tutorial_text.tag_configure("warning", foreground="#9f1d1d", font=("", 10, "bold"))
+        self.tutorial_text.tag_configure("strong", font=(self.base_font[0], 10, "bold"))
+        self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], 10, "bold"))
         self._set_tutorial_text()
 
-        form = ttk.Frame(right_frame)
+        form = ttk.Frame(right_frame, style="Content.TFrame")
         form.pack(fill="x")
 
-        ttk.Label(form, textvariable=self.input_label).grid(row=0, column=0, sticky="w", pady=4)
-        ttk.Entry(form, textvariable=self.input_path).grid(row=0, column=1, sticky="ew", padx=8)
-        ttk.Button(form, textvariable=self.choose_input_text, command=self._choose_input).grid(row=0, column=2, sticky="e")
+        def make_input_row(row_index: int, label_text, value_var: StringVar, command) -> tuple[ttk.Label, ttk.Frame]:
+            if isinstance(label_text, StringVar):
+                label = ttk.Label(form, textvariable=label_text, style="App.TLabel")
+            else:
+                label = ttk.Label(form, text=label_text, style="App.TLabel")
+            label.grid(row=row_index, column=0, sticky="w", pady=4)
+            input_frame = ttk.Frame(form, style="InputWrap.TFrame")
+            input_frame.grid(row=row_index, column=1, sticky="ew", padx=(10, 0), pady=4)
+            entry = ttk.Entry(input_frame, textvariable=value_var, style="App.TEntry")
+            entry.pack(side=LEFT, fill=BOTH, expand=True)
+            ttk.Button(input_frame, text="...", width=3, command=command, style="Icon.TButton").pack(side=RIGHT, padx=(4, 0))
+            return label, input_frame
 
-        self.summary_label_widget = ttk.Label(form, textvariable=self.summary_label)
-        self.summary_entry_widget = ttk.Entry(form, textvariable=self.summary_path)
-        self.summary_button_widget = ttk.Button(form, textvariable=self.summary_button_text, command=self._choose_summary)
+        make_input_row(0, self.input_label, self.input_path, self._choose_input)
+        self.summary_label_widget, self.summary_entry_widget = make_input_row(
+            1,
+            self.summary_label,
+            self.summary_path,
+            self._choose_summary,
+        )
+        self.output_label_widget, self.output_entry_widget = make_input_row(
+            2,
+            "保存位置",
+            self.output_dir,
+            self._choose_output,
+        )
 
-        self.output_label_widget = ttk.Label(form, text="保存位置")
-        self.output_entry_widget = ttk.Entry(form, textvariable=self.output_dir)
-        self.output_button_widget = ttk.Button(form, text="选择目录", command=self._choose_output)
-        self.output_label_widget.grid(row=2, column=0, sticky="w", pady=4)
-        self.output_entry_widget.grid(row=2, column=1, sticky="ew", padx=8)
-        self.output_button_widget.grid(row=2, column=2, sticky="e")
-
-        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=8)
+        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=10, style="Rename.TLabelframe")
         self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        ttk.Label(self.rename_options_frame, text="操作").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=4)
         self.rename_mode_widget = ttk.Combobox(
             self.rename_options_frame,
             textvariable=self.rename_mode,
             values=list(RENAME_MODE_LABELS.keys()),
             state="readonly",
             width=16,
+            style="App.TCombobox",
         )
-        self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=8, pady=3)
+        self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=10, pady=4)
         self.rename_mode_widget.bind("<<ComboboxSelected>>", self._on_rename_mode_changed)
 
-        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label).grid(row=1, column=0, sticky="w", pady=3)
-        self.rename_target_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_target_name)
-        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=8, pady=3)
+        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        self.rename_target_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_target_name, style="App.TEntry")
+        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=10, pady=4)
 
-        self.rename_text_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_text_label)
-        self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=3)
-        self.rename_text_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_text)
-        self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=8, pady=3)
+        self.rename_text_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_text_label, style="App.TLabel")
+        self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=4)
+        self.rename_text_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_text, style="App.TEntry")
+        self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
 
-        self.rename_replacement_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_replacement_label)
-        self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=3)
-        self.rename_replacement_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_replacement_name)
-        self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=8, pady=3)
+        self.rename_replacement_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_replacement_label, style="App.TLabel")
+        self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=4)
+        self.rename_replacement_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_replacement_name, style="App.TEntry")
+        self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=10, pady=4)
         self.rename_options_frame.columnconfigure(1, weight=1)
         form.columnconfigure(1, weight=1)
         self._update_summary_controls()
         self._update_output_controls()
         self._update_rename_controls()
 
-        actions = ttk.Frame(right_frame)
-        actions.pack(fill="x", pady=(14, 10))
-        self.run_button = ttk.Button(actions, textvariable=self.run_button_text, command=self._run_current_tool)
-        self.run_button.pack(side=LEFT)
-        self.open_button = ttk.Button(actions, text="打开所在文件夹", command=self._open_output_dir)
+        self.tutorial_expanded = False
+
+        def toggle_tutorial() -> None:
+            self.tutorial_expanded = not self.tutorial_expanded
+            if self.tutorial_expanded:
+                self.tutorial_frame.pack(fill="x", pady=(0, 16), before=form)
+                self.tutorial_toggle_button.configure(text="收起教程")
+            else:
+                self.tutorial_frame.pack_forget()
+                self.tutorial_toggle_button.configure(text="使用教程")
+
+        self.tutorial_toggle_button.configure(command=toggle_tutorial)
+
+        actions = ttk.Frame(right_frame, style="Content.TFrame")
+        actions.pack(fill="x", pady=(12, 14))
+        run_button_box = ttk.Frame(actions, width=120, height=36, style="Content.TFrame")
+        run_button_box.pack(side=LEFT)
+        run_button_box.pack_propagate(False)
+        self.run_button = ttk.Button(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, style="Primary.TButton")
+        self.run_button.pack(fill=BOTH, expand=True)
+        self.open_button = ttk.Button(actions, text="打开结果目录", command=self._open_output_dir, style="Secondary.TButton")
         self.open_button.pack(side=LEFT, padx=(8, 0))
 
-        ttk.Label(right_frame, text="执行结果").pack(anchor="w")
-        log_frame = ttk.Frame(right_frame)
+        ttk.Label(right_frame, text="日志", style="Section.TLabel").pack(anchor="w")
+        log_frame = ttk.Frame(right_frame, style="Content.TFrame")
         log_frame.pack(fill=BOTH, expand=True, pady=(6, 0))
         scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
-        self.log_text = Text(log_frame, height=12, wrap="word", yscrollcommand=scrollbar.set)
+        self.log_text = Text(
+            log_frame,
+            height=12,
+            wrap="word",
+            yscrollcommand=scrollbar.set,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_PRIMARY,
+            padx=10,
+            pady=10,
+            font=self.mono_font,
+        )
+        self.log_text.tag_configure("success", foreground=COLOR_SUCCESS)
+        self.log_text.tag_configure("warning", foreground=COLOR_WARNING)
+        self.log_text.tag_configure("muted", foreground=COLOR_MUTED)
         scrollbar.config(command=self.log_text.yview)
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
 
         self._write_log(self._initial_log_text())
 
-    def _on_tool_selected(self, _event=None) -> None:
-        selection = self.tool_list.selection()
-        if not selection:
+    def _select_tool(self, tool_id: str) -> None:
+        if tool_id == self.current_tool:
             return
-        self.current_tool = selection[0]
+        self.current_tool = tool_id
+        self._refresh_nav_buttons()
         self.last_output_dir = None
         self.input_path.set("")
         self.summary_path.set("")
@@ -196,6 +387,15 @@ class HRToolkitApp:
         self._set_tool_texts()
         self._clear_log()
         self._write_log(self._initial_log_text())
+
+    def _refresh_nav_buttons(self) -> None:
+        for tool_id, button in self.nav_buttons.items():
+            style = "NavSelected.TButton" if tool_id == self.current_tool else "Nav.TButton"
+            button.configure(style=style)
+            indicator = self.nav_indicators.get(tool_id)
+            if indicator is not None:
+                indicator_style = "NavIndicatorSelected.TFrame" if tool_id == self.current_tool else "NavIndicator.TFrame"
+                indicator.configure(style=indicator_style)
 
     def _set_tool_texts(self) -> None:
         if self.current_tool == "salary_merge":
@@ -296,22 +496,18 @@ class HRToolkitApp:
     def _update_summary_controls(self) -> None:
         if self.current_tool in {"salary_merge", "personnel_change_merge"}:
             self.summary_label_widget.grid(row=1, column=0, sticky="w", pady=4)
-            self.summary_entry_widget.grid(row=1, column=1, sticky="ew", padx=8)
-            self.summary_button_widget.grid(row=1, column=2, sticky="e")
+            self.summary_entry_widget.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=4)
             return
         self.summary_label_widget.grid_remove()
         self.summary_entry_widget.grid_remove()
-        self.summary_button_widget.grid_remove()
 
     def _update_output_controls(self) -> None:
         if self.current_tool == "folder_rename":
             self.output_label_widget.grid_remove()
             self.output_entry_widget.grid_remove()
-            self.output_button_widget.grid_remove()
             return
         self.output_label_widget.grid(row=2, column=0, sticky="w", pady=4)
-        self.output_entry_widget.grid(row=2, column=1, sticky="ew", padx=8)
-        self.output_button_widget.grid(row=2, column=2, sticky="e")
+        self.output_entry_widget.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=4)
 
     def _update_rename_controls(self) -> None:
         if self.current_tool != "folder_rename":
@@ -328,17 +524,26 @@ class HRToolkitApp:
         if mode == MODE_APPEND:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要追加的文字")
+            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=4)
+            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
             self.rename_text_widget.config(state="normal")
-            self.rename_replacement_widget.config(state="disabled")
+            self.rename_replacement_label_widget.grid_remove()
+            self.rename_replacement_widget.grid_remove()
         elif mode == MODE_REMOVE:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要删除的结尾文字")
+            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=4)
+            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
             self.rename_text_widget.config(state="normal")
-            self.rename_replacement_widget.config(state="disabled")
+            self.rename_replacement_label_widget.grid_remove()
+            self.rename_replacement_widget.grid_remove()
         else:
             self.rename_target_label.set("原姓名")
-            self.rename_text_label.set("不用填")
-            self.rename_text_widget.config(state="disabled")
+            self.rename_replacement_label.set("新名称")
+            self.rename_text_label_widget.grid_remove()
+            self.rename_text_widget.grid_remove()
+            self.rename_replacement_label_widget.grid(row=2, column=0, sticky="w", pady=4)
+            self.rename_replacement_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
             self.rename_replacement_widget.config(state="normal")
 
     def _initial_log_text(self) -> str:
@@ -720,7 +925,17 @@ class HRToolkitApp:
         open_path(directory)
 
     def _write_log(self, text: str) -> None:
-        self.log_text.insert(END, text + "\n")
+        tag = None
+        if any(keyword in text for keyword in ("失败", "错误", "提醒", "不存在", "缺少")):
+            tag = "warning"
+        elif any(keyword in text for keyword in ("完成", "成功")):
+            tag = "success"
+        elif text.startswith("- "):
+            tag = "muted"
+        if tag:
+            self.log_text.insert(END, text + "\n", tag)
+        else:
+            self.log_text.insert(END, text + "\n")
         self.log_text.see(END)
 
     def _clear_log(self) -> None:
