@@ -473,7 +473,7 @@ class HRToolkitApp:
         self._close_update_window()
         self.update_window = Toplevel(self.root)
         self.update_window.title("检查更新")
-        self.update_window.geometry("360x120")
+        self._center_window(self.update_window, 360, 120)
         self.update_window.resizable(False, False)
         self.update_window.configure(bg=COLOR_BG)
         self.update_window.transient(self.root)
@@ -516,7 +516,7 @@ class HRToolkitApp:
         self._write_log(f"开始下载更新包：v{update.version}")
         self.update_window = Toplevel(self.root)
         self.update_window.title("正在更新 HR工具箱")
-        self.update_window.geometry("420x160")
+        self._center_window(self.update_window, 420, 160)
         self.update_window.resizable(False, False)
         self.update_window.configure(bg=COLOR_BG)
         self.update_window.transient(self.root)
@@ -591,6 +591,22 @@ class HRToolkitApp:
             parent=self.root,
         )
         self.root.destroy()
+
+    def _center_window(self, window: Toplevel, width: int, height: int) -> None:
+        self.root.update_idletasks()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_width = self.root.winfo_width()
+        root_height = self.root.winfo_height()
+        if root_width <= 1 or root_height <= 1:
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            x = max((screen_width - width) // 2, 0)
+            y = max((screen_height - height) // 2, 0)
+        else:
+            x = root_x + max((root_width - width) // 2, 0)
+            y = root_y + max((root_height - height) // 2, 0)
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
     def _select_tool(self, tool_id: str) -> None:
         if tool_id == self.current_tool:
