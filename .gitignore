@@ -25,6 +25,14 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+*.spec
+
+# Generated release artifacts
+release/latest.json
+release/downloads/
+release/scripthub_static/
+!release/latest.json.example
+!release/update_url.txt.example
 
 # Local environment and logs
 .env
@@ -34,6 +42,13 @@ dist/
 
 # Generated HR tool outputs
 outputs/
+
+# Local HR source materials / copied customer files
+附件/
+模板/
+问题1-3相关数据及模板/
+问题汇总*.xlsx
+hr_toolkit/*.zip
 
 # Office lock / temporary files
 ~$*

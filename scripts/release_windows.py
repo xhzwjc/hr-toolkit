@@ -32,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
         "--clean",
         "--add-data",
         "README.md;.",
+        "--add-data",
+        "hr_toolkit/templates;hr_toolkit/templates",
         "hr_toolkit_app.py",
     ])
     _run([

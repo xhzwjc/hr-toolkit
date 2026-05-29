@@ -1,6 +1,6 @@
 # HR Toolkit
 
-人事 Excel 自动化工具箱。当前已落地：**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**、**需求6：异动表汇总**、**需求8：人员资料文件夹改名**。
+人事 Excel 自动化工具箱。当前已落地：**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**、**需求6：异动表汇总与花名册更新**、**需求7：档案移交表入库**、**需求8：人员资料文件夹改名**。
 
 ## 已实现工具
 
@@ -31,15 +31,39 @@
 
 ### 需求6-异动表汇总
 
-输入一个包含多个项目异动表的文件夹，将各项目填写的 `增员`、`减员`、`转正`、`调动`、`奖罚扣补` 汇总到一份异动汇总表。
+输入单个项目异动表、多个项目异动表、zip 压缩包，或一个包含多个项目异动表/压缩包的文件夹，将各项目填写的 `增补表`、`离职`、`转正`、`调整` 按记录日期分到对应月份汇总表。文件夹里如果同时放入人力资源分析表，工具会同步更新其中的 `花名册`。
 
 输出内容：
 
-- 自动读取五类异动 sheet
+- 支持项目表中的 `增补表`、`离职`、`转正`、`调整`
+- zip 会自动解压后读取，文件夹内的 zip 也会自动处理
+- 不选择已有汇总表时，会按月份新建干净汇总表
+- 选择已有汇总表文件或汇总表文件夹时，会按月份追加新记录，不会清空原记录
+- 对应月份没有已有汇总表时，会自动创建该月份汇总表
+- 已存在的异动记录不会重复追加，只会补充已有行中的空白字段
+- 月份规则：增员看 `入职日期/入职时间`，减员看 `离职日期`，转正看 `转正日期`，调动看 `调整日期`
 - 忽略模板中只有预填序号、没有填写内容的空行
 - 汇总后重新编排各 sheet 序号
 - 保留模板工作簿样式
-- 输出 `异动汇总表.xlsx`
+- 按记录月份输出，例如 `2026年4月异动汇总表.xlsx`
+- `增员` 会插入花名册对应项目后方，`减员` 会在花名册中标黄
+- GUI 中可切换到 `花名册更新` 页，单独选择异动汇总表和人力资源花名册进行更新
+
+薪酬、产值和同行对比分析暂不处理，等需求6第三部分数据源确认后再单独实现。
+
+### 需求7-档案移交表入库
+
+输入项目部提交的人事档案移交表，以及人力资源部维护的档案汇总表，按 `公司` 写入对应工作表。
+
+输出内容：
+
+- 支持一个 `.xlsx` 移交表，或一个包含多个移交表的文件夹
+- 按 `公司` 自动写入档案汇总表对应工作表
+- 身份证已存在时不重复新增，只补充原汇总表中为空的材料字段
+- 档案汇总表缺少公司工作表时，会按第一个工作表样式自动创建
+- `编号` 从文件名、表头标题或公司名识别项目地区，例如 `茂名项目部` 自动填 `11`
+- 档案表中有、汇总表没有的字段会汇总到 `其他`
+- 输出 `档案表汇总表.xlsx`
 
 ### 需求8-人员资料文件夹改名
 
@@ -63,9 +87,9 @@ python3 -m hr_toolkit
 界面操作流程：
 
 1. 在左侧选择工具
-2. 选择工资表文件、工资表文件夹、异动表文件夹或人员资料目录
+2. 选择工资表文件、工资表文件夹、异动表文件夹、档案移交表文件夹或人员资料目录
 3. 保存位置默认在桌面结果目录下，也可以手动选择
-4. 点击 `开始拆分`、`开始合并` 或 `开始汇总`
+4. 点击 `开始拆分`、`开始合并`、`开始汇总`、`开始入库` 或 `预览`
 5. 程序会在保存位置下自动创建 `结果_年月日_时分秒` 子文件夹
 6. 点击 `打开所在文件夹` 查看结果
 
@@ -123,13 +147,76 @@ python3 -m hr_toolkit change-merge \
   --output "outputs/change_merge_demo"
 ```
 
-指定异动表模板：
+单个异动表也可以直接处理：
+
+```bash
+python3 -m hr_toolkit change-merge \
+  --input-dir "问题6-2026年4月南昌分公司异动表.xlsx" \
+  --output "outputs/change_merge_demo"
+```
+
+追加到已有异动汇总表：
 
 ```bash
 python3 -m hr_toolkit change-merge \
   --input-dir "各项目异动表文件夹" \
-  --template "问题6-2026年4月异动汇总表（模板）.xlsx" \
+  --template "已有异动汇总表.xlsx" \
   --output "outputs/change_merge_demo"
+```
+
+追加到一个包含多个月份汇总表的文件夹：
+
+```bash
+python3 -m hr_toolkit change-merge \
+  --input-dir "各项目异动表文件夹" \
+  --template "已有月度汇总表文件夹" \
+  --output "outputs/change_merge_demo"
+```
+
+zip 压缩包也可以直接处理：
+
+```bash
+python3 -m hr_toolkit change-merge \
+  --input-dir "项目部异动表.zip" \
+  --output "outputs/change_merge_demo"
+```
+
+指定人力资源分析表并同步更新花名册：
+
+```bash
+python3 -m hr_toolkit change-merge \
+  --input-dir "各项目异动表文件夹" \
+  --template "已有异动汇总表.xlsx" \
+  --analysis-template "问题6-2026年4月人力资源分析.xlsx" \
+  --output "outputs/change_merge_demo"
+```
+
+只用已有异动汇总表单独更新花名册：
+
+```bash
+python3 -m hr_toolkit roster-update \
+  --input "已有月度汇总表文件夹" \
+  --roster "人力资源花名册.xlsx" \
+  --output "outputs/roster_update_demo"
+```
+
+档案移交表入库：
+
+```bash
+python3 -m hr_toolkit archive-import \
+  --input "档案移交表文件夹" \
+  --target "档案表汇总表.xlsx" \
+  --output "outputs/archive_import_demo"
+```
+
+档案入库预览，不生成文件：
+
+```bash
+python3 -m hr_toolkit archive-import \
+  --input "档案移交表文件夹" \
+  --target "档案表汇总表.xlsx" \
+  --output "outputs/archive_import_demo" \
+  --dry-run
 ```
 
 人员资料文件夹改名预览：
@@ -190,13 +277,13 @@ CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 命令行版调试包：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" hr_toolkit_app.py
 ```
 
 给人事双击使用的桌面版：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" hr_toolkit_app.py
 ```
 
 自动更新程序：
@@ -209,7 +296,7 @@ Copy-Item dist\HRToolkitUpdater.exe dist\HRToolkit\ -Force
 Mac 打包时把 `;` 改成 `:`，更新程序复制无后缀文件：
 
 ```bash
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." --add-data "hr_toolkit/templates:hr_toolkit/templates" hr_toolkit_app.py
 python -m PyInstaller --name HRToolkitUpdater --onefile --windowed --clean hr_toolkit_updater.py
 cp dist/HRToolkitUpdater dist/HRToolkit/
 ```

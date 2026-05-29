@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 from .tools.folder_rename import rename_person_folders
-from .tools.personnel_change_merge import merge_personnel_changes
+from .tools.archive_import import import_archive_transfers
+from .tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from .tools.salary_merge import merge_monthly_salary
 from .tools.salary_split import split_salary_by_company
 
@@ -95,8 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         "--input-dir",
         required=True,
+        nargs="+",
         type=Path,
-        help="输入文件夹，内含多个 .xlsx 项目异动表",
+        help="一个或多个 .xlsx 项目异动表、zip 压缩包，或包含项目异动表/压缩包的文件夹",
     )
     change_merge.add_argument(
         "-o",
@@ -108,7 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     change_merge.add_argument(
         "--template",
         type=Path,
-        help="可选异动表模板；不填时使用输入文件夹中的第一份异动表作为模板",
+        help="可选已有异动汇总表文件或汇总表文件夹；会按异动日期写入对应月份",
+    )
+    change_merge.add_argument(
+        "--analysis-template",
+        type=Path,
+        help="可选人力资源分析表；传入后会同步更新其中的花名册",
     )
     change_merge.add_argument(
         "--dry-run",
@@ -116,6 +123,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="只识别异动记录，不生成 Excel 文件",
     )
     change_merge.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
+
+    roster_update = subparsers.add_parser(
+        "roster-update",
+        help="需求6：根据异动汇总表单独更新人力资源花名册",
+    )
+    roster_update.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="一个或多个异动汇总表 .xlsx，或包含异动汇总表的文件夹",
+    )
+    roster_update.add_argument(
+        "-r",
+        "--roster",
+        required=True,
+        type=Path,
+        help="人力资源花名册 .xlsx",
+    )
+    roster_update.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    roster_update.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别汇总表记录，不生成花名册",
+    )
+    roster_update.add_argument(
         "--json",
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
@@ -163,6 +207,42 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
     )
+
+    archive_import = subparsers.add_parser(
+        "archive-import",
+        help="需求7：将项目档案移交表写入公司档案汇总表",
+    )
+    archive_import.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        type=Path,
+        help="档案移交表 .xlsx，或包含多个移交表的文件夹",
+    )
+    archive_import.add_argument(
+        "-t",
+        "--target",
+        required=True,
+        type=Path,
+        help="档案汇总表 .xlsx",
+    )
+    archive_import.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    archive_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别记录，不生成 Excel 文件",
+    )
+    archive_import.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
     return parser
 
 
@@ -204,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
             input_dir=args.input_dir,
             output_dir=args.output,
             template_path=args.template,
+            analysis_template_path=args.analysis_template,
             dry_run=args.dry_run,
         )
         payload = result.to_dict()
@@ -211,6 +292,34 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             _print_change_merge_summary(payload)
+        return 0
+
+    if args.command == "archive-import":
+        result = import_archive_transfers(
+            input_path=args.input,
+            target_path=args.target,
+            output_dir=args.output,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_archive_import_summary(payload)
+        return 0
+
+    if args.command == "roster-update":
+        result = update_roster_from_change_summaries(
+            summary_input=args.input,
+            analysis_template_path=args.roster,
+            output_dir=args.output,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_roster_update_summary(payload)
         return 0
 
     if args.command == "folder-rename":
@@ -271,13 +380,66 @@ def _print_salary_merge_summary(payload: dict) -> None:
 
 def _print_change_merge_summary(payload: dict) -> None:
     print(f"工具：{payload['tool_name']}")
-    print(f"输入文件夹：{payload['input_dir']}")
+    print(f"输入：{payload['input_dir']}")
     print(f"输出目录：{payload['output_dir']}")
     print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
     print(f"识别文件数：{payload['source_file_count']}")
     print(f"异动记录数：{payload['record_count']}")
+    print(f"写入模式：{'追加到已有汇总表' if payload.get('append_mode') else '新建干净汇总表'}")
+    print(f"新增记录数：{payload.get('inserted_count', 0)}")
+    print(f"补充已有记录数：{payload.get('updated_count', 0)}")
+    print(f"已存在未修改记录数：{payload.get('skipped_count', 0)}")
     for sheet_name, count in payload["sheet_counts"].items():
         print(f"- {sheet_name}: {count} 条")
+    if payload.get("output_files"):
+        print("输出文件：")
+        for output_file in payload["output_files"]:
+            print(f"- {output_file}")
+    elif payload.get("output_file"):
+        print(f"输出文件：{payload['output_file']}")
+    if payload.get("roster_output_file"):
+        print(f"花名册输出文件：{payload['roster_output_file']}")
+        print(f"花名册新增人数：{payload['roster_added_count']}")
+        print(f"花名册标记离职人数：{payload['roster_marked_count']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_roster_update_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"异动汇总表：{payload['summary_input']}")
+    print(f"人力资源花名册：{payload['analysis_template_path']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别汇总表数：{payload['source_file_count']}")
+    print(f"识别异动记录数：{payload['record_count']}")
+    print(f"花名册新增人数：{payload['roster_added_count']}")
+    print(f"花名册标记离职人数：{payload['roster_marked_count']}")
+    for sheet_name, count in payload["sheet_counts"].items():
+        print(f"- {sheet_name}: {count} 条")
+    if payload.get("output_file"):
+        print(f"输出文件：{payload['output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_archive_import_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"输入：{payload['input_path']}")
+    print(f"档案汇总表：{payload['target_path']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别文件数：{payload['source_file_count']}")
+    print(f"识别记录数：{payload['source_record_count']}")
+    print(f"新增记录数：{payload['inserted_count']}")
+    print(f"补充已有记录数：{payload['updated_count']}")
+    print(f"已存在未修改记录数：{payload['skipped_count']}")
+    for company, count in payload["company_counts"].items():
+        print(f"- {company}: {count} 条")
     if payload.get("output_file"):
         print(f"输出文件：{payload['output_file']}")
     if payload["warnings"]:
