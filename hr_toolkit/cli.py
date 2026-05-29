@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .tools.folder_rename import rename_person_folders
-from .tools.archive_import import import_archive_transfers
+from .tools.archive_import import export_company_archive_tables, import_archive_transfers
 from .tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from .tools.salary_merge import merge_monthly_salary
 from .tools.salary_split import split_salary_by_company
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--input",
         required=True,
         type=Path,
-        help="输入工资表 .xlsx，需包含汇总表和明细表",
+        help="输入工资表 .xlsx 或 .xls，需包含汇总表和明细表",
     )
     salary_split.add_argument(
         "-o",
@@ -56,8 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         "--input-dir",
         required=True,
+        nargs="+",
         type=Path,
-        help="输入文件夹，内含多个 .xlsx 月度工资表",
+        help="一个或多个 .xlsx/.xls 月度工资表、zip 压缩包，或包含月度工资表/压缩包的文件夹",
     )
     salary_merge.add_argument(
         "-o",
@@ -98,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         nargs="+",
         type=Path,
-        help="一个或多个 .xlsx 项目异动表、zip 压缩包，或包含项目异动表/压缩包的文件夹",
+        help="一个或多个 .xlsx/.xls 项目异动表、zip 压缩包，或包含项目异动表/压缩包的文件夹",
     )
     change_merge.add_argument(
         "-o",
@@ -138,14 +139,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         nargs="+",
         type=Path,
-        help="一个或多个异动汇总表 .xlsx，或包含异动汇总表的文件夹",
+        help="一个或多个异动汇总表 .xlsx/.xls，或包含异动汇总表的文件夹",
     )
     roster_update.add_argument(
         "-r",
         "--roster",
         required=True,
         type=Path,
-        help="人力资源花名册 .xlsx",
+        help="人力资源花名册 .xlsx/.xls",
     )
     roster_update.add_argument(
         "-o",
@@ -217,14 +218,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--input",
         required=True,
         type=Path,
-        help="档案移交表 .xlsx，或包含多个移交表的文件夹",
+        nargs="+",
+        help="档案移交表 .xlsx/.xls、.zip，或包含多个移交表/压缩包的文件夹",
     )
     archive_import.add_argument(
         "-t",
         "--target",
-        required=True,
         type=Path,
-        help="档案汇总表 .xlsx",
+        help="已有档案汇总表 .xlsx/.xls；不传时使用内置空模板",
     )
     archive_import.add_argument(
         "-o",
@@ -239,6 +240,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="只识别记录，不生成 Excel 文件",
     )
     archive_import.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
+
+    archive_export = subparsers.add_parser(
+        "archive-export",
+        help="需求7：按公司从档案汇总表生成独立档案表",
+    )
+    archive_export.add_argument(
+        "-s",
+        "--summary",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="一个或多个档案汇总表 .xlsx/.xls，或包含档案汇总表的文件夹",
+    )
+    archive_export.add_argument(
+        "-e",
+        "--existing",
+        nargs="+",
+        type=Path,
+        help="可选已有公司档案表文件或文件夹；匹配到公司则追加，未匹配则用内置空模板新建",
+    )
+    archive_export.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    archive_export.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别公司，不生成 Excel 文件",
+    )
+    archive_export.add_argument(
         "--json",
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
@@ -306,6 +344,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             _print_archive_import_summary(payload)
+        return 0
+
+    if args.command == "archive-export":
+        result = export_company_archive_tables(
+            summary_path=args.summary,
+            output_dir=args.output,
+            existing_archive_path=args.existing,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_archive_export_summary(payload)
         return 0
 
     if args.command == "roster-update":
@@ -430,7 +482,10 @@ def _print_roster_update_summary(payload: dict) -> None:
 def _print_archive_import_summary(payload: dict) -> None:
     print(f"工具：{payload['tool_name']}")
     print(f"输入：{payload['input_path']}")
-    print(f"档案汇总表：{payload['target_path']}")
+    if payload.get("target_path"):
+        print(f"档案汇总表：{payload['target_path']}")
+    else:
+        print("档案汇总表：使用内置空模板")
     print(f"输出目录：{payload['output_dir']}")
     print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
     print(f"识别文件数：{payload['source_file_count']}")
@@ -442,6 +497,30 @@ def _print_archive_import_summary(payload: dict) -> None:
         print(f"- {company}: {count} 条")
     if payload.get("output_file"):
         print(f"输出文件：{payload['output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_archive_export_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"档案汇总表：{payload['summary_path']}")
+    if payload.get("existing_archive_path"):
+        print(f"已有公司档案表：{payload['existing_archive_path']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别公司数：{len(payload['company_counts'])}")
+    print(f"新建公司档案表数：{payload['created_count']}")
+    print(f"新增记录数：{payload['inserted_count']}")
+    print(f"补充已有记录数：{payload['updated_count']}")
+    print(f"已存在未修改记录数：{payload['skipped_count']}")
+    for company, count in payload["company_counts"].items():
+        print(f"- {company}: {count} 条")
+    if payload.get("output_files"):
+        print("输出文件：")
+        for output_file in payload["output_files"]:
+            print(f"- {output_file}")
     if payload["warnings"]:
         print("提醒：")
         for warning in payload["warnings"]:

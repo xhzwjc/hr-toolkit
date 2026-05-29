@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ from ..common.excel import (
     snapshot_row,
     unmerge_ranges_from_row,
 )
+from ..common.excel_compat import SUPPORTED_EXCEL_SUFFIXES, ensure_xlsx_workbook
 from ..common.filenames import safe_filename
 
 
@@ -129,43 +131,48 @@ def split_salary_by_company(
     output_dir = Path(output_dir).expanduser().resolve()
     if not input_path.exists():
         raise FileNotFoundError(f"输入文件不存在：{input_path}")
-    if input_path.suffix.lower() != ".xlsx":
-        raise ValueError("当前工资拆分工具仅支持 .xlsx 文件")
+    if input_path.suffix.lower() not in SUPPORTED_EXCEL_SUFFIXES:
+        raise ValueError("当前工资拆分工具仅支持 .xlsx 或 .xls 文件")
 
-    workbook = load_workbook(input_path, data_only=False)
-    layout = _detect_layout(workbook)
-    detail_ws = workbook[layout.detail_sheet_name]
-    sections = _detect_detail_sections(detail_ws, layout)
-    employees = _collect_employees(detail_ws, layout, sections)
-    groups = _group_by_company(employees)
+    with tempfile.TemporaryDirectory(prefix="hr_salary_split_") as temp_root:
+        working_input_path = ensure_xlsx_workbook(input_path, Path(temp_root))
+        workbook = load_workbook(working_input_path, data_only=False)
+        try:
+            layout = _detect_layout(workbook)
+            detail_ws = workbook[layout.detail_sheet_name]
+            sections = _detect_detail_sections(detail_ws, layout)
+            employees = _collect_employees(detail_ws, layout, sections)
+            groups = _group_by_company(employees)
+        finally:
+            workbook.close()
 
-    result = SalarySplitResult(input_path=input_path, output_dir=output_dir, dry_run=dry_run)
-    for company, rows in groups.items():
-        result.outputs.append(
-            CompanyOutput(
-                company=company,
-                employee_count=len(rows),
-                sections=list(_group_sections(rows).keys()),
+        result = SalarySplitResult(input_path=input_path, output_dir=output_dir, dry_run=dry_run)
+        for company, rows in groups.items():
+            result.outputs.append(
+                CompanyOutput(
+                    company=company,
+                    employee_count=len(rows),
+                    sections=list(_group_sections(rows).keys()),
+                )
             )
-        )
 
-    if dry_run:
+        if dry_run:
+            return result
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for company_output in result.outputs:
+            rows = groups[company_output.company]
+            output_path = output_dir / f"{safe_filename(company_output.company)}-工资表.xlsx"
+            _write_company_workbook(working_input_path, layout, company_output.company, rows, output_path)
+            company_output.file_path = str(output_path)
+
+        if write_manifest:
+            manifest_path = output_dir / "_salary_split_manifest.json"
+            manifest_path.write_text(
+                json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         return result
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for company_output in result.outputs:
-        rows = groups[company_output.company]
-        output_path = output_dir / f"{safe_filename(company_output.company)}-工资表.xlsx"
-        _write_company_workbook(input_path, layout, company_output.company, rows, output_path)
-        company_output.file_path = str(output_path)
-
-    if write_manifest:
-        manifest_path = output_dir / "_salary_split_manifest.json"
-        manifest_path.write_text(
-            json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    return result
 
 
 def _detect_layout(workbook) -> SalarySheetLayout:

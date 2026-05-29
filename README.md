@@ -6,7 +6,7 @@
 
 ### 需求4-工资表按入职公司拆分
 
-输入一个包含 `汇总表`、`明细表` 的工资表，按明细表中的 `入职公司` 字段拆分为多个 Excel 工作簿。
+输入一个包含 `汇总表`、`明细表` 的工资表，按明细表中的 `入职公司` 字段拆分为多个 Excel 工作簿。输入支持 `.xlsx` 和 `.xls`。
 
 输出内容：
 
@@ -18,7 +18,7 @@
 
 ### 需求5-多月工资合并个人薪资汇总
 
-输入一个包含多个月度工资表的文件夹，按 `身份证号码` 合并，输出每个人一行的个人应发工资汇总表。也可以同时选择已有汇总表，工具会把新月份追加进去。
+输入单个月度工资表、多个工资表、zip 压缩包，或一个包含多个月度工资表/压缩包的文件夹，按 `身份证号码` 合并，输出每个人一行的个人应发工资汇总表。也可以同时选择已有汇总表，工具会把新月份追加进去。输入支持 `.xlsx` 和 `.xls`。
 
 输出内容：
 
@@ -31,7 +31,7 @@
 
 ### 需求6-异动表汇总
 
-输入单个项目异动表、多个项目异动表、zip 压缩包，或一个包含多个项目异动表/压缩包的文件夹，将各项目填写的 `增补表`、`离职`、`转正`、`调整` 按记录日期分到对应月份汇总表。文件夹里如果同时放入人力资源分析表，工具会同步更新其中的 `花名册`。
+输入单个项目异动表、多个项目异动表、zip 压缩包，或一个包含多个项目异动表/压缩包的文件夹，将各项目填写的 `增补表`、`离职`、`转正`、`调整` 按记录日期分到对应月份汇总表。文件夹里如果同时放入人力资源分析表，工具会同步更新其中的 `花名册`。输入支持 `.xlsx` 和 `.xls`。
 
 输出内容：
 
@@ -53,17 +53,29 @@
 
 ### 需求7-档案移交表入库
 
-输入项目部提交的人事档案移交表，以及人力资源部维护的档案汇总表，按 `公司` 写入对应工作表。
+输入项目部提交的人事档案移交表，按 `公司` 写入档案汇总表；也可以从一份或多份档案汇总表生成各公司独立档案表。
 
 输出内容：
 
-- 支持一个 `.xlsx` 移交表，或一个包含多个移交表的文件夹
+- 支持单个 `.xlsx/.xls` 移交表、多个移交表、`.zip` 压缩包，或包含移交表/压缩包的文件夹
 - 按 `公司` 自动写入档案汇总表对应工作表
+- 已有档案汇总表可选；不选择时使用内置空模板新建汇总表
 - 身份证已存在时不重复新增，只补充原汇总表中为空的材料字段
 - 档案汇总表缺少公司工作表时，会按第一个工作表样式自动创建
 - `编号` 从文件名、表头标题或公司名识别项目地区，例如 `茂名项目部` 自动填 `11`
+- `档案号` 使用模板公式按 `编号-入职公式-出生年月公式-序号` 生成
 - 档案表中有、汇总表没有的字段会汇总到 `其他`
-- 输出 `档案表汇总表.xlsx`
+- 档案入库输出 `档案表汇总表.xlsx`
+- 档案表生成支持选择已有公司档案表；匹配到公司就追加，没匹配到就用内置干净模板新建
+- 生成公司档案表时会自动改标题公司名，并为新增人员补边框、居中和公式
+- 档案表生成会按公司输出 `公司名-档案表.xlsx`
+
+### Excel 旧格式兼容
+
+- 已实现的 Excel 类工具均支持上传 `.xlsx` 和 `.xls`
+- 文件夹和 zip 压缩包中也会识别 `.xls`
+- 输出文件统一为 `.xlsx`
+- `.xls` 会先自动转换为 `.xlsx` 再处理；Windows 电脑需要安装 Excel 或 WPS 表格，Mac/Linux 需要安装 LibreOffice 才能自动转换
 
 ### 需求8-人员资料文件夹改名
 
@@ -205,6 +217,14 @@ python3 -m hr_toolkit roster-update \
 ```bash
 python3 -m hr_toolkit archive-import \
   --input "档案移交表文件夹" \
+  --output "outputs/archive_import_demo"
+```
+
+追加到已有档案汇总表：
+
+```bash
+python3 -m hr_toolkit archive-import \
+  --input "档案移交表文件夹" \
   --target "档案表汇总表.xlsx" \
   --output "outputs/archive_import_demo"
 ```
@@ -214,9 +234,25 @@ python3 -m hr_toolkit archive-import \
 ```bash
 python3 -m hr_toolkit archive-import \
   --input "档案移交表文件夹" \
-  --target "档案表汇总表.xlsx" \
   --output "outputs/archive_import_demo" \
   --dry-run
+```
+
+按公司生成独立档案表：
+
+```bash
+python3 -m hr_toolkit archive-export \
+  --summary "档案表汇总表.xlsx" \
+  --output "outputs/archive_export_demo"
+```
+
+追加到已有公司档案表：
+
+```bash
+python3 -m hr_toolkit archive-export \
+  --summary "档案表汇总表.xlsx" \
+  --existing "已有公司档案表文件夹" \
+  --output "outputs/archive_export_demo"
 ```
 
 人员资料文件夹改名预览：
@@ -277,13 +313,13 @@ CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 命令行版调试包：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone hr_toolkit_app.py
 ```
 
 给人事双击使用的桌面版：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone hr_toolkit_app.py
 ```
 
 自动更新程序：

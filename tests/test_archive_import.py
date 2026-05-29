@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
+import shutil
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from hr_toolkit.tools.archive_import import import_archive_transfers
+from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
 
 
 class ArchiveImportTest(unittest.TestCase):
@@ -44,6 +46,11 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(ws2.cell(4, 2).value, "已存在")
             self.assertEqual(ws2.cell(4, 12).value, "√")
             self.assertEqual(ws2.cell(4, 19).value, 4)
+
+            ws3 = wb["公司3"]
+            self.assertEqual(ws3.cell(4, 2).value, "张五")
+            self.assertIsNone(ws3.cell(4, 12).value)
+            self.assertIsNone(ws3.cell(4, 19).value)
 
     def test_dry_run_does_not_write_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,6 +90,100 @@ class ArchiveImportTest(unittest.TestCase):
             names = [ws.cell(row, 2).value for row in range(4, 8)]
             self.assertEqual(names.count("张三"), 1)
             wb.close()
+
+    def test_import_from_zip_with_default_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "茂名项目部人事档案移交表.xlsx"
+            archive = root / "移交表.zip"
+            output_dir = root / "output"
+            _write_transfer_file(source)
+            with zipfile.ZipFile(archive, "w") as zip_file:
+                zip_file.write(source, arcname=source.name)
+
+            result = import_archive_transfers([archive], None, output_dir)
+
+            self.assertTrue(result.using_default_template)
+            self.assertEqual(result.source_record_count, 3)
+            self.assertEqual(result.inserted_count, 3)
+            self.assertTrue(result.output_file and result.output_file.exists())
+            wb = load_workbook(result.output_file, data_only=False)
+            self.assertNotIn("模板", wb.sheetnames)
+            self.assertIn("公司1", wb.sheetnames)
+            self.assertIn("公司2", wb.sheetnames)
+            self.assertIn("公司3", wb.sheetnames)
+            wb.close()
+
+    def test_export_company_archive_tables_from_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_file = root / "茂名项目部人事档案移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            import_output = root / "import"
+            export_output = root / "export"
+            _write_transfer_file(input_file)
+            _write_summary_file(target)
+            imported = import_archive_transfers(input_file, target, import_output)
+
+            result = export_company_archive_tables(imported.output_file, export_output)
+
+            self.assertEqual(result.company_counts["公司1"], 2)
+            self.assertEqual(result.company_counts["公司2"], 1)
+            self.assertEqual(result.company_counts["公司3"], 1)
+            self.assertEqual(len(result.output_files), 3)
+            self.assertTrue((export_output / "公司1-档案表.xlsx").exists())
+            wb = load_workbook(export_output / "公司3-档案表.xlsx", data_only=False)
+            self.assertEqual(wb.sheetnames, ["公司3"])
+            self.assertEqual(wb["公司3"].cell(4, 2).value, "张五")
+            wb.close()
+
+    def test_export_appends_existing_archive_and_creates_missing_company_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_file = root / "茂名项目部人事档案移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            import_output = root / "import"
+            existing_dir = root / "existing"
+            export_output = root / "export"
+            existing_dir.mkdir()
+            _write_transfer_file(input_file)
+            imported = import_archive_transfers(input_file, None, import_output)
+            existing_company1 = existing_dir / "公司1档案表.xlsx"
+            _write_existing_company_archive(existing_company1)
+
+            result = export_company_archive_tables(imported.output_file, export_output, existing_archive_path=existing_dir)
+
+            self.assertEqual(result.created_count, 2)
+            self.assertEqual(result.inserted_count, 3)
+            self.assertEqual(result.updated_count, 0)
+            self.assertEqual(result.skipped_count, 0)
+            self.assertTrue((export_output / "公司1-档案表.xlsx").exists())
+            self.assertTrue((export_output / "公司2-档案表.xlsx").exists())
+            self.assertTrue((export_output / "公司3-档案表.xlsx").exists())
+
+            wb1 = load_workbook(export_output / "公司1-档案表.xlsx", data_only=False)
+            ws1 = wb1["公司1"]
+            self.assertEqual(ws1["A1"].value, "公司1人员档案编号表")
+            self.assertEqual(ws1.cell(4, 2).value, "旧员工")
+            self.assertEqual(ws1.cell(4, 3).value, "111111199901019999")
+            self.assertEqual(ws1.cell(5, 2).value, "张三")
+            self.assertEqual(ws1.cell(5, 1).value, "11")
+            self.assertEqual(ws1.cell(5, 4).value, '=MIDB(C5,7,4)&"-"&MIDB(C5,11,2)&"-"&MIDB(C5,13,2)')
+            self.assertEqual(ws1.cell(5, 9).value, '=A5&"-"&TEXT(G5,"00000000")&"-"&TEXT(J5,"00")&"-"&H5')
+            self.assertEqual(ws1.cell(5, 2).alignment.horizontal, "center")
+            self.assertEqual(ws1.cell(5, 2).border.left.style, "thin")
+            self.assertFalse(ws1.cell(5, 2).font.bold)
+            wb1.close()
+
+            wb3 = load_workbook(export_output / "公司3-档案表.xlsx", data_only=False)
+            ws3 = wb3["公司3"]
+            self.assertEqual(ws3["A1"].value, "公司3人员档案编号表")
+            self.assertEqual(ws3.cell(4, 2).value, "张五")
+            self.assertEqual(ws3.cell(4, 1).value, "11")
+            self.assertEqual(ws3.cell(4, 2).alignment.horizontal, "center")
+            self.assertEqual(ws3.cell(4, 2).border.left.style, "thin")
+            self.assertFalse(ws3.cell(4, 2).font.bold)
+            wb3.close()
 
 
 def _write_transfer_file(path: Path, *, duplicate_first: bool = False) -> None:
@@ -124,6 +225,18 @@ def _write_transfer_file(path: Path, *, duplicate_first: bool = False) -> None:
         for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index).value = value
     wb.save(path)
+
+
+def _write_existing_company_archive(path: Path) -> None:
+    template = Path(__file__).resolve().parents[1] / "hr_toolkit" / "templates" / "archive_company_template.xlsx"
+    shutil.copyfile(template, path)
+    wb = load_workbook(path)
+    ws = wb["公司1"]
+    ws.cell(4, 1).value = "11"
+    ws.cell(4, 2).value = "旧员工"
+    ws.cell(4, 3).value = "111111199901019999"
+    wb.save(path)
+    wb.close()
 
 
 def _write_summary_file(path: Path) -> None:

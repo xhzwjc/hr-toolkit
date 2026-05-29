@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import shutil
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
@@ -144,6 +146,30 @@ class SalaryMergeTest(unittest.TestCase):
             ws = wb["汇总"]
             self.assertEqual(ws["I3"].value, 202606)
             self.assertEqual(ws["I5"].value, 1200)
+
+    def test_merge_accepts_xls_files_after_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            input_dir.mkdir()
+            xlsx_file = input_dir / "河源项目部工资表_202607.xlsx"
+            xls_file = input_dir / "河源项目部工资表_202607.xls"
+            _write_salary_file(xlsx_file, [("员工1", "44162219901007667X", 900)])
+            shutil.move(xlsx_file, xls_file)
+
+            def fake_convert(source: Path, output_path: Path) -> None:
+                shutil.copyfile(source, output_path)
+
+            with patch("hr_toolkit.common.excel_compat._convert_xls_to_xlsx", side_effect=fake_convert):
+                result = merge_monthly_salary(input_dir, output_dir)
+
+            self.assertEqual(result.source_files[0].endswith(".xlsx"), True)
+            wb = load_workbook(result.output_file, data_only=True)
+            ws = wb["汇总"]
+            self.assertEqual(ws["J3"].value, 202607)
+            self.assertEqual(ws["J5"].value, 900)
+            wb.close()
 
 
 def _write_salary_file(

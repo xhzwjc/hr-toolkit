@@ -26,7 +26,7 @@ from hr_toolkit.tools.folder_rename import (
     MODE_REPLACE,
     rename_person_folders,
 )
-from hr_toolkit.tools.archive_import import import_archive_transfers
+from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
 from hr_toolkit.tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from hr_toolkit.tools.salary_merge import merge_monthly_salary
 from hr_toolkit.tools.salary_split import split_salary_by_company
@@ -82,6 +82,11 @@ class HRToolkitApp:
         self.change_form_state: dict[str, tuple[str, str, list[Path] | None]] = {
             "merge": ("", "", None),
             "roster": ("", "", None),
+        }
+        self.archive_mode = "import"
+        self.archive_form_state: dict[str, tuple[str, str, list[Path] | None]] = {
+            "import": ("", "", None),
+            "export": ("", "", None),
         }
         self.rename_mode = StringVar(value="追加文字")
         self.rename_target_label = StringVar(value="姓名（可不填）")
@@ -665,15 +670,22 @@ class HRToolkitApp:
             return
         if self.current_tool == "personnel_change_merge":
             self._save_change_form_state(self.change_mode)
+        if self.current_tool == "archive_import":
+            self._save_archive_form_state(self.archive_mode)
         self.current_tool = tool_id
         if tool_id == "personnel_change_merge":
             self.change_mode = "merge"
             self._load_change_form_state("merge")
             if hasattr(self, "change_tabs"):
                 self.change_tabs.select(0)
+        if tool_id == "archive_import":
+            self.archive_mode = "import"
+            self._load_archive_form_state("import")
+            if hasattr(self, "change_tabs"):
+                self.change_tabs.select(0)
         self._refresh_nav_buttons()
         self.last_output_dir = None
-        if tool_id != "personnel_change_merge":
+        if tool_id not in {"personnel_change_merge", "archive_import"}:
             self.input_path.set("")
             self.summary_path.set("")
             self.change_input_paths = None
@@ -695,15 +707,32 @@ class HRToolkitApp:
         self.summary_path.set(summary_text)
         self.change_input_paths = input_paths
 
+    def _save_archive_form_state(self, mode: str) -> None:
+        self.archive_form_state[mode] = (self.input_path.get(), self.summary_path.get(), self.change_input_paths)
+
+    def _load_archive_form_state(self, mode: str) -> None:
+        input_text, summary_text, input_paths = self.archive_form_state.get(mode, ("", "", None))
+        self.input_path.set(input_text)
+        self.summary_path.set(summary_text)
+        self.change_input_paths = input_paths
+
     def _on_change_tab_changed(self, _event=None) -> None:
-        if self.current_tool != "personnel_change_merge":
+        if self.current_tool not in {"personnel_change_merge", "archive_import"}:
             return
-        selected_mode = "roster" if self.change_tabs.index("current") == 1 else "merge"
-        if selected_mode == self.change_mode:
-            return
-        self._save_change_form_state(self.change_mode)
-        self.change_mode = selected_mode
-        self._load_change_form_state(selected_mode)
+        if self.current_tool == "archive_import":
+            selected_mode = "export" if self.change_tabs.index("current") == 1 else "import"
+            if selected_mode == self.archive_mode:
+                return
+            self._save_archive_form_state(self.archive_mode)
+            self.archive_mode = selected_mode
+            self._load_archive_form_state(selected_mode)
+        else:
+            selected_mode = "roster" if self.change_tabs.index("current") == 1 else "merge"
+            if selected_mode == self.change_mode:
+                return
+            self._save_change_form_state(self.change_mode)
+            self.change_mode = selected_mode
+            self._load_change_form_state(selected_mode)
         self._set_tool_texts()
         self.last_output_dir = None
         self._clear_log()
@@ -721,9 +750,9 @@ class HRToolkitApp:
     def _set_tool_texts(self) -> None:
         if self.current_tool == "salary_merge":
             self.tool_title.set("需求5：多月工资合并个人薪资汇总")
-            self.tool_description.set("选择工资表文件夹；如已有汇总表，可一并选择后追加新月份。")
-            self.input_label.set("工资表文件夹")
-            self.choose_input_text.set("选择文件夹")
+            self.tool_description.set("选择工资表文件、压缩包或文件夹；如已有汇总表，可一并选择后追加新月份。")
+            self.input_label.set("工资表文件/文件夹")
+            self.choose_input_text.set("选择")
             self.summary_label.set("已有汇总表（可选）")
             self.summary_button_text.set("选择汇总表")
             self.run_button_text.set("开始合并")
@@ -752,13 +781,21 @@ class HRToolkitApp:
             self.summary_button_text.set("选择")
             self.run_button_text.set("预览")
         elif self.current_tool == "archive_import":
-            self.tool_title.set("需求7：档案移交表入库")
-            self.tool_description.set("选择项目档案移交表文件夹和档案汇总表，工具会按公司写入对应工作表。")
-            self.input_label.set("移交表文件夹")
-            self.choose_input_text.set("选择文件夹")
-            self.summary_label.set("档案汇总表")
-            self.summary_button_text.set("选择汇总表")
-            self.run_button_text.set("开始入库")
+            self.tool_title.set("需求7：档案入库与档案表")
+            if self.archive_mode == "export":
+                self.tool_description.set("选择档案汇总表、压缩包或文件夹，按公司写入已有档案表；没有已有表时自动新建。")
+                self.input_label.set("档案汇总输入")
+                self.choose_input_text.set("选择汇总表")
+                self.summary_label.set("已有公司档案表（可选）")
+                self.summary_button_text.set("选择档案表")
+                self.run_button_text.set("生成档案表")
+            else:
+                self.tool_description.set("选择项目档案移交表、压缩包或文件夹；可选已有档案汇总表，不选则新建。")
+                self.input_label.set("移交表文件/文件夹")
+                self.choose_input_text.set("选择")
+                self.summary_label.set("已有档案汇总表（可选）")
+                self.summary_button_text.set("选择汇总表")
+                self.run_button_text.set("开始入库")
         elif self.current_tool == "salary_split":
             self.tool_title.set("需求4：工资表按入职公司拆分")
             self.tool_description.set("选择一个包含“汇总表”和“明细表”的工资表，工具会按“入职公司”拆成多个公司文件。")
@@ -798,7 +835,8 @@ class HRToolkitApp:
         if self.current_tool == "salary_merge":
             return [
                 ("适用：把 1-12 个月工资表合成一张个人应发工资汇总表。", "strong"),
-                ("步骤：把月度工资表放进同一个文件夹，选择该文件夹；如已有前几月汇总表，再选择“已有汇总表”。", None),
+                ("步骤：可选择单个月度工资表、多个工资表、zip压缩包，或包含这些文件的文件夹。", None),
+                ("如已有前几月汇总表，再选择“已有汇总表”；不选则新建一张汇总表。", None),
                 ("点击“开始合并”后，结果会生成到保存位置下的新文件夹中。", None),
                 ("结果：按姓名、身份证号、月份合并；没有工资的月份填 0；已存在的人员月份不会覆盖。", None),
                 ("注意：工资表文件名或表内日期要能识别月份；重复人员或重复月份会在执行结果里提醒。", "warning"),
@@ -823,10 +861,18 @@ class HRToolkitApp:
                 ("注意：只处理增补表、离职、转正、调整；薪酬、产值和同行对比分析暂不处理。", "warning"),
             ]
         if self.current_tool == "archive_import":
+            if self.archive_mode == "export":
+                return [
+                    ("适用：把一个或多个档案汇总表写入各公司独立档案表。", "strong"),
+                    ("步骤：选择档案汇总表文件、多个文件、zip压缩包，或包含汇总表的文件夹。", None),
+                    ("如已有某个公司的档案表，可选择文件、zip压缩包或文件夹；不选或没匹配到时会按内置干净模板新建。", None),
+                    ("结果：按公司生成独立 Excel；已有身份证不重复新增，只补充空白字段。", None),
+                    ("注意：公司档案表会自动改公司名，新增行会补边框、居中和公式。", "warning"),
+                ]
             return [
                 ("适用：把项目部提交的人事档案移交表写入公司档案汇总表。", "strong"),
-                ("步骤：把移交表放到同一个文件夹，选择该文件夹；再选择档案汇总表。", None),
-                ("点击“开始入库”后，结果会生成到保存位置下的新文件夹中。", None),
+                ("步骤：可选择单个移交表、多个移交表、zip压缩包，或包含这些文件的文件夹。", None),
+                ("已有档案汇总表可不选；不选时工具会用内置空模板新建一份汇总表。", None),
                 ("结果：按“公司”写入对应工作表；身份证已存在时不重复新增，只补充空白材料字段。", None),
                 ("注意：编号会从文件名或表头标题识别项目地区，如“茂名项目部”自动填 11；识别不到会留空并提醒。", "warning"),
             ]
@@ -852,10 +898,17 @@ class HRToolkitApp:
         ]
 
     def _update_change_tabs_visibility(self) -> None:
-        if self.current_tool == "personnel_change_merge":
+        if self.current_tool in {"personnel_change_merge", "archive_import"}:
+            if self.current_tool == "archive_import":
+                self.change_tabs.tab(0, text="档案入库")
+                self.change_tabs.tab(1, text="档案表生成")
+                target_index = 1 if self.archive_mode == "export" else 0
+            else:
+                self.change_tabs.tab(0, text="异动表汇总")
+                self.change_tabs.tab(1, text="花名册更新")
+                target_index = 1 if self.change_mode == "roster" else 0
             if not self.change_tabs.winfo_ismapped():
                 self.change_tabs.pack(fill="x", pady=(0, 16), before=self.form)
-            target_index = 1 if self.change_mode == "roster" else 0
             if self.change_tabs.index("current") != target_index:
                 self.change_tabs.select(target_index)
             return
@@ -870,9 +923,41 @@ class HRToolkitApp:
         self.summary_entry_widget.grid_remove()
 
     def _update_change_picker_buttons(self) -> None:
-        if self.current_tool == "personnel_change_merge":
+        if self.current_tool in {"salary_merge", "personnel_change_merge", "archive_import"}:
             self.input_choose_button.pack_forget()
             self.summary_choose_button.pack_forget()
+            if self.current_tool == "salary_merge":
+                self.change_folder_zip_button.configure(text="文件夹/压缩包", command=self._choose_salary_folder_or_zip)
+                self.change_file_button.configure(text="文件", command=self._choose_salary_files)
+                self.change_summary_folder_button.pack_forget()
+                self.change_summary_file_button.pack_forget()
+                if not self.change_file_button.winfo_ismapped():
+                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
+                if not self.change_folder_zip_button.winfo_ismapped():
+                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
+                if not self.summary_choose_button.winfo_ismapped():
+                    self.summary_choose_button.pack(side=RIGHT, padx=(4, 0))
+                return
+            if self.current_tool == "archive_import":
+                if self.archive_mode == "export":
+                    self.change_folder_zip_button.configure(text="文件夹/压缩包", command=self._choose_archive_export_summary_folder_or_zip)
+                    self.change_file_button.configure(text="文件", command=self._choose_archive_export_summary_file)
+                    self.change_summary_folder_button.configure(text="文件夹/压缩包", command=self._choose_archive_export_existing_folder_or_zip)
+                    self.change_summary_file_button.configure(text="文件", command=self._choose_archive_export_existing_file)
+                else:
+                    self.change_folder_zip_button.configure(text="文件夹/压缩包", command=self._choose_archive_folder_or_zip)
+                    self.change_file_button.configure(text="文件", command=self._choose_archive_files)
+                    self.change_summary_file_button.configure(text="文件", command=self._choose_archive_summary_file)
+                    self.change_summary_folder_button.pack_forget()
+                if not self.change_file_button.winfo_ismapped():
+                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
+                if not self.change_folder_zip_button.winfo_ismapped():
+                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
+                if self.archive_mode == "export" and not self.change_summary_folder_button.winfo_ismapped():
+                    self.change_summary_folder_button.pack(side=RIGHT, padx=(4, 0))
+                if not self.change_summary_file_button.winfo_ismapped():
+                    self.change_summary_file_button.pack(side=RIGHT, padx=(4, 0))
+                return
             if self.change_mode == "roster":
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_roster_summary_folder)
                 self.change_file_button.configure(text="文件", command=self._choose_roster_summary_files)
@@ -952,13 +1037,15 @@ class HRToolkitApp:
 
     def _initial_log_text(self) -> str:
         if self.current_tool == "salary_merge":
-            return "请选择工资表文件夹和保存位置，然后点击“开始合并”。已有汇总表是可选项，用于追加新月份。"
+            return "请选择工资表文件、压缩包或文件夹和保存位置，然后点击“开始合并”。已有汇总表是可选项，用于追加新月份。"
         if self.current_tool == "personnel_change_merge":
             if self.change_mode == "roster":
                 return "请选择异动汇总表、人力资源花名册和保存位置，然后点击“更新花名册”。"
             return "请选择异动表文件或文件夹和保存位置，然后点击“开始汇总”。已有汇总表是可选项，用于追加新记录。"
         if self.current_tool == "archive_import":
-            return "请选择移交表文件夹、档案汇总表和保存位置，然后点击“开始入库”。"
+            if self.archive_mode == "export":
+                return "请选择档案汇总表、压缩包或文件夹和保存位置，然后点击“生成档案表”。已有公司档案表是可选项，用于追加。"
+            return "请选择移交表文件、压缩包或文件夹和保存位置，然后点击“开始入库”。已有档案汇总表是可选项。"
         if self.current_tool == "folder_rename":
             return "请选择人员文件夹目录，填写改名内容，然后点击“预览”。"
         if self.current_tool == "salary_split":
@@ -988,7 +1075,7 @@ class HRToolkitApp:
 
         filename = filedialog.askopenfilename(
             title="选择工资表",
-            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filename:
             self.input_path.set(filename)
@@ -1010,10 +1097,104 @@ class HRToolkitApp:
     def _choose_change_files(self) -> None:
         filenames = filedialog.askopenfilenames(
             title="选择异动表文件",
-            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
+
+    def _choose_salary_folder_or_zip(self) -> None:
+        zip_files = filedialog.askopenfilenames(
+            title="选择工资表压缩包",
+            filetypes=[("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+        )
+        if zip_files:
+            self._set_change_input_paths([Path(filename) for filename in zip_files])
+            return
+        directory = filedialog.askdirectory(title="选择工资表文件夹")
+        if directory:
+            self._set_change_input_paths([Path(directory)])
+
+    def _choose_salary_files(self) -> None:
+        filenames = filedialog.askopenfilenames(
+            title="选择工资表文件",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filenames:
+            self._set_change_input_paths([Path(filename) for filename in filenames])
+
+    def _choose_archive_folder_or_zip(self) -> None:
+        zip_files = filedialog.askopenfilenames(
+            title="选择档案移交表压缩包",
+            filetypes=[("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+        )
+        if zip_files:
+            self._set_change_input_paths([Path(filename) for filename in zip_files])
+            return
+        directory = filedialog.askdirectory(title="选择档案移交表文件夹")
+        if directory:
+            self._set_change_input_paths([Path(directory)])
+
+    def _choose_archive_files(self) -> None:
+        filenames = filedialog.askopenfilenames(
+            title="选择档案移交表文件",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filenames:
+            self._set_change_input_paths([Path(filename) for filename in filenames])
+
+    def _choose_archive_summary_file(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="选择已有档案汇总表",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filename:
+            self.summary_path.set(filename)
+
+    def _choose_archive_export_summary_file(self) -> None:
+        filenames = filedialog.askopenfilenames(
+            title="选择档案汇总表",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filenames:
+            self._set_change_input_paths([Path(filename) for filename in filenames])
+
+    def _choose_archive_export_summary_folder(self) -> None:
+        directory = filedialog.askdirectory(title="选择档案汇总表文件夹")
+        if directory:
+            self._set_change_input_paths([Path(directory)])
+
+    def _choose_archive_export_summary_folder_or_zip(self) -> None:
+        zip_files = filedialog.askopenfilenames(
+            title="选择档案汇总表压缩包",
+            filetypes=[("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+        )
+        if zip_files:
+            self._set_change_input_paths([Path(filename) for filename in zip_files])
+            return
+        self._choose_archive_export_summary_folder()
+
+    def _choose_archive_export_existing_file(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="选择已有公司档案表",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filename:
+            self.summary_path.set(filename)
+
+    def _choose_archive_export_existing_folder(self) -> None:
+        directory = filedialog.askdirectory(title="选择已有公司档案表文件夹")
+        if directory:
+            self.summary_path.set(directory)
+
+    def _choose_archive_export_existing_folder_or_zip(self) -> None:
+        zip_file = filedialog.askopenfilename(
+            title="选择已有公司档案表压缩包",
+            filetypes=[("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+        )
+        if zip_file:
+            self.summary_path.set(zip_file)
+            return
+        self._choose_archive_export_existing_folder()
 
     def _choose_roster_summary_folder(self) -> None:
         directory = filedialog.askdirectory(title="选择异动汇总表文件夹")
@@ -1023,7 +1204,7 @@ class HRToolkitApp:
     def _choose_roster_summary_files(self) -> None:
         filenames = filedialog.askopenfilenames(
             title="选择异动汇总表文件",
-            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -1045,7 +1226,7 @@ class HRToolkitApp:
     def _choose_change_summary_file(self) -> None:
         filename = filedialog.askopenfilename(
             title="选择已有异动汇总表",
-            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filename:
             self.summary_path.set(filename)
@@ -1053,7 +1234,7 @@ class HRToolkitApp:
     def _choose_roster_analysis_file(self) -> None:
         filename = filedialog.askopenfilename(
             title="选择人力资源花名册",
-            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filename:
             self.summary_path.set(filename)
@@ -1077,7 +1258,7 @@ class HRToolkitApp:
             title = "选择已有汇总表"
         filename = filedialog.askopenfilename(
             title=title,
-            filetypes=[("Excel 工作簿", "*.xlsx"), ("所有文件", "*.*")],
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filename:
             self.summary_path.set(filename)
@@ -1087,7 +1268,10 @@ class HRToolkitApp:
             self._run_folder_rename()
             return
         if self.current_tool == "archive_import":
-            self._run_archive_import()
+            if self.archive_mode == "export":
+                self._run_archive_export()
+            else:
+                self._run_archive_import()
             return
         if self.current_tool == "personnel_change_merge":
             if self.change_mode == "roster":
@@ -1110,8 +1294,8 @@ class HRToolkitApp:
         if not input_path.exists():
             messagebox.showwarning("文件不存在", "选择的工资表文件不存在，请重新选择。")
             return
-        if input_path.suffix.lower() != ".xlsx":
-            messagebox.showwarning("格式不支持", "当前工具只支持 .xlsx 工资表。")
+        if input_path.suffix.lower() not in {".xlsx", ".xls"}:
+            messagebox.showwarning("格式不支持", "当前工具只支持 .xlsx 或 .xls 工资表。")
             return
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
@@ -1135,18 +1319,24 @@ class HRToolkitApp:
         summary_text = self.summary_path.get().strip()
         summary_path = Path(summary_text) if summary_text else None
         output_text = self.output_dir.get().strip()
-        if not input_text:
-            messagebox.showwarning("缺少文件夹", "请先选择工资表文件夹。")
+        input_paths = self.change_input_paths
+        if not input_paths and input_text and not input_text.startswith("已选择 "):
+            input_paths = [Path(input_text)]
+        if not input_paths:
+            messagebox.showwarning("缺少输入", "请先选择工资表文件、压缩包或文件夹。")
             return
-        input_dir = Path(input_text)
-        if not input_dir.exists() or not input_dir.is_dir():
-            messagebox.showwarning("文件夹不存在", "选择的工资表文件夹不存在，请重新选择。")
-            return
+        for input_path in input_paths:
+            if not input_path.exists():
+                messagebox.showwarning("输入不存在", "选择的工资表文件、压缩包或文件夹不存在，请重新选择。")
+                return
+            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
+                messagebox.showwarning("格式不支持", "工资表文件只支持 .xlsx、.xls 或 .zip。")
+                return
         if summary_path is not None and not summary_path.exists():
             messagebox.showwarning("汇总表不存在", "选择的已有汇总表不存在，请重新选择。")
             return
-        if summary_path is not None and summary_path.suffix.lower() != ".xlsx":
-            messagebox.showwarning("格式不支持", "已有汇总表只支持 .xlsx 文件。")
+        if summary_path is not None and summary_path.suffix.lower() not in {".xlsx", ".xls"}:
+            messagebox.showwarning("格式不支持", "已有汇总表只支持 .xlsx 或 .xls 文件。")
             return
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
@@ -1160,7 +1350,7 @@ class HRToolkitApp:
 
         worker = threading.Thread(
             target=self._salary_merge_worker,
-            args=(input_dir, output_dir, summary_path),
+            args=(input_paths, output_dir, summary_path),
             daemon=True,
         )
         worker.start()
@@ -1180,14 +1370,14 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的异动表文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".zip"}:
-                messagebox.showwarning("格式不支持", "异动表文件只支持 .xlsx 或 .zip。")
+            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
+                messagebox.showwarning("格式不支持", "异动表文件只支持 .xlsx、.xls 或 .zip。")
                 return
         if summary_path is not None and not summary_path.exists():
             messagebox.showwarning("汇总表不存在", "选择的已有异动汇总表不存在，请重新选择。")
             return
-        if summary_path is not None and summary_path.is_file() and summary_path.suffix.lower() != ".xlsx":
-            messagebox.showwarning("格式不支持", "已有异动汇总表只支持 .xlsx 文件或文件夹。")
+        if summary_path is not None and summary_path.is_file() and summary_path.suffix.lower() not in {".xlsx", ".xls"}:
+            messagebox.showwarning("格式不支持", "已有异动汇总表只支持 .xlsx、.xls 文件或文件夹。")
             return
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
@@ -1220,8 +1410,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("汇总表不存在", "选择的异动汇总表文件或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() != ".xlsx":
-                messagebox.showwarning("格式不支持", "异动汇总表只支持 .xlsx 文件或文件夹。")
+            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls"}:
+                messagebox.showwarning("格式不支持", "异动汇总表只支持 .xlsx、.xls 文件或文件夹。")
                 return
         if not roster_text:
             messagebox.showwarning("缺少花名册", "请先选择人力资源花名册。")
@@ -1230,8 +1420,8 @@ class HRToolkitApp:
         if not roster_path.exists() or not roster_path.is_file():
             messagebox.showwarning("花名册不存在", "选择的人力资源花名册不存在，请重新选择。")
             return
-        if roster_path.suffix.lower() != ".xlsx":
-            messagebox.showwarning("格式不支持", "人力资源花名册目前只支持 .xlsx 文件。")
+        if roster_path.suffix.lower() not in {".xlsx", ".xls"}:
+            messagebox.showwarning("格式不支持", "人力资源花名册目前只支持 .xlsx 或 .xls 文件。")
             return
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
@@ -1251,23 +1441,26 @@ class HRToolkitApp:
     def _run_archive_import(self) -> None:
         input_text = self.input_path.get().strip()
         target_text = self.summary_path.get().strip()
+        target_path = Path(target_text) if target_text else None
         output_text = self.output_dir.get().strip()
-        if not input_text:
-            messagebox.showwarning("缺少文件夹", "请先选择档案移交表文件夹。")
+        input_paths = self.change_input_paths
+        if not input_paths and input_text and not input_text.startswith("已选择 "):
+            input_paths = [Path(input_text)]
+        if not input_paths:
+            messagebox.showwarning("缺少输入", "请先选择档案移交表文件、压缩包或文件夹。")
             return
-        input_path = Path(input_text)
-        if not input_path.exists() or not input_path.is_dir():
-            messagebox.showwarning("文件夹不存在", "选择的档案移交表文件夹不存在，请重新选择。")
-            return
-        if not target_text:
-            messagebox.showwarning("缺少汇总表", "请先选择档案汇总表。")
-            return
-        target_path = Path(target_text)
-        if not target_path.exists() or not target_path.is_file():
+        for input_path in input_paths:
+            if not input_path.exists():
+                messagebox.showwarning("输入不存在", "选择的档案移交表文件、压缩包或文件夹不存在，请重新选择。")
+                return
+            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
+                messagebox.showwarning("格式不支持", "档案移交表文件只支持 .xlsx、.xls 或 .zip。")
+                return
+        if target_path is not None and (not target_path.exists() or not target_path.is_file()):
             messagebox.showwarning("汇总表不存在", "选择的档案汇总表不存在，请重新选择。")
             return
-        if target_path.suffix.lower() != ".xlsx":
-            messagebox.showwarning("格式不支持", "档案汇总表目前只支持 .xlsx 文件。")
+        if target_path is not None and target_path.suffix.lower() not in {".xlsx", ".xls"}:
+            messagebox.showwarning("格式不支持", "档案汇总表目前只支持 .xlsx 或 .xls 文件。")
             return
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
@@ -1279,7 +1472,46 @@ class HRToolkitApp:
 
         worker = threading.Thread(
             target=self._archive_import_worker,
-            args=(input_path, target_path, output_dir),
+            args=(input_paths, target_path, output_dir),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_archive_export(self) -> None:
+        input_text = self.input_path.get().strip()
+        existing_text = self.summary_path.get().strip()
+        output_text = self.output_dir.get().strip()
+        input_paths = self.change_input_paths
+        if not input_paths and input_text and not input_text.startswith("已选择 "):
+            input_paths = [Path(input_text)]
+        if not input_paths:
+            messagebox.showwarning("缺少汇总表", "请先选择档案汇总表。")
+            return
+        for summary_path in input_paths:
+            if not summary_path.exists():
+                messagebox.showwarning("汇总表不存在", "选择的档案汇总表不存在，请重新选择。")
+                return
+            if summary_path.is_file() and summary_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
+                messagebox.showwarning("格式不支持", "档案汇总表目前只支持 .xlsx、.xls 或 .zip。")
+                return
+        existing_path = Path(existing_text) if existing_text else None
+        if existing_path is not None and not existing_path.exists():
+            messagebox.showwarning("档案表不存在", "选择的已有公司档案表不存在，请重新选择。")
+            return
+        if existing_path is not None and existing_path.is_file() and existing_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
+            messagebox.showwarning("格式不支持", "已有公司档案表目前只支持 .xlsx、.xls 或 .zip。")
+            return
+        if not output_text:
+            messagebox.showwarning("缺少目录", "请选择保存位置。")
+            return
+        output_dir = make_result_output_dir(Path(output_text))
+        self.run_button.config(state="disabled")
+        self._clear_log()
+        self._write_log("开始生成档案表，请稍候...")
+
+        worker = threading.Thread(
+            target=self._archive_export_worker,
+            args=(input_paths, output_dir, existing_path),
             daemon=True,
         )
         worker.start()
@@ -1337,7 +1569,7 @@ class HRToolkitApp:
             return
         self.status_queue.put(("success", result))
 
-    def _salary_merge_worker(self, input_dir: Path, output_dir: Path, summary_path: Path | None) -> None:
+    def _salary_merge_worker(self, input_dir: Path | list[Path], output_dir: Path, summary_path: Path | None) -> None:
         try:
             result = merge_monthly_salary(input_dir, output_dir, existing_summary_path=summary_path)
         except Exception as exc:
@@ -1361,9 +1593,17 @@ class HRToolkitApp:
             return
         self.status_queue.put(("success", result))
 
-    def _archive_import_worker(self, input_path: Path, target_path: Path, output_dir: Path) -> None:
+    def _archive_import_worker(self, input_path: Path | list[Path], target_path: Path | None, output_dir: Path) -> None:
         try:
             result = import_archive_transfers(input_path, target_path, output_dir)
+        except Exception as exc:
+            self.status_queue.put(("error", exc))
+            return
+        self.status_queue.put(("success", result))
+
+    def _archive_export_worker(self, summary_path: Path | list[Path], output_dir: Path, existing_archive_path: Path | None) -> None:
+        try:
+            result = export_company_archive_tables(summary_path, output_dir, existing_archive_path=existing_archive_path)
         except Exception as exc:
             self.status_queue.put(("error", exc))
             return
@@ -1465,18 +1705,34 @@ class HRToolkitApp:
                         self._write_log(f"提醒：{warning}")
                     message = "异动表已汇总完成，可以打开结果文件夹查看。"
             elif self.current_tool == "archive_import":
-                self._write_log("入库完成。")
-                self._write_log(f"识别文件数：{payload['source_file_count']}")
-                self._write_log(f"识别记录数：{payload['source_record_count']}")
-                self._write_log(f"新增记录数：{payload['inserted_count']}")
-                self._write_log(f"补充已有记录数：{payload['updated_count']}")
-                self._write_log(f"已存在未修改记录数：{payload['skipped_count']}")
-                for company, count in payload["company_counts"].items():
-                    self._write_log(f"- {company}：{count} 条")
-                self._write_log(f"输出：{payload['output_file']}")
-                for warning in payload["warnings"]:
-                    self._write_log(f"提醒：{warning}")
-                message = "档案入库已完成，可以打开结果文件夹查看。"
+                if payload.get("tool_name") == "需求7-档案表生成":
+                    self._write_log("档案表生成完成。")
+                    self._write_log(f"识别公司数：{len(payload['company_counts'])}")
+                    self._write_log(f"新建公司档案表数：{payload['created_count']}")
+                    self._write_log(f"新增记录数：{payload['inserted_count']}")
+                    self._write_log(f"补充已有记录数：{payload['updated_count']}")
+                    self._write_log(f"已存在未修改记录数：{payload['skipped_count']}")
+                    for company, count in payload["company_counts"].items():
+                        self._write_log(f"- {company}：{count} 条")
+                    for output_file in payload.get("output_files", []):
+                        self._write_log(f"输出：{output_file}")
+                    for warning in payload["warnings"]:
+                        self._write_log(f"提醒：{warning}")
+                    message = "档案表已生成完成，可以打开结果文件夹查看。"
+                else:
+                    self._write_log("入库完成。")
+                    self._write_log("汇总表来源：{}".format(payload["target_path"] or "内置空模板"))
+                    self._write_log(f"识别文件数：{payload['source_file_count']}")
+                    self._write_log(f"识别记录数：{payload['source_record_count']}")
+                    self._write_log(f"新增记录数：{payload['inserted_count']}")
+                    self._write_log(f"补充已有记录数：{payload['updated_count']}")
+                    self._write_log(f"已存在未修改记录数：{payload['skipped_count']}")
+                    for company, count in payload["company_counts"].items():
+                        self._write_log(f"- {company}：{count} 条")
+                    self._write_log(f"输出：{payload['output_file']}")
+                    for warning in payload["warnings"]:
+                        self._write_log(f"提醒：{warning}")
+                    message = "档案入库已完成，可以打开结果文件夹查看。"
             elif self.current_tool == "salary_split":
                 self._write_log("拆分完成。")
                 self._write_log(f"识别公司数：{payload['company_count']}")
@@ -1500,6 +1756,8 @@ class HRToolkitApp:
             else "汇总"
             if self.current_tool == "personnel_change_merge"
             else "入库"
+            if self.current_tool == "archive_import" and self.archive_mode == "import"
+            else "生成"
             if self.current_tool == "archive_import"
             else "改名"
             if self.current_tool == "folder_rename"
@@ -1587,7 +1845,7 @@ def default_output_parent_dir(tool: str) -> Path:
     elif tool == "personnel_change_merge":
         folder_name = "异动表汇总结果"
     elif tool == "archive_import":
-        folder_name = "档案入库结果"
+        folder_name = "档案处理结果"
     else:
         folder_name = "工资表拆分结果"
     return desktop_dir() / folder_name

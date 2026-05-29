@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import tempfile
+import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -12,6 +14,8 @@ from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
+
+from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 
 
 TOOL_NAME = "需求5-多月工资合并个人薪资汇总"
@@ -89,14 +93,15 @@ class SalarySourceLayout:
 
 
 def merge_monthly_salary(
-    input_dir: str | Path,
+    input_dir: str | Path | list[str | Path],
     output_dir: str | Path,
     *,
     existing_summary_path: str | Path | None = None,
     year: int | None = None,
     dry_run: bool = False,
 ) -> SalaryMergeResult:
-    input_dir = Path(input_dir).expanduser().resolve()
+    input_paths = _normalize_input_paths(input_dir)
+    display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     output_dir = Path(output_dir).expanduser().resolve()
     summary_path = None
     if existing_summary_path:
@@ -104,78 +109,136 @@ def merge_monthly_salary(
         if not summary_path.exists() or not summary_path.is_file():
             raise FileNotFoundError(f"已有汇总表不存在：{summary_path}")
 
-    if not input_dir.exists() or not input_dir.is_dir():
-        raise FileNotFoundError(f"工资表文件夹不存在：{input_dir}")
+    for input_path in input_paths:
+        if not input_path.exists():
+            raise FileNotFoundError(f"工资表文件、压缩包或文件夹不存在：{input_path}")
 
-    salary_files = _find_salary_files(input_dir, summary_path)
-    if not salary_files:
-        raise ValueError("未在所选文件夹中找到 .xlsx 工资表")
-
-    records: list[SalaryRecord] = []
     warnings: list[str] = []
-    source_files: list[str] = []
-    for file_path in salary_files:
-        try:
-            month = _detect_month(file_path)
-            file_records, file_warnings = _read_salary_file(file_path, month)
-        except ValueError as exc:
-            warnings.append(f"{file_path.name} 不是有效月度工资表，已跳过：{exc}")
-            continue
-        records.extend(file_records)
-        warnings.extend(file_warnings)
-        source_files.append(str(file_path))
+    with tempfile.TemporaryDirectory(prefix="hr_salary_merge_") as temp_root:
+        temp_dir = Path(temp_root)
+        working_summary_path = None if summary_path is None else ensure_xlsx_workbook(summary_path, temp_dir)
+        salary_files = _find_salary_files(input_paths, temp_dir, summary_path, warnings)
+        if not salary_files:
+            raise ValueError("未在所选路径中找到 .xlsx 或 .xls 工资表")
 
-    if not records:
-        raise ValueError("未识别到可合并的月度工资记录，请确认文件夹中包含需求4格式的月度工资表")
+        records: list[SalaryRecord] = []
+        source_files: list[str] = []
+        for file_path in salary_files:
+            try:
+                month = _detect_month(file_path)
+                file_records, file_warnings = _read_salary_file(file_path, month)
+            except ValueError as exc:
+                warnings.append(f"{file_path.name} 不是有效月度工资表，已跳过：{exc}")
+                continue
+            records.extend(file_records)
+            warnings.extend(file_warnings)
+            source_files.append(str(file_path))
 
-    existing_employees: list[MergedEmployee] | None = None
-    existing_months: list[str] | None = None
-    if summary_path is not None:
-        existing_months, existing_employees, summary_warnings = _read_existing_summary(summary_path)
-        warnings.extend(summary_warnings)
+        if not records:
+            raise ValueError("未识别到可合并的月度工资记录，请确认路径中包含需求4格式的月度工资表")
 
-    months = _build_output_months(records, year, existing_months)
-    employees, merge_warnings, applied_count, skipped_count = _merge_records(
-        records,
-        months,
-        existing_employees=existing_employees,
-    )
-    warnings.extend(merge_warnings)
+        existing_employees: list[MergedEmployee] | None = None
+        existing_months: list[str] | None = None
+        if working_summary_path is not None:
+            existing_months, existing_employees, summary_warnings = _read_existing_summary(working_summary_path)
+            warnings.extend(summary_warnings)
 
-    result = SalaryMergeResult(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        existing_summary_path=summary_path,
-        dry_run=dry_run,
-        source_files=source_files,
-        months=months,
-        employee_count=len(employees),
-        record_count=len(records),
-        applied_record_count=applied_count,
-        skipped_record_count=skipped_count,
-        warnings=warnings,
-    )
+        months = _build_output_months(records, year, existing_months)
+        employees, merge_warnings, applied_count, skipped_count = _merge_records(
+            records,
+            months,
+            existing_employees=existing_employees,
+        )
+        warnings.extend(merge_warnings)
 
-    if dry_run:
+        result = SalaryMergeResult(
+            input_dir=display_input,
+            output_dir=output_dir,
+            existing_summary_path=summary_path,
+            dry_run=dry_run,
+            source_files=source_files,
+            months=months,
+            employee_count=len(employees),
+            record_count=len(records),
+            applied_record_count=applied_count,
+            skipped_record_count=skipped_count,
+            warnings=warnings,
+        )
+
+        if dry_run:
+            return result
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / "个人薪资汇总表.xlsx"
+        _write_output_workbook(output_file, employees, months)
+        result.output_file = output_file
         return result
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / "个人薪资汇总表.xlsx"
-    _write_output_workbook(output_file, employees, months)
-    result.output_file = output_file
-    return result
+
+def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
+    raw_paths = input_path if isinstance(input_path, list) else [input_path]
+    paths = [Path(path).expanduser().resolve() for path in raw_paths]
+    if not paths:
+        raise ValueError("请选择工资表文件、压缩包或文件夹。")
+    return paths
 
 
-def _find_salary_files(input_dir: Path, existing_summary_path: Path | None = None) -> list[Path]:
+def _find_salary_files(input_paths: list[Path], temp_dir: Path, existing_summary_path: Path | None = None, warnings: list[str] | None = None) -> list[Path]:
+    warnings = [] if warnings is None else warnings
     excluded = None if existing_summary_path is None else existing_summary_path.resolve()
-    return sorted(
-        path
-        for path in input_dir.glob("*.xlsx")
-        if path.is_file()
-        and not path.name.startswith("~$")
-        and path.name != "个人薪资汇总表.xlsx"
-        and (excluded is None or path.resolve() != excluded)
-    )
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for input_path in input_paths:
+        for path in _iter_salary_files(input_path, temp_dir, warnings):
+            if path.name == "个人薪资汇总表.xlsx":
+                continue
+            if excluded is not None and path.resolve() == excluded:
+                continue
+            working_path = ensure_xlsx_workbook(path, temp_dir)
+            resolved = working_path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(working_path)
+    return sorted(files)
+
+
+def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
+    if input_path.is_file():
+        suffix = input_path.suffix.lower()
+        if is_supported_excel_file(input_path):
+            return [input_path]
+        if suffix == ".zip":
+            return _extract_zip_salary_files(input_path, temp_dir, warnings)
+        return []
+    if not input_path.is_dir():
+        return []
+    files: list[Path] = []
+    for child in sorted(input_path.rglob("*")):
+        if not child.is_file() or child.name.startswith("~$"):
+            continue
+        if is_supported_excel_file(child):
+            files.append(child)
+        elif child.suffix.lower() == ".zip":
+            files.extend(_extract_zip_salary_files(child, temp_dir, warnings))
+    return files
+
+
+def _extract_zip_salary_files(zip_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
+    extract_dir = temp_dir / f"zip_{len(list(temp_dir.glob('zip_*'))) + 1}"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for member in archive.infolist():
+                target = extract_dir / member.filename
+                if not target.resolve().is_relative_to(extract_dir.resolve()):
+                    warnings.append(f"{zip_path.name} 中存在不安全路径，已跳过：{member.filename}")
+                    continue
+                archive.extract(member, extract_dir)
+    except Exception as exc:
+        warnings.append(f"{zip_path.name} 解压失败，已跳过：{exc}")
+        return []
+    return sorted(path for path in extract_dir.rglob("*") if path.is_file() and is_supported_excel_file(path))
 
 
 def _read_salary_file(file_path: Path, month: str) -> tuple[list[SalaryRecord], list[str]]:

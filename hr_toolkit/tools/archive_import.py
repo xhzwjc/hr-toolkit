@@ -1,23 +1,33 @@
 from __future__ import annotations
 
 import re
+import shutil
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from hr_toolkit.common.excel import apply_row_snapshot, clone_style, snapshot_row
+from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
+from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
 
 
 TOOL_NAME = "需求7-档案入库"
+EXPORT_TOOL_NAME = "需求7-档案表生成"
 OUTPUT_FILENAME = "档案表汇总表.xlsx"
+DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE = "archive_summary_template.xlsx"
+DEFAULT_ARCHIVE_COMPANY_TEMPLATE_RESOURCE = "archive_company_template.xlsx"
 HEADER_COMPANY = "公司"
 HEADER_NAME = "姓名"
 HEADER_ID_CARD = "身份证"
 HEADER_OTHER = "其他"
+PLACEHOLDER_SHEET_TITLES = {"模板", "公司……", "公司..."}
 
 REGION_CODES = {
     "总部": "00",
@@ -112,10 +122,11 @@ class ArchiveTransferRecord:
 @dataclass
 class ArchiveImportResult:
     input_path: Path
-    target_path: Path
+    target_path: Path | None
     output_dir: Path
     output_file: Path | None = None
     dry_run: bool = False
+    using_default_template: bool = False
     source_files: list[str] = field(default_factory=list)
     source_record_count: int = 0
     inserted_count: int = 0
@@ -128,10 +139,11 @@ class ArchiveImportResult:
         return {
             "tool_name": TOOL_NAME,
             "input_path": str(self.input_path),
-            "target_path": str(self.target_path),
+            "target_path": None if self.target_path is None else str(self.target_path),
             "output_dir": str(self.output_dir),
             "output_file": None if self.output_file is None else str(self.output_file),
             "dry_run": self.dry_run,
+            "using_default_template": self.using_default_template,
             "source_files": self.source_files,
             "source_file_count": len(self.source_files),
             "source_record_count": self.source_record_count,
@@ -139,6 +151,44 @@ class ArchiveImportResult:
             "updated_count": self.updated_count,
             "skipped_count": self.skipped_count,
             "company_counts": self.company_counts,
+            "warnings": self.warnings,
+        }
+
+
+@dataclass
+class ArchiveExportResult:
+    summary_path: Path
+    output_dir: Path
+    existing_archive_path: Path | None = None
+    output_files: list[Path] = field(default_factory=list)
+    dry_run: bool = False
+    summary_files: list[str] = field(default_factory=list)
+    existing_archive_files: list[str] = field(default_factory=list)
+    company_counts: dict[str, int] = field(default_factory=dict)
+    created_count: int = 0
+    inserted_count: int = 0
+    updated_count: int = 0
+    skipped_count: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": EXPORT_TOOL_NAME,
+            "summary_path": str(self.summary_path),
+            "existing_archive_path": None if self.existing_archive_path is None else str(self.existing_archive_path),
+            "output_dir": str(self.output_dir),
+            "output_files": [str(path) for path in self.output_files],
+            "output_file_count": len(self.output_files),
+            "dry_run": self.dry_run,
+            "summary_files": self.summary_files,
+            "summary_file_count": len(self.summary_files),
+            "existing_archive_files": self.existing_archive_files,
+            "existing_archive_file_count": len(self.existing_archive_files),
+            "company_counts": self.company_counts,
+            "created_count": self.created_count,
+            "inserted_count": self.inserted_count,
+            "updated_count": self.updated_count,
+            "skipped_count": self.skipped_count,
             "warnings": self.warnings,
         }
 
@@ -153,78 +203,237 @@ class ArchiveSheetLayout:
 
 
 def import_archive_transfers(
-    input_path: str | Path,
-    target_path: str | Path,
+    input_path: str | Path | list[str | Path],
+    target_path: str | Path | None,
     output_dir: str | Path,
     *,
     dry_run: bool = False,
 ) -> ArchiveImportResult:
-    input_path = Path(input_path).expanduser().resolve()
-    target_path = Path(target_path).expanduser().resolve()
+    input_paths = _normalize_input_paths(input_path)
+    display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
+    target = None if target_path is None else Path(target_path).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
-    if not input_path.exists():
-        raise FileNotFoundError(f"档案移交表不存在：{input_path}")
-    if not target_path.exists() or not target_path.is_file():
-        raise FileNotFoundError(f"档案汇总表不存在：{target_path}")
-    if target_path.suffix.lower() != ".xlsx":
-        raise ValueError("档案汇总表目前只支持 .xlsx 文件。")
-
-    source_files = _find_source_files(input_path)
-    if not source_files:
-        raise ValueError("未找到 .xlsx 档案移交表。")
-
-    records: list[ArchiveTransferRecord] = []
     warnings: list[str] = []
-    source_names: list[str] = []
-    for source_file in source_files:
-        try:
-            file_records, file_warnings = _read_transfer_file(source_file)
-        except ValueError:
-            if input_path.is_file():
-                raise
-            warnings.append(f"{source_file.name} 不是档案移交表，已跳过。")
-            continue
-        warnings.extend(file_warnings)
-        if file_records:
-            source_names.append(str(source_file))
-        records.extend(file_records)
+    for path in input_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"档案移交表文件、压缩包或文件夹不存在：{path}")
+    if target is not None:
+        if not target.exists() or not target.is_file():
+            raise FileNotFoundError(f"档案汇总表不存在：{target}")
+        if not is_supported_excel_file(target):
+            raise ValueError("档案汇总表目前只支持 .xlsx 或 .xls 文件。")
 
-    result = ArchiveImportResult(
-        input_path=input_path,
-        target_path=target_path,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        source_files=source_names,
-        source_record_count=len(records),
-        company_counts=_count_by_company(records),
-        warnings=warnings,
-    )
-    if dry_run:
-        result.inserted_count = len(records)
+    with tempfile.TemporaryDirectory(prefix="hr_archive_import_") as temp_root:
+        temp_dir = Path(temp_root)
+        source_files = _find_source_files(input_paths, temp_dir, warnings)
+        if not source_files:
+            raise ValueError("未找到 .xlsx 或 .xls 档案移交表。")
+
+        records: list[ArchiveTransferRecord] = []
+        source_names: list[str] = []
+        for source_file in source_files:
+            try:
+                file_records, file_warnings = _read_transfer_file(source_file)
+            except ValueError:
+                if len(input_paths) == 1 and input_paths[0].is_file() and is_supported_excel_file(input_paths[0]):
+                    raise
+                warnings.append(f"{source_file.name} 不是档案移交表，已跳过。")
+                continue
+            warnings.extend(file_warnings)
+            if file_records:
+                source_names.append(str(source_file))
+            records.extend(file_records)
+
+        result = ArchiveImportResult(
+            input_path=display_input,
+            target_path=target,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            using_default_template=target is None,
+            source_files=source_names,
+            source_record_count=len(records),
+            company_counts=_count_by_company(records),
+            warnings=warnings,
+        )
+        if dry_run:
+            result.inserted_count = len(records)
+            return result
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / OUTPUT_FILENAME
+        target_for_write = ensure_xlsx_workbook(target, temp_dir) if target is not None else _copy_default_archive_template(temp_dir)
+        apply_result = _write_archive_summary(
+            target_for_write,
+            output_file,
+            records,
+            warnings,
+            remove_template_sheet=target is None,
+        )
+        result.output_file = output_file
+        result.inserted_count = apply_result["inserted_count"]
+        result.updated_count = apply_result["updated_count"]
+        result.skipped_count = apply_result["skipped_count"]
         return result
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / OUTPUT_FILENAME
-    apply_result = _write_archive_summary(target_path, output_file, records, warnings)
-    result.output_file = output_file
-    result.inserted_count = apply_result["inserted_count"]
-    result.updated_count = apply_result["updated_count"]
-    result.skipped_count = apply_result["skipped_count"]
-    return result
+
+def export_company_archive_tables(
+    summary_path: str | Path | list[str | Path],
+    output_dir: str | Path,
+    *,
+    existing_archive_path: str | Path | list[str | Path] | None = None,
+    dry_run: bool = False,
+) -> ArchiveExportResult:
+    summary_paths = _normalize_input_paths(summary_path)
+    display_summary = summary_paths[0] if len(summary_paths) == 1 else summary_paths[0].parent
+    existing_paths = [] if existing_archive_path is None else _normalize_input_paths(existing_archive_path)
+    display_existing = None if not existing_paths else (existing_paths[0] if len(existing_paths) == 1 else existing_paths[0].parent)
+    output_dir = Path(output_dir).expanduser().resolve()
+    for path in summary_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"档案汇总表文件、压缩包或文件夹不存在：{path}")
+    for path in existing_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"已有公司档案表文件、压缩包或文件夹不存在：{path}")
+
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="hr_archive_export_") as temp_root:
+        temp_dir = Path(temp_root)
+        summary_files = _find_excel_input_files(summary_paths, temp_dir, warnings)
+        if not summary_files:
+            raise ValueError("未找到 .xlsx 或 .xls 档案汇总表。")
+        records = _read_archive_summary_records(summary_files, warnings)
+        company_counts = _count_by_company(records)
+        existing_files = _find_excel_input_files(existing_paths, temp_dir, warnings) if existing_paths else []
+        existing_by_company = _find_existing_company_archives(existing_files, company_counts.keys(), warnings)
+        result = ArchiveExportResult(
+            summary_path=display_summary,
+            existing_archive_path=display_existing,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            summary_files=[str(path) for path in summary_files],
+            existing_archive_files=[str(path) for path in existing_files],
+            company_counts=company_counts,
+            warnings=warnings,
+        )
+        if dry_run:
+            return result
+        if not company_counts:
+            raise ValueError("档案汇总表中没有可生成档案表的公司数据。")
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_files: list[Path] = []
+        for company, company_records in _group_by_company(records).items():
+            output_file = output_dir / f"{_safe_filename(company)}-档案表.xlsx"
+            write_result = _write_company_archive_file(
+                company,
+                company_records,
+                existing_by_company.get(company),
+                output_file,
+                temp_dir,
+                warnings,
+            )
+            output_files.append(output_file)
+            result.created_count += 1 if write_result["created"] else 0
+            result.inserted_count += write_result["inserted_count"]
+            result.updated_count += write_result["updated_count"]
+            result.skipped_count += write_result["skipped_count"]
+        result.output_files = output_files
+        return result
 
 
-def _find_source_files(input_path: Path) -> list[Path]:
+def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
+    raw_paths = input_path if isinstance(input_path, list) else [input_path]
+    paths = [Path(path).expanduser().resolve() for path in raw_paths]
+    if not paths:
+        raise ValueError("请选择档案移交表文件、压缩包或文件夹。")
+    return paths
+
+
+def _find_source_files(input_paths: list[Path], temp_dir: Path, warnings: list[str]) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for input_path in input_paths:
+        for file_path in _iter_source_files(input_path, temp_dir, warnings):
+            working_path = ensure_xlsx_workbook(file_path, temp_dir)
+            resolved = working_path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(working_path)
+    return sorted(files)
+
+
+def _iter_source_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
     if input_path.is_file():
-        return [input_path] if input_path.suffix.lower() == ".xlsx" and not input_path.name.startswith("~$") else []
+        suffix = input_path.suffix.lower()
+        if is_supported_excel_file(input_path):
+            return [input_path]
+        if suffix == ".zip":
+            return _extract_zip_source_files(input_path, temp_dir, warnings)
+        return []
     if not input_path.is_dir():
         raise FileNotFoundError(f"档案移交表路径不存在：{input_path}")
-    return sorted(
-        path
-        for path in input_path.glob("*.xlsx")
-        if path.is_file()
-        and not path.name.startswith("~$")
-        and path.name != OUTPUT_FILENAME
-    )
+    files: list[Path] = []
+    for path in sorted(input_path.rglob("*")):
+        if not path.is_file() or path.name.startswith(("~$", ".~")):
+            continue
+        if is_supported_excel_file(path) and path.name != OUTPUT_FILENAME:
+            files.append(path)
+        elif path.suffix.lower() == ".zip":
+            files.extend(_extract_zip_source_files(path, temp_dir, warnings))
+    return files
+
+
+def _extract_zip_source_files(zip_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
+    extract_dir = temp_dir / f"zip_{len(list(temp_dir.glob('zip_*'))) + 1}"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for member in archive.infolist():
+                target = extract_dir / member.filename
+                if not target.resolve().is_relative_to(extract_dir.resolve()):
+                    warnings.append(f"{zip_path.name} 中存在不安全路径，已跳过：{member.filename}")
+                    continue
+                archive.extract(member, extract_dir)
+    except Exception as exc:
+        warnings.append(f"{zip_path.name} 解压失败，已跳过：{exc}")
+        return []
+    return sorted(path for path in extract_dir.rglob("*") if path.is_file() and is_supported_excel_file(path))
+
+
+def _find_excel_input_files(input_paths: list[Path], temp_dir: Path, warnings: list[str]) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for input_path in input_paths:
+        for file_path in _iter_excel_input_files(input_path, temp_dir, warnings):
+            working_path = ensure_xlsx_workbook(file_path, temp_dir)
+            resolved = working_path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(working_path)
+    return sorted(files)
+
+
+def _iter_excel_input_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
+    if input_path.is_file():
+        suffix = input_path.suffix.lower()
+        if is_supported_excel_file(input_path):
+            return [input_path]
+        if suffix == ".zip":
+            return _extract_zip_source_files(input_path, temp_dir, warnings)
+        return []
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"路径不存在：{input_path}")
+    files: list[Path] = []
+    for path in sorted(input_path.rglob("*")):
+        if not path.is_file() or path.name.startswith("~$") or path.name.startswith(".~"):
+            continue
+        if is_supported_excel_file(path):
+            files.append(path)
+        elif path.suffix.lower() == ".zip":
+            files.extend(_extract_zip_source_files(path, temp_dir, warnings))
+    return files
 
 
 def _read_transfer_file(file_path: Path) -> tuple[list[ArchiveTransferRecord], list[str]]:
@@ -285,6 +494,8 @@ def _write_archive_summary(
     output_file: Path,
     records: list[ArchiveTransferRecord],
     warnings: list[str],
+    *,
+    remove_template_sheet: bool = False,
 ) -> dict[str, int]:
     workbook = load_workbook(target_path)
     inserted_count = 0
@@ -293,7 +504,13 @@ def _write_archive_summary(
     try:
         template_sheet = workbook[workbook.sheetnames[0]]
         for company, company_records in _group_by_company(records).items():
-            ws = _get_or_create_company_sheet(workbook, company, template_sheet, warnings)
+            ws = _get_or_create_company_sheet(
+                workbook,
+                company,
+                template_sheet,
+                warnings,
+                warn_created_sheet=not remove_template_sheet,
+            )
             layout = _detect_archive_layout(ws)
             existing = _existing_records(ws, layout)
             new_records: list[ArchiveTransferRecord] = []
@@ -319,19 +536,29 @@ def _write_archive_summary(
             if new_records:
                 _append_archive_rows(ws, layout, new_records)
                 inserted_count += len(new_records)
+        if remove_template_sheet:
+            _remove_unused_template_sheet(workbook)
         workbook.save(output_file)
     finally:
         workbook.close()
     return {"inserted_count": inserted_count, "updated_count": updated_count, "skipped_count": skipped_count}
 
 
-def _get_or_create_company_sheet(workbook, company: str, template_sheet: Worksheet, warnings: list[str]) -> Worksheet:
+def _get_or_create_company_sheet(
+    workbook,
+    company: str,
+    template_sheet: Worksheet,
+    warnings: list[str],
+    *,
+    warn_created_sheet: bool,
+) -> Worksheet:
     if company in workbook.sheetnames:
         return workbook[company]
     copied = workbook.copy_worksheet(template_sheet)
     copied.title = _safe_sheet_title(company, workbook.sheetnames)
     _clear_archive_data_rows(copied)
-    warnings.append(f"档案汇总表缺少工作表：{company}，已按模板自动创建。")
+    if warn_created_sheet:
+        warnings.append(f"档案汇总表缺少工作表：{company}，已按模板自动创建。")
     return copied
 
 
@@ -422,7 +649,14 @@ def _append_archive_rows(ws: Worksheet, layout: ArchiveSheetLayout, records: lis
         target_rows.extend(range(insert_at, insert_at + remaining_count))
     for row_index, record in zip(target_rows, records):
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
+        _clear_archive_record_values(ws, layout, row_index)
         _write_archive_record(ws, layout, row_index, record)
+        _format_archive_data_row(ws, layout, row_index)
+
+
+def _clear_archive_record_values(ws: Worksheet, layout: ArchiveSheetLayout, row_index: int) -> None:
+    for col_index in range(1, layout.max_column + 1):
+        ws.cell(row_index, col_index).value = None
 
 
 def _blank_data_rows(ws: Worksheet, layout: ArchiveSheetLayout) -> list[int]:
@@ -487,11 +721,14 @@ def _target_values_for_record(record: ArchiveTransferRecord, target_headers: dic
     values: dict[str, Any] = {}
     code = _detect_region_code(record)
     if "编号" in target_headers:
-        values["编号"] = code
+        values["编号"] = _cell_text(record.values.get("编号")) or code
     other_parts: list[str] = []
     for source_header, value in record.values.items():
         normalized_source = _normalize_header(source_header)
         if normalized_source in SOURCE_SKIP_HEADERS or normalized_source in FORMULA_HEADERS:
+            continue
+        if normalized_source in target_headers:
+            values[normalized_source] = value
             continue
         target_header = DIRECT_FIELD_MAP.get(normalized_source)
         if target_header and target_header in target_headers:
@@ -515,6 +752,7 @@ def _write_archive_formulas(ws: Worksheet, layout: ArchiveSheetLayout, row_index
     code_col = _column_ref(layout, "编号", row_index)
     birth_month_col = _column_ref(layout, "出生年月公式", row_index)
     serial_col = _column_ref(layout, "序号", row_index)
+    # 人事提供的档案号公式为“编号-入职公式-出生年月公式-序号”，不同模板列序可能不同。
     formulas = {
         "出生日期": f'=MIDB({id_col},7,4)&"-"&MIDB({id_col},11,2)&"-"&MIDB({id_col},13,2)',
         "年齡": f"=(TODAY()-{birth_col})/365",
@@ -527,6 +765,62 @@ def _write_archive_formulas(ws: Worksheet, layout: ArchiveSheetLayout, row_index
         col_index = layout.headers.get(header)
         if col_index is not None:
             ws.cell(row_index, col_index).value = formula
+
+
+def _format_archive_data_row(
+    ws: Worksheet,
+    layout: ArchiveSheetLayout,
+    row_index: int,
+    *,
+    clear_fill: bool = True,
+) -> None:
+    side = Side(style="thin", color="000000")
+    border = Border(left=side, right=side, top=side, bottom=side)
+    alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    font = Font(name="宋体", size=10, bold=False, color="000000")
+    empty_fill = PatternFill(fill_type=None)
+    for col_index in range(1, layout.max_column + 1):
+        cell = ws.cell(row_index, col_index)
+        cell.border = border
+        cell.alignment = alignment
+        cell.font = font
+        if clear_fill:
+            cell.fill = empty_fill
+
+
+def _normalize_archive_output_sheet(ws: Worksheet, layout: ArchiveSheetLayout) -> None:
+    name_col = layout.headers.get(HEADER_NAME)
+    id_col = layout.headers.get(HEADER_ID_CARD)
+    if name_col is None or id_col is None:
+        return
+    for row_index in range(layout.data_start_row, layout.footer_start_row):
+        if _has_value(ws.cell(row_index, name_col).value) or _has_value(ws.cell(row_index, id_col).value):
+            _format_archive_data_row(ws, layout, row_index, clear_fill=False)
+    _apply_archive_column_widths(ws, layout)
+
+
+def _apply_archive_column_widths(ws: Worksheet, layout: ArchiveSheetLayout) -> None:
+    widths = {
+        "编号": 8,
+        HEADER_NAME: 12,
+        HEADER_ID_CARD: 24,
+        "出生日期": 13,
+        "年齡": 8,
+        "年龄": 8,
+        "入职时间": 13,
+        "入职公式": 12,
+        "序号": 8,
+        "档案号": 24,
+        "出生年月公式": 12,
+        "档案柜号": 10,
+    }
+    for header, width in widths.items():
+        col_index = layout.headers.get(header)
+        if col_index is None:
+            continue
+        letter = get_column_letter(col_index)
+        current = ws.column_dimensions[letter].width or 0
+        ws.column_dimensions[letter].width = max(current, width)
 
 
 def _column_ref(layout: ArchiveSheetLayout, header: str, row_index: int) -> str:
@@ -542,6 +836,255 @@ def _detect_region_code(record: ArchiveTransferRecord) -> str | None:
         if name in haystack:
             return code
     return None
+
+
+def _copy_default_archive_template(temp_dir: Path) -> Path:
+    template = resources.files("hr_toolkit.templates").joinpath(DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE)
+    target = temp_dir / DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE
+    with template.open("rb") as source, target.open("wb") as output:
+        shutil.copyfileobj(source, output)
+    return target
+
+
+def _copy_default_company_archive_template(temp_dir: Path) -> Path:
+    template = resources.files("hr_toolkit.templates").joinpath(DEFAULT_ARCHIVE_COMPANY_TEMPLATE_RESOURCE)
+    target = temp_dir / DEFAULT_ARCHIVE_COMPANY_TEMPLATE_RESOURCE
+    with template.open("rb") as source, target.open("wb") as output:
+        shutil.copyfileobj(source, output)
+    return target
+
+
+def _read_archive_summary_records(summary_files: list[Path], warnings: list[str]) -> list[ArchiveTransferRecord]:
+    records: list[ArchiveTransferRecord] = []
+    for summary_file in summary_files:
+        workbook = load_workbook(summary_file, data_only=False)
+        try:
+            for ws in workbook.worksheets:
+                if _is_placeholder_sheet_title(ws.title):
+                    continue
+                try:
+                    layout = _detect_archive_layout(ws)
+                except ValueError:
+                    warnings.append(f"{summary_file.name} 的 {ws.title} 未识别到档案表表头，已跳过。")
+                    continue
+                for row_index in range(layout.data_start_row, layout.footer_start_row):
+                    name = _cell_text(ws.cell(row_index, layout.headers[HEADER_NAME]).value)
+                    id_card = _normalize_id_card(ws.cell(row_index, layout.headers[HEADER_ID_CARD]).value)
+                    if not name and not id_card:
+                        continue
+                    if not name or not id_card:
+                        warnings.append(f"{summary_file.name} 的 {ws.title} 第 {row_index} 行缺少姓名或身份证，已跳过。")
+                        continue
+                    values = {header: ws.cell(row_index, col_index).value for header, col_index in layout.headers.items()}
+                    values[HEADER_COMPANY] = ws.title
+                    records.append(
+                        ArchiveTransferRecord(
+                            company=ws.title,
+                            name=name,
+                            id_card=id_card,
+                            values=values,
+                            source_file=summary_file.name,
+                            source_title=ws.title,
+                            source_row=row_index,
+                        )
+                    )
+        finally:
+            workbook.close()
+    return records
+
+
+def _find_existing_company_archives(
+    archive_files: list[Path],
+    companies: Any,
+    warnings: list[str],
+) -> dict[str, Path]:
+    company_names = list(companies)
+    matched: dict[str, Path] = {}
+    for archive_file in archive_files:
+        for company in _match_company_archive_file(archive_file, company_names, warnings):
+            if company in matched:
+                warnings.append(f"{company} 匹配到多个已有档案表，已使用第一个：{Path(matched[company]).name}")
+                continue
+            matched[company] = archive_file
+    return matched
+
+
+def _match_company_archive_file(archive_file: Path, companies: list[str], warnings: list[str]) -> list[str]:
+    workbook = load_workbook(archive_file, data_only=False)
+    try:
+        archive_sheet_titles: list[str] = []
+        for ws in workbook.worksheets:
+            try:
+                _detect_archive_layout(ws)
+            except ValueError:
+                continue
+            archive_sheet_titles.append(ws.title)
+        if not archive_sheet_titles:
+            warnings.append(f"{archive_file.name} 未识别到公司档案表表头，已跳过。")
+            return []
+        matched = [company for company in companies if company in archive_sheet_titles]
+        if matched:
+            return matched
+        filename_matches = [company for company in companies if company and company in archive_file.stem]
+        if filename_matches:
+            return [max(filename_matches, key=len)]
+        return []
+    finally:
+        workbook.close()
+
+
+def _write_company_archive_file(
+    company: str,
+    records: list[ArchiveTransferRecord],
+    existing_file: Path | None,
+    output_file: Path,
+    temp_dir: Path,
+    warnings: list[str],
+) -> dict[str, int | bool]:
+    source_file = existing_file or _copy_default_company_archive_template(temp_dir)
+    workbook = load_workbook(source_file)
+    created = existing_file is None
+    try:
+        ws = _select_company_archive_sheet(workbook, company)
+        for other_ws in list(workbook.worksheets):
+            if other_ws is not ws:
+                workbook.remove(other_ws)
+        ws.title = _safe_sheet_title(company, [])
+        if ws["A1"].value:
+            ws["A1"].value = f"{company}人员档案编号表"
+        layout = _detect_archive_layout(ws)
+        write_counts = _append_or_merge_archive_records(ws, layout, records, warnings)
+        _normalize_archive_output_sheet(ws, layout)
+        workbook.save(output_file)
+        return {
+            "created": created,
+            "inserted_count": write_counts["inserted_count"],
+            "updated_count": write_counts["updated_count"],
+            "skipped_count": write_counts["skipped_count"],
+        }
+    finally:
+        workbook.close()
+
+
+def _select_company_archive_sheet(workbook, company: str) -> Worksheet:
+    if company in workbook.sheetnames:
+        return workbook[company]
+    archive_sheets: list[Worksheet] = []
+    for ws in workbook.worksheets:
+        try:
+            _detect_archive_layout(ws)
+        except ValueError:
+            continue
+        archive_sheets.append(ws)
+    if not archive_sheets:
+        raise ValueError(f"{company} 的已有档案表未识别到表头。")
+    return archive_sheets[0]
+
+
+def _append_or_merge_archive_records(
+    ws: Worksheet,
+    layout: ArchiveSheetLayout,
+    records: list[ArchiveTransferRecord],
+    warnings: list[str],
+) -> dict[str, int]:
+    existing = _existing_records(ws, layout)
+    new_records: dict[str, ArchiveTransferRecord] = {}
+    updated_count = 0
+    skipped_count = 0
+    for record in records:
+        existing_row = existing.get(record.id_card)
+        if existing_row is not None:
+            if _cell_text(ws.cell(existing_row, layout.headers[HEADER_NAME]).value) != record.name:
+                warnings.append(f"{record.company} 身份证 {record.id_card} 已存在，但姓名不同：{record.name}")
+            if _merge_existing_archive_row(ws, layout, existing_row, record):
+                updated_count += 1
+            else:
+                skipped_count += 1
+            continue
+        if record.id_card in new_records:
+            new_records[record.id_card] = _merge_archive_records(new_records[record.id_card], record)
+            warnings.append(f"{record.company} 身份证 {record.id_card} 在汇总表中重复，已合并为一条。")
+            skipped_count += 1
+            continue
+        new_records[record.id_card] = record
+    if new_records:
+        _append_archive_rows(ws, layout, list(new_records.values()))
+    return {
+        "inserted_count": len(new_records),
+        "updated_count": updated_count,
+        "skipped_count": skipped_count,
+    }
+
+
+def _merge_archive_records(base: ArchiveTransferRecord, extra: ArchiveTransferRecord) -> ArchiveTransferRecord:
+    values = dict(base.values)
+    for header, value in extra.values.items():
+        if _has_value(value) and not _has_value(values.get(header)):
+            values[header] = value
+    return ArchiveTransferRecord(
+        company=base.company,
+        name=base.name,
+        id_card=base.id_card,
+        values=values,
+        source_file=base.source_file,
+        source_title=base.source_title,
+        source_row=base.source_row,
+    )
+
+
+def _scan_exportable_archive_sheets(summary_path: Path, warnings: list[str]) -> dict[str, int]:
+    workbook = load_workbook(summary_path, data_only=False)
+    company_counts: dict[str, int] = {}
+    try:
+        for ws in workbook.worksheets:
+            if _is_placeholder_sheet_title(ws.title):
+                continue
+            try:
+                layout = _detect_archive_layout(ws)
+            except ValueError:
+                warnings.append(f"{ws.title} 未识别到档案表表头，已跳过。")
+                continue
+            record_count = _count_archive_records(ws, layout)
+            if record_count:
+                company_counts[ws.title] = record_count
+    finally:
+        workbook.close()
+    return company_counts
+
+
+def _count_archive_records(ws: Worksheet, layout: ArchiveSheetLayout) -> int:
+    name_col = layout.headers.get(HEADER_NAME)
+    id_col = layout.headers.get(HEADER_ID_CARD)
+    if name_col is None or id_col is None:
+        return 0
+    count = 0
+    for row_index in range(layout.data_start_row, layout.footer_start_row):
+        if _has_value(ws.cell(row_index, name_col).value) and _has_value(ws.cell(row_index, id_col).value):
+            count += 1
+    return count
+
+
+def _remove_unused_template_sheet(workbook) -> None:
+    if len(workbook.worksheets) <= 1:
+        return
+    for ws in list(workbook.worksheets):
+        if not _is_placeholder_sheet_title(ws.title):
+            continue
+        try:
+            layout = _detect_archive_layout(ws)
+        except ValueError:
+            continue
+        if _count_archive_records(ws, layout) == 0 and len(workbook.worksheets) > 1:
+            workbook.remove(ws)
+
+
+def _is_placeholder_sheet_title(title: str) -> bool:
+    return title.strip() in PLACEHOLDER_SHEET_TITLES
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\r\n]+', "_", name).strip()
+    return cleaned or "未命名公司"
 
 
 def _format_other_part(header: str, value: Any) -> str:

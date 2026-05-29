@@ -34,6 +34,14 @@ def main(argv: list[str] | None = None) -> int:
         "README.md;.",
         "--add-data",
         "hr_toolkit/templates;hr_toolkit/templates",
+        "--hidden-import",
+        "pythoncom",
+        "--hidden-import",
+        "pywintypes",
+        "--hidden-import",
+        "win32com.client",
+        "--hidden-import",
+        "win32timezone",
         "hr_toolkit_app.py",
     ])
     _run([

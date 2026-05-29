@@ -15,6 +15,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
+from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
 
 
@@ -225,10 +226,10 @@ def merge_personnel_changes(
         temp_dir = Path(temp_root)
         source_files = _find_change_files(input_paths, temp_dir, warnings)
         if not source_files:
-            raise ValueError("未找到 .xlsx 异动表")
+            raise ValueError("未找到 .xlsx 或 .xls 异动表")
 
-        summary_sources = _resolve_summary_sources(template_path)
-        analysis_template = _resolve_analysis_template_path(analysis_template_path, input_paths)
+        summary_sources = _resolve_summary_sources(template_path, temp_dir)
+        analysis_template = _resolve_analysis_template_path(analysis_template_path, input_paths, temp_dir)
         rows_by_period = _empty_period_sheet_map()
         used_files: list[str] = []
 
@@ -310,49 +311,52 @@ def update_roster_from_change_summaries(
             raise FileNotFoundError(f"异动汇总表文件或文件夹不存在：{path}")
     if not analysis_template.exists() or not analysis_template.is_file():
         raise FileNotFoundError(f"人力资源花名册不存在：{analysis_template}")
-    if analysis_template.suffix.lower() != ".xlsx":
-        raise ValueError("人力资源花名册目前只支持 .xlsx 文件。")
+    if not is_supported_excel_file(analysis_template):
+        raise ValueError("人力资源花名册目前只支持 .xlsx 或 .xls 文件。")
 
-    summary_files = _find_summary_files(input_paths, warnings)
-    if not summary_files:
-        raise ValueError("未找到 .xlsx 异动汇总表")
+    with tempfile.TemporaryDirectory(prefix="hr_roster_update_") as temp_root:
+        temp_dir = Path(temp_root)
+        working_analysis_template = ensure_xlsx_workbook(analysis_template, temp_dir)
+        summary_files = _find_summary_files(input_paths, warnings, temp_dir)
+        if not summary_files:
+            raise ValueError("未找到 .xlsx 或 .xls 异动汇总表")
 
-    rows_by_sheet = _empty_sheet_map()
-    used_files: list[str] = []
-    periods: set[str] = set()
-    for file_path in summary_files:
-        file_rows, file_warnings = _read_summary_change_file(file_path)
-        warnings.extend(file_warnings)
-        if any(file_rows.values()):
-            used_files.append(str(file_path))
-        for sheet_name, rows in file_rows.items():
-            rows_by_sheet[sheet_name].extend(rows)
-            periods.update(row.period for row in rows if row.period)
+        rows_by_sheet = _empty_sheet_map()
+        used_files: list[str] = []
+        periods: set[str] = set()
+        for file_path in summary_files:
+            file_rows, file_warnings = _read_summary_change_file(file_path)
+            warnings.extend(file_warnings)
+            if any(file_rows.values()):
+                used_files.append(str(file_path))
+            for sheet_name, rows in file_rows.items():
+                rows_by_sheet[sheet_name].extend(rows)
+                periods.update(row.period for row in rows if row.period)
 
-    sheet_counts = {sheet_name: len(rows_by_sheet.get(sheet_name, [])) for sheet_name in TARGET_SHEETS}
-    record_count = sum(sheet_counts.values())
-    period = next(iter(periods)) if len(periods) == 1 else None
-    result = RosterUpdateResult(
-        summary_input=display_input,
-        analysis_template_path=analysis_template,
-        output_dir=output_dir,
-        dry_run=dry_run,
-        period=period,
-        source_files=used_files,
-        sheet_counts=sheet_counts,
-        record_count=record_count,
-        warnings=warnings,
-    )
-    if dry_run:
+        sheet_counts = {sheet_name: len(rows_by_sheet.get(sheet_name, [])) for sheet_name in TARGET_SHEETS}
+        record_count = sum(sheet_counts.values())
+        period = next(iter(periods)) if len(periods) == 1 else None
+        result = RosterUpdateResult(
+            summary_input=display_input,
+            analysis_template_path=analysis_template,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            period=period,
+            source_files=used_files,
+            sheet_counts=sheet_counts,
+            record_count=record_count,
+            warnings=warnings,
+        )
+        if dry_run:
+            return result
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / _analysis_output_filename(period)
+        roster_result = _write_updated_roster(working_analysis_template, output_file, rows_by_sheet, warnings)
+        result.output_file = output_file
+        result.roster_added_count = roster_result["added_count"]
+        result.roster_marked_count = roster_result["marked_count"]
         return result
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / _analysis_output_filename(period)
-    roster_result = _write_updated_roster(analysis_template, output_file, rows_by_sheet, warnings)
-    result.output_file = output_file
-    result.roster_added_count = roster_result["added_count"]
-    result.roster_marked_count = roster_result["marked_count"]
-    return result
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
@@ -384,18 +388,19 @@ def _find_change_files(input_paths: list[Path], temp_dir: Path, warnings: list[s
     seen: set[Path] = set()
     for path in input_paths:
         for file_path in _iter_input_files(path, temp_dir, warnings):
-            resolved = file_path.resolve()
+            working_path = ensure_xlsx_workbook(file_path, temp_dir)
+            resolved = working_path.resolve()
             if resolved in seen:
                 continue
             seen.add(resolved)
-            files.append(file_path)
+            files.append(working_path)
     return sorted(files)
 
 
 def _iter_input_files(path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
     if path.is_file():
         suffix = path.suffix.lower()
-        if suffix == ".xlsx" and not path.name.startswith("~$"):
+        if is_supported_excel_file(path):
             return [path]
         if suffix == ".zip":
             return _extract_zip_change_files(path, temp_dir, warnings)
@@ -405,7 +410,7 @@ def _iter_input_files(path: Path, temp_dir: Path, warnings: list[str]) -> list[P
         for child in sorted(path.rglob("*")):
             if not child.is_file() or child.name.startswith("~$"):
                 continue
-            if child.suffix.lower() == ".xlsx":
+            if is_supported_excel_file(child):
                 files.append(child)
             elif child.suffix.lower() == ".zip":
                 files.extend(_extract_zip_change_files(child, temp_dir, warnings))
@@ -427,28 +432,29 @@ def _extract_zip_change_files(zip_path: Path, temp_dir: Path, warnings: list[str
     except Exception as exc:
         warnings.append(f"{zip_path.name} 解压失败，已跳过：{exc}")
         return []
-    return sorted(path for path in extract_dir.rglob("*.xlsx") if path.is_file() and not path.name.startswith("~$"))
+    return sorted(path for path in extract_dir.rglob("*") if path.is_file() and is_supported_excel_file(path))
 
 
-def _find_summary_files(input_paths: list[Path], warnings: list[str]) -> list[Path]:
+def _find_summary_files(input_paths: list[Path], warnings: list[str], temp_dir: Path) -> list[Path]:
     files: list[Path] = []
     seen: set[Path] = set()
     for path in input_paths:
         if path.is_file():
             candidates = [path]
         elif path.is_dir():
-            candidates = sorted(item for item in path.rglob("*.xlsx") if item.is_file() and not item.name.startswith("~$"))
+            candidates = sorted(item for item in path.rglob("*") if item.is_file() and is_supported_excel_file(item))
         else:
             candidates = []
         for candidate in candidates:
-            if candidate.suffix.lower() != ".xlsx" or candidate.name.startswith("~$"):
+            if not is_supported_excel_file(candidate):
                 continue
-            resolved = candidate.resolve()
+            working_candidate = ensure_xlsx_workbook(candidate, temp_dir)
+            resolved = working_candidate.resolve()
             if resolved in seen:
                 continue
             seen.add(resolved)
-            if _looks_like_summary_file(candidate):
-                files.append(candidate)
+            if _looks_like_summary_file(working_candidate):
+                files.append(working_candidate)
     return sorted(files)
 
 
@@ -463,20 +469,21 @@ def _looks_like_summary_file(path: Path) -> bool:
         return False
 
 
-def _resolve_summary_sources(template_path: str | Path | None) -> dict[str, Path]:
+def _resolve_summary_sources(template_path: str | Path | None, temp_dir: Path) -> dict[str, Path]:
     if not template_path:
         return {}
     path = Path(template_path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"异动汇总表文件或文件夹不存在：{path}")
-    candidates = [path] if path.is_file() else sorted(item for item in path.glob("*.xlsx") if item.is_file() and not item.name.startswith("~$"))
+    candidates = [path] if path.is_file() else sorted(item for item in path.glob("*") if item.is_file() and is_supported_excel_file(item))
     summary_sources: dict[str, Path] = {}
     for candidate in candidates:
-        if candidate.suffix.lower() != ".xlsx":
+        if not is_supported_excel_file(candidate):
             continue
-        period = _detect_summary_period(candidate)
+        working_candidate = ensure_xlsx_workbook(candidate, temp_dir)
+        period = _detect_summary_period(working_candidate)
         if period:
-            summary_sources[period] = candidate
+            summary_sources[period] = working_candidate
     return summary_sources
 
 
@@ -988,27 +995,30 @@ def _period_from_value(value: Any, fallback_period: str | None = None) -> str | 
     return None
 
 
-def _resolve_analysis_template_path(template_path: str | Path | None, input_paths: list[Path]) -> Path | None:
+def _resolve_analysis_template_path(template_path: str | Path | None, input_paths: list[Path], temp_dir: Path) -> Path | None:
     if template_path:
         path = Path(template_path).expanduser().resolve()
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"人力资源分析表不存在：{path}")
-        return path
+        if not is_supported_excel_file(path):
+            raise ValueError("人力资源分析表目前只支持 .xlsx 或 .xls 文件。")
+        return ensure_xlsx_workbook(path, temp_dir)
     for input_path in input_paths:
         if input_path.is_file():
             candidates = [input_path]
         elif input_path.is_dir():
-            candidates = sorted(input_path.glob("*.xlsx"))
+            candidates = sorted(path for path in input_path.glob("*") if path.is_file() and is_supported_excel_file(path))
         else:
             candidates = []
         for path in candidates:
-            if path.name.startswith("~$"):
+            if not is_supported_excel_file(path):
                 continue
+            working_path = ensure_xlsx_workbook(path, temp_dir)
             try:
-                workbook = load_workbook(path, read_only=True, data_only=True)
+                workbook = load_workbook(working_path, read_only=True, data_only=True)
                 try:
                     if "花名册" in workbook.sheetnames:
-                        return path
+                        return working_path
                 finally:
                     workbook.close()
             except Exception:
