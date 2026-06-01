@@ -1,8 +1,58 @@
 # HR Toolkit
 
-人事 Excel 自动化工具箱。当前已落地：**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**、**需求6：异动表汇总与花名册更新**、**需求7：档案移交表入库**、**需求8：人员资料文件夹改名**。
+人事 Excel 自动化工具箱。当前已落地：**需求1：社保明细与汇总**、**需求2：考勤与周月报统计**、**需求3：保险台账与增减预警**、**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**、**需求6：异动表汇总与花名册更新**、**需求7：档案移交表入库**、**需求8：人员资料文件夹改名**。
 
 ## 已实现工具
+
+### 需求1-社保明细与汇总
+
+输入社保账户缴费清单、zip 压缩包，或一个包含多个社保清单/压缩包的文件夹，再选择参保人员花名册，按身份证关联人员信息，输出社保明细表和社保汇总表。输入支持 `.xlsx` 和 `.xls`。
+
+输出内容：
+
+- 自动识别老 `.xls` 长表、单险种明细表、宽表缴费清单
+- 按身份证匹配参保人员花名册
+- 自动识别账单期，优先使用账单文件夹或文件名月份；账单内跨月人员也计入本次上传账单月份
+- 社保缴纳地、缴纳单位优先按账单文件夹或文件名识别；与花名册不一致时会提醒
+- 生成总的 `社保明细表.xlsx`
+- 按参保单位/参保地额外拆分明细表，例如 `唐人四川-社保明细表.xlsx`、`唐人长春-社保明细表.xlsx`
+- 生成 `社保汇总表.xlsx`，包含总汇总、按公司汇总、按缴纳单位/参保地/险种/项目的数据分析和异常提醒
+- 未匹配花名册的人员、姓名不一致、未识别账单期会在日志和异常提醒中列出
+
+公积金、残保金、管理费暂无数据时留空；后续人事提供单独数据后可继续补充。
+
+### 需求2-考勤与周月报统计
+
+输入 HR 系统导出的考勤结果、周报记录、月报记录，支持单个文件、多个文件、zip 压缩包，或包含这些文件/压缩包的文件夹，自动生成考勤和周月报统计表。输入支持 `.xlsx` 和 `.xls`。
+
+输出内容：
+
+- 自动识别 `考勤结果`、`周报记录`、`月报记录`
+- 生成 `考勤统计`，汇总事假、病假、带薪休假、调休、各月加班、旷工、迟到/早退、漏打卡和备注
+- 生成 `考勤异常明细`，列出漏打卡、加班、调休、迟到/早退、旷工等明细
+- 可选 `应汇报人员名单`，用于准确统计未写周报、未写月报人员
+- 生成 `周月报统计`，统计未写周报、周报超时、未写月报、月报超时，不计算扣款金额
+- 生成 `周月报异常明细`，列出异常人员、周期、截止时间、实际汇报时间和来源文件
+- 周报按自然周的下周一 `17:00:59` 前正常、`17:01` 起异常；月报按次月 2 日同样规则判断
+- 输出 `考勤周月报汇总表.xlsx`
+
+未提供应汇报人员名单时，未写周/月报只能按文件中可推断人员统计。
+
+### 需求3-保险台账与增减预警
+
+输入各保单人员清单、zip 压缩包，或一个包含多个保单清单/压缩包的文件夹，再选择需求6的人力资源分析表，自动生成保险台账。输入支持 `.xlsx` 和 `.xls`。
+
+输出内容：
+
+- 自动识别保单号和保单人员
+- PZDX 类保单的保额取 `每人伤残死亡限额`，按万元显示
+- PEAC 类保单没有明显保额字段，固定按 `60` 万元显示
+- `项目/部门` 从人力资源分析表的 `花名册` 工作表补充，优先取 `部门/项目` 列
+- 生成人员增减预警：花名册在职但保单没有提示 `需加保`，保单有但花名册没有或已标记离职提示 `需减保`
+- 输出 `保险台账.xlsx`，包含 `保险台账` 和 `人员增减预警` 两个工作表
+- 如存在 `需加保` 人员，会额外输出 `人力资源分析表_保险预警.xlsx`，在 `花名册` 中标记 `保险预警`
+
+人事已确认岗位保险规则暂取消，当前只做台账明细和人员增减预警。
 
 ### 需求4-工资表按入职公司拆分
 
@@ -75,7 +125,8 @@
 - 已实现的 Excel 类工具均支持上传 `.xlsx` 和 `.xls`
 - 文件夹和 zip 压缩包中也会识别 `.xls`
 - 输出文件统一为 `.xlsx`
-- `.xls` 会先自动转换为 `.xlsx` 再处理；Windows 电脑需要安装 Excel 或 WPS 表格，Mac/Linux 需要安装 LibreOffice 才能自动转换
+- 需求1的老 `.xls` 社保清单和参保花名册会用内置依赖直接读取
+- 其他工具遇到 `.xls` 会先自动转换为 `.xlsx` 再处理；Windows 电脑需要安装 Excel 或 WPS 表格，Mac/Linux 需要安装 LibreOffice 才能自动转换
 
 ### 需求8-人员资料文件夹改名
 
@@ -111,6 +162,41 @@ python3 -m hr_toolkit
 
 ```bash
 python3 -m pip install -r requirements.txt
+python3 -m hr_toolkit social-security \
+  --input "问题1-3相关数据及模板/1.社保类模板" \
+  --roster "问题1-3相关数据及模板/1.社保类模板/参保人员花名册.xlsx" \
+  --output "outputs/social_security_demo"
+```
+
+考勤与周月报统计：
+
+```bash
+python3 -m hr_toolkit data-statistics \
+  --input "问题1-3相关数据及模板/2.数据统计类模板" \
+  --output "outputs/data_statistics_demo"
+```
+
+如有人事提供的应汇报人员名单，可追加：
+
+```bash
+python3 -m hr_toolkit data-statistics \
+  --input "问题1-3相关数据及模板/2.数据统计类模板" \
+  --staff "应汇报人员名单.xlsx" \
+  --output "outputs/data_statistics_demo"
+```
+
+保险台账：
+
+```bash
+python3 -m hr_toolkit insurance-ledger \
+  --input "问题1-3相关数据及模板/3.保险类模板" \
+  --roster "问题6-2026年4月人力资源分析.xlsx" \
+  --output "outputs/insurance_ledger_demo"
+```
+
+工资表拆分：
+
+```bash
 python3 -m hr_toolkit salary-split \
   --input "附件/问题4-薪资表模板(1).xlsx" \
   --output "outputs/salary_split_demo"
@@ -299,12 +385,14 @@ python3 -m hr_toolkit folder-rename \
 
 每个需求独立成一个工具模块：
 
+- `hr_toolkit/tools/social_security.py`：需求1，社保明细/汇总
+- `hr_toolkit/tools/data_statistics.py`：需求2，考勤与周月报统计
+- `hr_toolkit/tools/insurance_ledger.py`：需求3，保险台账
 - `hr_toolkit/tools/salary_split.py`：需求4，工资表拆分
 - `hr_toolkit/tools/salary_merge.py`：需求5，工资表合并
 - `hr_toolkit/tools/personnel_change_merge.py`：需求6，异动表汇总
-- `hr_toolkit/tools/folder_rename.py`：需求8，人员资料文件夹改名
 - `hr_toolkit/tools/archive_import.py`：需求7，档案移交表入库
-- `hr_toolkit/tools/social_security.py`：需求1，社保明细/汇总
+- `hr_toolkit/tools/folder_rename.py`：需求8，人员资料文件夹改名
 
 CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 
@@ -313,13 +401,13 @@ CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 命令行版调试包：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone --hidden-import xlrd hr_toolkit_app.py
 ```
 
 给人事双击使用的桌面版：
 
 ```powershell
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone --hidden-import xlrd hr_toolkit_app.py
 ```
 
 自动更新程序：
@@ -332,7 +420,7 @@ Copy-Item dist\HRToolkitUpdater.exe dist\HRToolkit\ -Force
 Mac 打包时把 `;` 改成 `:`，更新程序复制无后缀文件：
 
 ```bash
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." --add-data "hr_toolkit/templates:hr_toolkit/templates" hr_toolkit_app.py
+python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." --add-data "hr_toolkit/templates:hr_toolkit/templates" --hidden-import xlrd hr_toolkit_app.py
 python -m PyInstaller --name HRToolkitUpdater --onefile --windowed --clean hr_toolkit_updater.py
 cp dist/HRToolkitUpdater dist/HRToolkit/
 ```

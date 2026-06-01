@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
         "win32com.client",
         "--hidden-import",
         "win32timezone",
+        "--hidden-import",
+        "xlrd",
         "hr_toolkit_app.py",
     ])
     _run([

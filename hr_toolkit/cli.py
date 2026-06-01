@@ -7,9 +7,12 @@ from pathlib import Path
 
 from .tools.folder_rename import rename_person_folders
 from .tools.archive_import import export_company_archive_tables, import_archive_transfers
+from .tools.data_statistics import generate_data_statistics_reports
+from .tools.insurance_ledger import generate_insurance_ledger
 from .tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from .tools.salary_merge import merge_monthly_salary
 from .tools.salary_split import split_salary_by_company
+from .tools.social_security import generate_social_security_reports
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +21,116 @@ def build_parser() -> argparse.ArgumentParser:
         description="人事 Excel 自动化工具箱",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    social_security = subparsers.add_parser(
+        "social-security",
+        help="需求1：生成社保明细表和社保汇总表",
+    )
+    social_security.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="一个或多个社保缴费清单 .xlsx/.xls、zip 压缩包，或包含清单/压缩包的文件夹",
+    )
+    social_security.add_argument(
+        "-r",
+        "--roster",
+        required=True,
+        type=Path,
+        help="参保人员花名册 .xlsx 或 .xls",
+    )
+    social_security.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    social_security.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别社保缴费记录，不生成 Excel 文件",
+    )
+    social_security.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
+
+    data_statistics = subparsers.add_parser(
+        "data-statistics",
+        help="需求2：生成考勤和周月报统计表",
+    )
+    data_statistics.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="一个或多个考勤/周报/月报 .xlsx/.xls、zip 压缩包，或包含这些文件/压缩包的文件夹",
+    )
+    data_statistics.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    data_statistics.add_argument(
+        "-s",
+        "--staff",
+        type=Path,
+        help="可选应汇报人员名单 .xlsx/.xls；传入后可统计未写周报/月报人员",
+    )
+    data_statistics.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别记录，不生成 Excel 文件",
+    )
+    data_statistics.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
+
+    insurance_ledger = subparsers.add_parser(
+        "insurance-ledger",
+        help="需求3：生成保险台账和人员增减预警",
+    )
+    insurance_ledger.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="一个或多个保单人员清单 .xlsx/.xls、zip 压缩包，或包含保单清单/压缩包的文件夹",
+    )
+    insurance_ledger.add_argument(
+        "-r",
+        "--roster",
+        required=True,
+        type=Path,
+        help="需求6人力资源分析表 .xlsx 或 .xls，需包含“花名册”工作表",
+    )
+    insurance_ledger.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="输出目录",
+    )
+    insurance_ledger.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只识别保单人员，不生成 Excel 文件",
+    )
+    insurance_ledger.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
 
     salary_split = subparsers.add_parser(
         "salary-split",
@@ -139,7 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         nargs="+",
         type=Path,
-        help="一个或多个异动汇总表 .xlsx/.xls，或包含异动汇总表的文件夹",
+        help="一个或多个异动汇总表 .xlsx/.xls、zip 压缩包，或包含异动汇总表/压缩包的文件夹",
     )
     roster_update.add_argument(
         "-r",
@@ -288,6 +401,48 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "social-security":
+        result = generate_social_security_reports(
+            input_path=args.input,
+            roster_path=args.roster,
+            output_dir=args.output,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_social_security_summary(payload)
+        return 0
+
+    if args.command == "data-statistics":
+        result = generate_data_statistics_reports(
+            input_path=args.input,
+            output_dir=args.output,
+            report_staff_path=args.staff,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_data_statistics_summary(payload)
+        return 0
+
+    if args.command == "insurance-ledger":
+        result = generate_insurance_ledger(
+            input_path=args.input,
+            roster_path=args.roster,
+            output_dir=args.output,
+            dry_run=args.dry_run,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_insurance_ledger_summary(payload)
+        return 0
+
     if args.command == "salary-split":
         result = split_salary_by_company(
             input_path=args.input,
@@ -392,6 +547,80 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help(sys.stderr)
     return 2
+
+
+def _print_social_security_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"输入：{payload['input_path']}")
+    print(f"参保人员花名册：{payload['roster_path']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别文件数：{payload['source_file_count']}")
+    print(f"识别缴费记录数：{payload['source_record_count']}")
+    print(f"生成明细行数：{payload['detail_record_count']}")
+    print(f"识别人员数：{payload['employee_count']}")
+    for account, count in payload["account_counts"].items():
+        print(f"- {account}: {count} 人")
+    for period, count in payload["period_counts"].items():
+        print(f"- {period}: {count} 行")
+    if payload.get("detail_output_file"):
+        print(f"社保明细表：{payload['detail_output_file']}")
+    if payload.get("detail_output_files"):
+        print("按参保单位/参保地拆分明细：")
+        for output_file in payload["detail_output_files"]:
+            print(f"- {output_file}")
+    if payload.get("summary_output_file"):
+        print(f"社保汇总表：{payload['summary_output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_data_statistics_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"输入：{payload['input_dir']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别文件数：{payload['source_file_count']}")
+    print(f"考勤原始记录数：{payload['attendance_source_count']}")
+    print(f"考勤统计人数：{payload['attendance_person_count']}")
+    print(f"考勤异常明细数：{payload['attendance_exception_count']}")
+    print(f"周报记录数：{payload['weekly_record_count']}")
+    print(f"月报记录数：{payload['monthly_record_count']}")
+    if payload.get("report_staff_path"):
+        print(f"应汇报人员名单：{payload['report_staff_path']}")
+        print(f"应汇报人数：{payload['expected_reporter_count']}")
+    print(f"周月报异常人数：{payload['report_person_count']}")
+    print(f"周月报异常明细数：{payload['report_exception_count']}")
+    if payload.get("output_file"):
+        print(f"输出文件：{payload['output_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_insurance_ledger_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"输入：{payload['input_path']}")
+    print(f"人力资源分析表：{payload['roster_path']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"模式：{'预览' if payload['dry_run'] else '生成文件'}")
+    print(f"识别文件数：{payload['source_file_count']}")
+    print(f"识别保单数：{payload['policy_count']}")
+    print(f"保单人员数：{payload['insured_person_count']}")
+    print(f"花名册在职人数：{payload['roster_person_count']}")
+    print(f"需加保预警：{payload['add_warning_count']}")
+    print(f"需减保预警：{payload['reduce_warning_count']}")
+    if payload.get("output_file"):
+        print(f"输出文件：{payload['output_file']}")
+    if payload.get("roster_warning_file"):
+        print(f"花名册预警输出文件：{payload['roster_warning_file']}")
+    if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
 
 
 def _print_salary_split_summary(payload: dict) -> None:
