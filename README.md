@@ -456,33 +456,11 @@ http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 
 更新失败时，程序会在 `HRToolkit` 文件夹同级目录写入 `HRToolkit_update.log`。这个日志会记录下载包路径、解压目录、备份目录、替换步骤和具体错误，方便直接定位是哪一步失败。
 
-发布步骤：
+发布步骤推荐使用一键脚本。脚本会自动递增版本号、打包、计算 SHA256，并生成服务器静态目录，不需要手动改 `latest.json`。
 
-1. 修改 `hr_toolkit/__init__.py` 里的 `__version__`。
-2. 按上面的命令打包 `HRToolkit` 和 `HRToolkitUpdater`。
-3. 如果使用 Gitee，把 `release/update_url.txt.example` 复制为 `dist\HRToolkit\update_url.txt`，并把里面的地址改成你的 Gitee `latest.json` 地址。
-4. 把 `dist\HRToolkit\*` 压缩成 zip，例如 `HRToolkit-0.2.0-win.zip`。
-5. 计算 zip 的 SHA256：
+### 通过 Gitee 中转发布
 
-```powershell
-Get-FileHash .\HRToolkit-0.2.0-win.zip -Algorithm SHA256
-```
-
-6. 上传 zip 到 ScriptHub 或 Gitee 可公开访问的位置，例如：
-
-```text
-https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.2.0-win.zip
-```
-
-7. 按 `release/latest.json.example` 生成 `latest.json`，填好 `version`、`file_url`、`sha256`，上传到：
-
-```text
-https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/latest.json
-```
-
-### 只用 Gitee 发布
-
-更新包放在 ScriptHub 静态目录中。推荐用一键发布脚本，不要手写 `version`、`file_url` 和 `sha256`。
+更新包最终放在 ScriptHub 静态目录中。Gitee 只用于让 Windows 打包机把发布文件同步到 Mac。推荐用一键发布脚本，不要手写 `version`、`file_url` 和 `sha256`。
 
 Windows 版必须在 Windows 上执行。日常发布用补丁版本：
 
@@ -527,12 +505,10 @@ python scripts\release_windows.py --bump major --notes "正式版发布"
 - 打包 `HRToolkitUpdater.exe`
 - 把 `HRToolkitUpdater.exe` 复制进 `dist\HRToolkit\`
 - 在 `dist\HRToolkit\` 写入 `update_url.txt`
-- 把 `dist\HRToolkit\*` 压缩到 `release/downloads/HRToolkit-版本号-win.zip`
+- 把 `dist\HRToolkit\*` 压缩到 `release/scripthub_static/hr-toolkit/releases/HRToolkit-版本号-win.zip`
 - 计算 zip 的 SHA256
-- 更新 `release/latest.json` 里的 `version`、`file_url`、`sha256`
-- 生成可一次性复制到 ScriptHub 的 `release/scripthub_static/hr-toolkit/`
-- 额外生成一个单独的更新器修复文件，放在 `release/scripthub_static/hr-toolkit/tools/`
-- 自动清理历史发布文件，每个平台只保留最新版本和最近一个旧版本
+- 更新 `release/scripthub_static/hr-toolkit/latest.json` 里的 `version`、`file_url`、`sha256`
+- 自动清理历史发布文件，每个平台只保留当前最新版本
 
 发布脚本生成后，会得到：
 
@@ -541,11 +517,9 @@ release/scripthub_static/hr-toolkit/
   latest.json
   releases/
     HRToolkit-版本号-win.zip
-  tools/
-    HRToolkitUpdater-版本号-win.exe
 ```
 
-把整个 `hr-toolkit` 文件夹复制到 ScriptHub 项目的：
+把 `release/scripthub_static/hr-toolkit/` 这个文件夹复制到 ScriptHub 项目的：
 
 ```text
 fastApiProject/static/
@@ -556,10 +530,9 @@ fastApiProject/static/
 ```text
 fastApiProject/static/hr-toolkit/latest.json
 fastApiProject/static/hr-toolkit/releases/HRToolkit-版本号-win.zip
-fastApiProject/static/hr-toolkit/tools/HRToolkitUpdater-版本号-win.exe
 ```
 
-如果旧版本更新失败后只剩 `HRToolkit_backup_时间`，先把这个文件夹改名回 `HRToolkit`。然后下载 `tools/HRToolkitUpdater-版本号-win.exe`，改名为 `HRToolkitUpdater.exe`，覆盖放进 `HRToolkit` 文件夹，再重新打开 `HRToolkit.exe` 检查更新。这个步骤只用于修复旧版更新器，后续正常版本不需要这样操作。
+如果旧版本更新失败后只剩 `HRToolkit_backup_时间`，先把这个文件夹改名回 `HRToolkit`，再重新打开 `HRToolkit.exe` 检查更新。正常版本不需要单独下载更新器，更新器已经包含在 zip 更新包里。
 
 如果打包机上也有 ScriptHub 项目，可以直接让脚本复制过去：
 
@@ -570,12 +543,12 @@ python scripts\release_windows.py --bump patch --notes "本次更新说明" --pu
 4. 提交并推送：
 
 ```bash
-git add hr_toolkit/__init__.py release/latest.json release/downloads/ release/scripthub_static/
+git add hr_toolkit/__init__.py release/scripthub_static/hr-toolkit/latest.json release/scripthub_static/hr-toolkit/releases/
 git commit -m "发布 HR工具箱 0.2.0"
 git push gitee main
 ```
 
-旧版本客户端如果还在读取 Gitee 的 `release/latest.json`，推送 Gitee 后仍能作为桥接入口；真正的 zip 下载会走 ScriptHub：
+推送 Gitee 后，Mac 拉取仓库，再把 `release/scripthub_static/hr-toolkit/` 复制到服务器的 `fastApiProject/static/` 下。客户端真正下载的 zip 会走 ScriptHub：
 
 ```text
 http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-版本号-win.zip

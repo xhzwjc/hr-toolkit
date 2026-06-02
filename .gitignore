@@ -27,9 +27,18 @@ dist/
 *.egg-info/
 *.spec
 
-# Generated release examples
+# Generated release artifacts
+release/*
 !release/latest.json.example
 !release/update_url.txt.example
+!release/scripthub_static/
+release/scripthub_static/*
+!release/scripthub_static/hr-toolkit/
+release/scripthub_static/hr-toolkit/*
+!release/scripthub_static/hr-toolkit/latest.json
+!release/scripthub_static/hr-toolkit/releases/
+release/scripthub_static/hr-toolkit/releases/*
+!release/scripthub_static/hr-toolkit/releases/HRToolkit-*-win.zip
 
 # Local environment and logs
 .env

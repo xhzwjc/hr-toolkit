@@ -14,12 +14,12 @@ from versioning import read_project_version
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GITEE_RAW_BASE = "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main"
 SCRIPT_HUB_MANIFEST_URL = "http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json"
 SCRIPT_HUB_RELEASE_BASE_URL = "http://hr.seedlingintl.com/api/static/hr-toolkit/releases"
 DEFAULT_BUNDLE_DIR = REPO_ROOT / "release" / "scripthub_static" / "hr-toolkit"
+DEFAULT_RELEASE_DIR = DEFAULT_BUNDLE_DIR / "releases"
 UPDATE_URL = SCRIPT_HUB_MANIFEST_URL
-KEEP_RELEASE_COUNT = 2
+KEEP_RELEASE_COUNT = 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--notes", nargs="*", default=["更新 HR工具箱"], help="更新说明，可写多条")
     parser.add_argument("--app-dir", type=Path, default=REPO_ROOT / "dist" / "HRToolkit", help="PyInstaller 输出目录")
     parser.add_argument("--updater", type=Path, help="HRToolkitUpdater 文件路径；默认从 dist 中查找")
-    parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "release" / "downloads", help="zip 输出目录")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_RELEASE_DIR, help="zip 输出目录")
     parser.add_argument("--manifest-url", default=SCRIPT_HUB_MANIFEST_URL, help="客户端检查更新的 latest.json 地址")
     parser.add_argument("--release-base-url", default=SCRIPT_HUB_RELEASE_BASE_URL, help="更新包下载目录 URL")
     parser.add_argument("--bundle-dir", type=Path, default=DEFAULT_BUNDLE_DIR, help="生成给 ScriptHub 静态目录的一次性复制文件夹")
@@ -51,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     zip_path = args.output_dir / f"HRToolkit-{args.version}-{_platform_suffix(args.platform)}.zip"
     _zip_app_dir(app_dir, zip_path)
     digest = _sha256_file(zip_path)
-    manifest_path = REPO_ROOT / "release" / "latest.json"
+    manifest_path = args.bundle_dir / "latest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = _load_manifest(manifest_path)
     manifest["version"] = args.version
     manifest["mandatory"] = True
@@ -63,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _prune_release_dir(args.output_dir, args.platform)
-    bundle_dir = _write_static_bundle(args.bundle_dir, manifest_path, zip_path, updater, args.version, args.platform)
+    bundle_dir = _write_static_bundle(args.bundle_dir, manifest_path, zip_path, args.platform)
     if args.publish_dir is not None:
         _copy_static_bundle(bundle_dir, args.publish_dir)
         _prune_static_dir(args.publish_dir, args.platform)
@@ -127,36 +128,28 @@ def _load_manifest(path: Path) -> dict:
     return {"version": "0.0.0", "mandatory": True, "notes": [], "platforms": {}}
 
 
-def _write_static_bundle(bundle_dir: Path, manifest_path: Path, zip_path: Path, updater: Path, version: str, platform: str) -> Path:
+def _write_static_bundle(bundle_dir: Path, manifest_path: Path, zip_path: Path, platform: str) -> Path:
     releases_dir = bundle_dir / "releases"
-    tools_dir = bundle_dir / "tools"
     releases_dir.mkdir(parents=True, exist_ok=True)
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(manifest_path, bundle_dir / "latest.json")
-    shutil.copy2(zip_path, releases_dir / zip_path.name)
-    updater_suffix = "exe" if platform == "windows" else "bin"
-    updater_name = f"HRToolkitUpdater-{version}-{_platform_suffix(platform)}.{updater_suffix}"
-    shutil.copy2(updater, tools_dir / updater_name)
+    target_zip = releases_dir / zip_path.name
+    if zip_path.resolve() != target_zip.resolve():
+        shutil.copy2(zip_path, target_zip)
+    _remove_legacy_tools_dir(bundle_dir / "tools")
     _prune_static_dir(bundle_dir, platform)
     return bundle_dir
 
 
 def _copy_static_bundle(bundle_dir: Path, publish_dir: Path) -> None:
     releases_dir = publish_dir / "releases"
-    tools_dir = publish_dir / "tools"
     releases_dir.mkdir(parents=True, exist_ok=True)
-    tools_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(bundle_dir / "latest.json", publish_dir / "latest.json")
     for file_path in (bundle_dir / "releases").glob("*.zip"):
         shutil.copy2(file_path, releases_dir / file_path.name)
-    for file_path in (bundle_dir / "tools").glob("*"):
-        if file_path.is_file():
-            shutil.copy2(file_path, tools_dir / file_path.name)
+    _remove_legacy_tools_dir(publish_dir / "tools")
 
 
 def _prune_static_dir(static_dir: Path, platform: str) -> None:
     _prune_release_dir(static_dir / "releases", platform)
-    _prune_tool_dir(static_dir / "tools", platform)
 
 
 def _prune_release_dir(release_dir: Path, platform: str) -> None:
@@ -164,10 +157,9 @@ def _prune_release_dir(release_dir: Path, platform: str) -> None:
     _prune_versioned_files(release_dir, f"HRToolkit-*-{suffix}.zip")
 
 
-def _prune_tool_dir(tool_dir: Path, platform: str) -> None:
-    suffix = _platform_suffix(platform)
-    extension = "exe" if platform == "windows" else "bin"
-    _prune_versioned_files(tool_dir, f"HRToolkitUpdater-*-{suffix}.{extension}")
+def _remove_legacy_tools_dir(tools_dir: Path) -> None:
+    if tools_dir.exists():
+        shutil.rmtree(tools_dir)
 
 
 def _prune_versioned_files(directory: Path, pattern: str) -> None:
