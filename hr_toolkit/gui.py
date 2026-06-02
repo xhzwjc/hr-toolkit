@@ -42,38 +42,51 @@ RENAME_MODE_LABELS = {
 }
 
 TOOL_NAV_ITEMS = (
-    ("social_security", "需求1  社保汇总"),
-    ("data_statistics", "需求2  数据统计"),
-    ("insurance_ledger", "需求3  保险台账"),
-    ("salary_split", "需求4  工资表拆分"),
-    ("salary_merge", "需求5  工资表合并"),
-    ("personnel_change_merge", "需求6  异动表汇总"),
-    ("archive_import", "需求7  档案入库"),
-    ("folder_rename", "需求8  文件夹改名"),
+    ("social_security", "01  社保汇总"),
+    ("data_statistics", "02  数据统计"),
+    ("insurance_ledger", "03  保险台账"),
+    ("salary_split", "04  工资拆分"),
+    ("salary_merge", "05  工资合并"),
+    ("personnel_change_merge", "06  异动汇总"),
+    ("archive_import", "07  档案入库"),
+    ("folder_rename", "08  文件夹改名"),
 )
 
-COLOR_BG = "#ffffff"
-COLOR_SIDEBAR = "#f4f4f5"
-COLOR_SURFACE = "#ffffff"
-COLOR_BORDER = "#e6e6e8"
-COLOR_TEXT = "#242426"
-COLOR_MUTED = "#8a8a90"
-COLOR_PRIMARY = "#202124"
-COLOR_PRIMARY_ACTIVE = "#000000"
-COLOR_NAV_SELECTED = "#e9e9eb"
-COLOR_SUCCESS = "#0a7c4e"
-COLOR_WARNING = "#c0392b"
-COLOR_TUTORIAL_BG = "#f7f7f8"
-COLOR_TUTORIAL_BORDER = "#e6e6e8"
-APP_DISPLAY_NAME = "HR Toolkit"
-UPDATE_DIALOG_BG = "#ffffff"
-UPDATE_DIALOG_TEXT = "#1d1d1f"
-UPDATE_DIALOG_MUTED = "#555a66"
-UPDATE_DIALOG_TRACK = "#ececec"
-UPDATE_DIALOG_PRIMARY = "#087cff"
-UPDATE_DIALOG_PRIMARY_ACTIVE = "#0069d9"
-UPDATE_DIALOG_SECONDARY = "#efeff1"
-UPDATE_DIALOG_SECONDARY_ACTIVE = "#e4e4e7"
+# A restrained, operations-console palette: warm canvas, ink sidebar,
+# and one calm accent color. It gives the tool a recognizable product
+# language without the over-styled “AI template” look.
+COLOR_BG = "#f6f2ea"
+COLOR_SIDEBAR = "#141b24"
+COLOR_SIDEBAR_ELEVATED = "#1d2733"
+COLOR_SURFACE = "#fffdf8"
+COLOR_SURFACE_ALT = "#fbf7ef"
+COLOR_BORDER = "#ded4c3"
+COLOR_TEXT = "#1f2932"
+COLOR_MUTED = "#6f7680"
+COLOR_PRIMARY = "#2f6f5e"
+COLOR_PRIMARY_ACTIVE = "#235445"
+COLOR_ACCENT = "#d2ae68"
+COLOR_NAV_SELECTED = "#243140"
+COLOR_NAV_HOVER = "#1c2632"
+COLOR_NAV_TEXT = "#c5ced8"
+COLOR_NAV_TEXT_SELECTED = "#fffaf0"
+COLOR_SUCCESS = "#16825d"
+COLOR_WARNING = "#a84632"
+COLOR_TUTORIAL_BG = "#fff8e7"
+COLOR_TUTORIAL_BORDER = "#ead7ab"
+COLOR_LOG_BG = "#101820"
+COLOR_LOG_TEXT = "#dfe7ee"
+COLOR_LOG_MUTED = "#8f9baa"
+APP_DISPLAY_NAME = "HR Workbench"
+APP_SUBTITLE = "Excel 批处理 · 台账生成"
+UPDATE_DIALOG_BG = "#fffdf8"
+UPDATE_DIALOG_TEXT = "#1f2932"
+UPDATE_DIALOG_MUTED = "#6f7680"
+UPDATE_DIALOG_TRACK = "#eadfce"
+UPDATE_DIALOG_PRIMARY = COLOR_PRIMARY
+UPDATE_DIALOG_PRIMARY_ACTIVE = COLOR_PRIMARY_ACTIVE
+UPDATE_DIALOG_SECONDARY = "#eee5d7"
+UPDATE_DIALOG_SECONDARY_ACTIVE = "#e4d7c4"
 
 
 class CodexButton(Canvas):
@@ -102,17 +115,18 @@ class CodexButton(Canvas):
         self._variable_trace: str | None = None
         display_text = self._display_text()
         initial_width = width or self._measure_width(display_text, icon, min_width)
+        self._canvas_bg = self._resolve_parent_bg(master)
         super().__init__(
             master,
             width=initial_width,
             height=height,
-            bg=COLOR_BG,
+            bg=self._canvas_bg,
             highlightthickness=0,
             bd=0,
             cursor="hand2",
         )
         if textvariable is not None:
-            self._variable_trace = textvariable.trace_add("write", lambda *_args: self._refresh_layout())
+            self._variable_trace = textvariable.trace_add("write", lambda *_args: self._redraw())
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_click)
@@ -137,9 +151,27 @@ class CodexButton(Canvas):
             self._variant = kwargs.pop("variant")
         if kwargs:
             super().configure(**kwargs)
-        self._refresh_layout()
+        self._redraw()
 
     config = configure
+
+    @staticmethod
+    def _resolve_parent_bg(master) -> str:
+        try:
+            background = master.cget("background")
+            if background:
+                return background
+        except Exception:
+            pass
+        try:
+            style_name = master.cget("style")
+            if style_name:
+                background = ttk.Style(master).lookup(style_name, "background")
+                if background:
+                    return background
+        except Exception:
+            pass
+        return COLOR_BG
 
     def _display_text(self) -> str:
         if self._textvariable is not None:
@@ -153,19 +185,12 @@ class CodexButton(Canvas):
             width += 20
         return max(min_width, width)
 
-    def _refresh_layout(self) -> None:
-        target_width = self._measure_width(self._display_text(), self._icon, self._min_width)
-        current_width = int(float(self.cget("width")))
-        if target_width > current_width:
-            super().configure(width=target_width)
-        self._redraw()
-
     def _palette(self) -> tuple[str, str, str, str]:
         if self._state == "disabled":
-            return "#f4f4f5", "#f4f4f5", COLOR_MUTED, COLOR_BORDER
+            return "#eee7dc", "#eee7dc", "#9b9286", "#ddd2c1"
         if self._variant == "primary":
-            return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#ffffff", COLOR_PRIMARY
-        return "#ffffff", "#f5f5f6", COLOR_TEXT, COLOR_BORDER
+            return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#fffdf8", COLOR_PRIMARY
+        return COLOR_SURFACE, COLOR_SURFACE_ALT, COLOR_TEXT, COLOR_BORDER
 
     def _on_enter(self, _event=None) -> None:
         self._hover = True
@@ -234,8 +259,8 @@ class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(f"{APP_DISPLAY_NAME} v{__version__}")
-        self.root.geometry("1000x680")
-        self.root.minsize(900, 620)
+        self.root.geometry("1080x720")
+        self.root.minsize(980, 660)
         self.root.configure(bg=COLOR_BG)
 
         self.current_tool = "social_security"
@@ -303,7 +328,7 @@ class HRToolkitApp:
         self.base_font = (family, 10)
         self.small_font = (family, 9)
         self.tiny_font = (family, 8)
-        self.title_font = (family, 17, "bold")
+        self.title_font = (family, 20, "bold")
         self.section_font = (family, 10, "bold")
         self.nav_font = (family, 10)
         self.nav_selected_font = (family, 10, "bold")
@@ -316,8 +341,9 @@ class HRToolkitApp:
         style.configure(".", font=self.base_font, background=COLOR_BG, foreground=COLOR_TEXT)
         style.configure("App.TFrame", background=COLOR_BG)
         style.configure("Sidebar.TFrame", background=COLOR_SIDEBAR)
+        style.configure("SidebarElevated.TFrame", background=COLOR_SIDEBAR_ELEVATED)
         style.configure("Content.TFrame", background=COLOR_BG)
-        style.configure("Card.TFrame", background=COLOR_SURFACE)
+        style.configure("Card.TFrame", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=1)
         style.configure("InputWrap.TFrame", background=COLOR_SURFACE)
         style.configure("Separator.TFrame", background=COLOR_BORDER)
         style.configure(
@@ -332,13 +358,15 @@ class HRToolkitApp:
         style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=1, bordercolor=COLOR_BORDER)
         style.configure("NavRow.TFrame", background=COLOR_SIDEBAR)
         style.configure("NavIndicator.TFrame", background=COLOR_SIDEBAR)
-        style.configure("NavIndicatorSelected.TFrame", background=COLOR_SIDEBAR)
+        style.configure("NavIndicatorSelected.TFrame", background=COLOR_ACCENT)
         style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
         style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
-        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.small_font)
-        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 13, "bold"))
-        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
-        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.tiny_font)
+        style.configure("Eyebrow.TLabel", background=COLOR_BG, foreground=COLOR_PRIMARY, font=(self.base_font[0], 9, "bold"))
+        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], 9, "bold"))
+        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground="#fffaf0", font=(self.base_font[0], 13, "bold"))
+        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground="#96a1ad", font=self.small_font)
+        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#7f8c99", font=(self.base_font[0], 8, "bold"))
+        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#7f8c99", font=self.tiny_font)
         style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=(8, 6))
         style.configure(
@@ -349,10 +377,10 @@ class HRToolkitApp:
             darkcolor=COLOR_BORDER,
             relief="solid",
         )
-        style.configure("Card.TLabelframe.Label", background=COLOR_BG, foreground=COLOR_TEXT, font=self.section_font)
+        style.configure("Card.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("Rename.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid")
         style.configure("Rename.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
-        style.configure("App.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.base_font)
+        style.configure("App.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
         style.configure(
             "App.TEntry",
             fieldbackground=COLOR_SURFACE,
@@ -378,42 +406,55 @@ class HRToolkitApp:
             arrowcolor=COLOR_MUTED,
             padding=(10, 6),
         )
-        style.configure("Nav.TButton", anchor="w", padding=(12, 8), background=COLOR_SIDEBAR, foreground="#4a4a4f", borderwidth=0, font=self.nav_font, relief="flat")
-        style.configure("NavSelected.TButton", anchor="w", padding=(12, 8), background=COLOR_NAV_SELECTED, foreground=COLOR_TEXT, borderwidth=0, font=self.nav_selected_font, relief="flat")
-        style.map("Nav.TButton", background=[("active", "#eeeeef")], foreground=[("active", COLOR_TEXT)])
-        style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)])
-        style.configure("Primary.TButton", padding=(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
+        style.configure("Nav.TButton", anchor="w", padding=(14, 9), background=COLOR_SIDEBAR, foreground=COLOR_NAV_TEXT, borderwidth=0, font=self.nav_font, relief="flat")
+        style.configure("NavSelected.TButton", anchor="w", padding=(14, 9), background=COLOR_NAV_SELECTED, foreground=COLOR_NAV_TEXT_SELECTED, borderwidth=0, font=self.nav_selected_font, relief="flat")
+        style.map("Nav.TButton", background=[("active", COLOR_NAV_HOVER)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
+        style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
+        style.configure("Primary.TButton", padding=(16, 8), background=COLOR_PRIMARY, foreground="#fffdf8", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
         style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
-        style.configure("Secondary.TButton", padding=(12, 7), background="#f7f7f8", foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=1)
-        style.map("Secondary.TButton", background=[("active", "#eeeeef"), ("disabled", "#f2f2f3")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#d8d8dc")])
-        style.configure("Icon.TButton", padding=(8, 6), background="#f7f7f8", foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=1, relief="solid", font=(self.base_font[0], 10, "bold"))
-        style.map("Icon.TButton", background=[("active", "#eeeeef")], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#d8d8dc")])
+        style.configure("Secondary.TButton", padding=(12, 7), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=1)
+        style.map("Secondary.TButton", background=[("active", COLOR_SURFACE_ALT), ("disabled", "#eee7dc")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#c9bda9")])
+        style.configure("Icon.TButton", padding=(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=1, relief="solid", font=(self.base_font[0], 10, "bold"))
+        style.map("Icon.TButton", background=[("active", COLOR_SURFACE_ALT)], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#c9bda9")])
         style.configure("Change.TNotebook", background=COLOR_BG, borderwidth=0)
-        style.configure("Change.TNotebook.Tab", padding=(16, 8), background="#f7f7f8", foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
-        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_NAV_SELECTED)], foreground=[("selected", COLOR_TEXT)])
+        style.configure("Change.TNotebook.Tab", padding=(18, 9), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
+        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_PRIMARY)], foreground=[("selected", "#fffdf8")])
 
     def _build_layout(self) -> None:
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(root_frame, width=220, padding=(14, 18, 10, 16), style="Sidebar.TFrame")
+        left_frame = ttk.Frame(root_frame, width=252, padding=(18, 22, 16, 16), style="Sidebar.TFrame")
         left_frame.pack(side=LEFT, fill=Y)
         left_frame.pack_propagate(False)
 
-        ttk.Label(left_frame, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
+        brand_row = ttk.Frame(left_frame, style="Sidebar.TFrame")
+        brand_row.pack(fill="x")
+        brand_mark = Canvas(brand_row, width=42, height=42, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        brand_mark.pack(side=LEFT)
+        self._draw_round_rect(brand_mark, 2, 2, 40, 40, 10, fill=COLOR_ACCENT, outline="")
+        brand_mark.create_text(21, 21, text="HR", fill=COLOR_SIDEBAR, font=(self.base_font[0], 11, "bold"))
+        brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
+        brand_text.pack(side=LEFT, fill="x", expand=True, padx=(10, 0))
+        ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
+        ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w", pady=(3, 0))
+
+        ttk.Label(left_frame, text="WORKFLOWS", style="SidebarSection.TLabel").pack(anchor="w", pady=(28, 8))
         self.nav_indicators = {}
 
         nav_frame = ttk.Frame(left_frame, style="Sidebar.TFrame")
-        nav_frame.pack(fill="x", pady=(24, 0))
+        nav_frame.pack(fill="x")
         for tool_id, label in TOOL_NAV_ITEMS:
             row = ttk.Frame(nav_frame, style="NavRow.TFrame")
-            row.pack(fill="x", pady=1)
+            row.pack(fill="x", pady=2)
+            indicator_width = 4 if tool_id == self.current_tool else 0
             indicator = ttk.Frame(
                 row,
-                width=0,
+                width=indicator_width,
                 style="NavIndicatorSelected.TFrame" if tool_id == self.current_tool else "NavIndicator.TFrame",
             )
             indicator.pack(side=LEFT, fill=Y)
+            indicator.pack_propagate(False)
             button = ttk.Button(
                 row,
                 text=label,
@@ -424,19 +465,23 @@ class HRToolkitApp:
             self.nav_buttons[tool_id] = button
             self.nav_indicators[tool_id] = indicator
 
-        ttk.Label(left_frame, text=f"v{__version__}", style="Version.TLabel").pack(side="bottom", anchor="w")
+        sidebar_footer = ttk.Frame(left_frame, style="Sidebar.TFrame")
+        sidebar_footer.pack(side="bottom", fill="x")
+        ttk.Label(sidebar_footer, text="本地处理 · 不上传数据", style="SidebarMuted.TLabel").pack(anchor="w")
+        ttk.Label(sidebar_footer, text=f"Version {__version__}", style="Version.TLabel").pack(anchor="w", pady=(5, 0))
 
         ttk.Frame(root_frame, width=1, style="Separator.TFrame").pack(side=LEFT, fill=Y)
 
-        right_frame = ttk.Frame(root_frame, padding=(28, 24, 28, 22), style="Content.TFrame")
+        right_frame = ttk.Frame(root_frame, padding=(34, 30, 34, 24), style="Content.TFrame")
         right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
 
         title_row = ttk.Frame(right_frame, style="Content.TFrame")
         title_row.pack(fill="x")
         title_row.columnconfigure(0, weight=1)
-        ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(title_row, text="人员运营自动化", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 0))
         title_actions = ttk.Frame(title_row, style="Content.TFrame")
-        title_actions.grid(row=0, column=1, sticky="e")
+        title_actions.grid(row=0, column=1, rowspan=2, sticky="ne")
         self.check_update_button = CodexButton(
             title_actions,
             text="检查更新",
@@ -445,13 +490,13 @@ class HRToolkitApp:
             width=118,
         )
         self.check_update_button.pack(side=LEFT)
-        self.tutorial_toggle_button = CodexButton(title_actions, text="使用教程", icon="?", width=118)
+        self.tutorial_toggle_button = CodexButton(title_actions, text="使用教程", icon="i", width=118)
         self.tutorial_toggle_button.pack(side=LEFT, padx=(8, 0))
         ttk.Label(
             right_frame,
             textvariable=self.tool_description,
             style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(6, 20))
+        ).pack(anchor="w", pady=(8, 22))
 
         self.change_tabs = ttk.Notebook(right_frame, style="Change.TNotebook")
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="异动表汇总")
@@ -480,7 +525,7 @@ class HRToolkitApp:
         self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], 10, "bold"))
         self._set_tutorial_text()
 
-        form = ttk.Frame(right_frame, style="Content.TFrame")
+        form = ttk.Frame(right_frame, padding=(18, 16, 18, 16), style="Card.TFrame")
         form.pack(fill="x")
         self.form = form
 
@@ -494,7 +539,7 @@ class HRToolkitApp:
             input_frame.grid(row=row_index, column=1, sticky="ew", padx=(12, 0), pady=5)
             entry = ttk.Entry(input_frame, textvariable=value_var, style="App.TEntry")
             entry.pack(side=LEFT, fill=BOTH, expand=True)
-            button = CodexButton(input_frame, text="...", command=command, width=48, min_width=48)
+            button = CodexButton(input_frame, text="选择", command=command, width=64, min_width=64)
             button.pack(side=RIGHT, padx=(6, 0))
             return label, input_frame, button
 
@@ -520,28 +565,24 @@ class HRToolkitApp:
             self.input_entry_widget,
             text="文件夹",
             command=self._choose_change_folder,
-            icon="□",
             width=96,
         )
         self.change_file_button = CodexButton(
             self.input_entry_widget,
             text="文件/压缩包",
             command=self._choose_change_files_or_zip,
-            icon="□",
             width=126,
         )
         self.change_summary_folder_button = CodexButton(
             self.summary_entry_widget,
             text="文件夹",
             command=self._choose_change_summary_folder,
-            icon="□",
             width=96,
         )
         self.change_summary_file_button = CodexButton(
             self.summary_entry_widget,
             text="文件",
             command=self._choose_change_summary_file,
-            icon="□",
             width=84,
         )
 
@@ -598,13 +639,13 @@ class HRToolkitApp:
         run_button_box = ttk.Frame(actions, width=126, height=38, style="Content.TFrame")
         run_button_box.pack(side=LEFT)
         run_button_box.pack_propagate(False)
-        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="▶", min_width=126)
+        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="→", min_width=126)
         self.run_button.pack(fill=BOTH, expand=True)
         self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, icon="↗", width=132)
         self.open_button.pack(side=LEFT, padx=(8, 0))
 
-        ttk.Label(right_frame, text="日志", style="Section.TLabel").pack(anchor="w")
-        log_frame = ttk.Frame(right_frame, style="Content.TFrame")
+        ttk.Label(right_frame, text="运行日志", style="Section.TLabel").pack(anchor="w")
+        log_frame = ttk.Frame(right_frame, padding=(1, 1, 1, 1), style="Card.TFrame")
         log_frame.pack(fill=BOTH, expand=True, pady=(8, 0))
         scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
         self.log_text = Text(
@@ -612,20 +653,19 @@ class HRToolkitApp:
             height=12,
             wrap="word",
             yscrollcommand=scrollbar.set,
-            bg=COLOR_SURFACE,
-            fg=COLOR_TEXT,
+            bg=COLOR_LOG_BG,
+            fg=COLOR_LOG_TEXT,
             relief="flat",
             bd=0,
-            highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
-            highlightcolor=COLOR_PRIMARY,
-            padx=14,
-            pady=12,
+            highlightthickness=0,
+            insertbackground=COLOR_LOG_TEXT,
+            padx=16,
+            pady=14,
             font=self.mono_font,
         )
-        self.log_text.tag_configure("success", foreground=COLOR_SUCCESS)
-        self.log_text.tag_configure("warning", foreground=COLOR_WARNING)
-        self.log_text.tag_configure("muted", foreground=COLOR_MUTED)
+        self.log_text.tag_configure("success", foreground="#49c08d")
+        self.log_text.tag_configure("warning", foreground="#ffb86b")
+        self.log_text.tag_configure("muted", foreground=COLOR_LOG_MUTED)
         scrollbar.config(command=self.log_text.yview)
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
@@ -1146,16 +1186,17 @@ class HRToolkitApp:
 
     def _refresh_nav_buttons(self) -> None:
         for tool_id, button in self.nav_buttons.items():
-            style = "NavSelected.TButton" if tool_id == self.current_tool else "Nav.TButton"
+            selected = tool_id == self.current_tool
+            style = "NavSelected.TButton" if selected else "Nav.TButton"
             button.configure(style=style)
             indicator = self.nav_indicators.get(tool_id)
             if indicator is not None:
-                indicator_style = "NavIndicatorSelected.TFrame" if tool_id == self.current_tool else "NavIndicator.TFrame"
-                indicator.configure(style=indicator_style)
+                indicator_style = "NavIndicatorSelected.TFrame" if selected else "NavIndicator.TFrame"
+                indicator.configure(style=indicator_style, width=4 if selected else 0)
 
     def _set_tool_texts(self) -> None:
         if self.current_tool == "social_security":
-            self.tool_title.set("需求1：社保明细与汇总")
+            self.tool_title.set("社保明细与汇总")
             self.tool_description.set("选择社保缴费清单、压缩包或文件夹，再选择参保人员花名册，自动生成明细和汇总。")
             self.input_label.set("社保清单输入")
             self.choose_input_text.set("选择")
@@ -1163,7 +1204,7 @@ class HRToolkitApp:
             self.summary_button_text.set("选择花名册")
             self.run_button_text.set("生成报表")
         elif self.current_tool == "data_statistics":
-            self.tool_title.set("需求2：考勤与周月报统计")
+            self.tool_title.set("考勤与周月报统计")
             self.tool_description.set("选择考勤结果、周报记录、月报记录，或包含这些文件的文件夹/压缩包，自动生成统计表和异常明细。")
             self.input_label.set("数据文件输入")
             self.choose_input_text.set("选择")
@@ -1171,7 +1212,7 @@ class HRToolkitApp:
             self.summary_button_text.set("选择名单")
             self.run_button_text.set("生成统计")
         elif self.current_tool == "insurance_ledger":
-            self.tool_title.set("需求3：保险台账与增减预警")
+            self.tool_title.set("保险台账与增减预警")
             self.tool_description.set("选择各保单人员清单、压缩包或文件夹，再选择需求6的人力资源分析表，自动生成保险台账。")
             self.input_label.set("保单清单输入")
             self.choose_input_text.set("选择")
@@ -1179,7 +1220,7 @@ class HRToolkitApp:
             self.summary_button_text.set("选择分析表")
             self.run_button_text.set("生成台账")
         elif self.current_tool == "salary_merge":
-            self.tool_title.set("需求5：多月工资合并个人薪资汇总")
+            self.tool_title.set("多月工资合并")
             self.tool_description.set("选择工资表文件、压缩包或文件夹；如已有汇总表，可一并选择后追加新月份。")
             self.input_label.set("工资表文件/文件夹")
             self.choose_input_text.set("选择")
@@ -1187,7 +1228,7 @@ class HRToolkitApp:
             self.summary_button_text.set("选择汇总表")
             self.run_button_text.set("开始合并")
         elif self.current_tool == "personnel_change_merge":
-            self.tool_title.set("需求6：异动表汇总与花名册")
+            self.tool_title.set("异动表汇总与花名册")
             if self.change_mode == "roster":
                 self.tool_description.set("选择异动汇总表和人力资源花名册，单独更新花名册。")
                 self.input_label.set("异动汇总表/文件夹")
@@ -1203,7 +1244,7 @@ class HRToolkitApp:
                 self.summary_button_text.set("选择汇总表")
                 self.run_button_text.set("开始汇总")
         elif self.current_tool == "folder_rename":
-            self.tool_title.set("需求8：人员资料文件夹改名")
+            self.tool_title.set("人员资料文件夹改名")
             self.tool_description.set("选择人员资料目录，先预览，再确认改名。")
             self.input_label.set("人员文件夹目录")
             self.choose_input_text.set("选择文件夹")
@@ -1211,7 +1252,7 @@ class HRToolkitApp:
             self.summary_button_text.set("选择")
             self.run_button_text.set("预览")
         elif self.current_tool == "archive_import":
-            self.tool_title.set("需求7：档案入库与档案表")
+            self.tool_title.set("档案入库与档案表")
             if self.archive_mode == "export":
                 self.tool_description.set("选择档案汇总表、压缩包或文件夹，按公司写入已有档案表；没有已有表时自动新建。")
                 self.input_label.set("档案汇总输入")
@@ -1227,7 +1268,7 @@ class HRToolkitApp:
                 self.summary_button_text.set("选择汇总表")
                 self.run_button_text.set("开始入库")
         elif self.current_tool == "salary_split":
-            self.tool_title.set("需求4：工资表按入职公司拆分")
+            self.tool_title.set("工资表按入职公司拆分")
             self.tool_description.set("选择一个包含“汇总表”和“明细表”的工资表，工具会按“入职公司”拆成多个公司文件。")
             self.input_label.set("工资表文件")
             self.choose_input_text.set("选择文件")
