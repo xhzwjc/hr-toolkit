@@ -27,10 +27,7 @@ dist/
 *.egg-info/
 *.spec
 
-# Generated release artifacts
-release/latest.json
-release/downloads/
-release/scripthub_static/
+# Generated release examples
 !release/latest.json.example
 !release/update_url.txt.example
 
