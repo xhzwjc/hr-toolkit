@@ -7,7 +7,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, DoubleVar, Toplevel, filedialog, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, DoubleVar, Frame, Label, Toplevel, filedialog, messagebox
 from tkinter import Tk, StringVar, Text
 from tkinter import ttk
 
@@ -52,25 +52,188 @@ TOOL_NAV_ITEMS = (
     ("folder_rename", "需求8  文件夹改名"),
 )
 
-COLOR_BG = "#f7f8fa"
-COLOR_SIDEBAR = "#f0f2f5"
+COLOR_BG = "#ffffff"
+COLOR_SIDEBAR = "#f4f4f5"
 COLOR_SURFACE = "#ffffff"
-COLOR_BORDER = "#e4e7ec"
-COLOR_TEXT = "#1a1d23"
-COLOR_MUTED = "#8c95a6"
-COLOR_PRIMARY = "#2d6ef5"
-COLOR_PRIMARY_ACTIVE = "#1a5ae0"
-COLOR_NAV_SELECTED = "#ffffff"
+COLOR_BORDER = "#e6e6e8"
+COLOR_TEXT = "#242426"
+COLOR_MUTED = "#8a8a90"
+COLOR_PRIMARY = "#202124"
+COLOR_PRIMARY_ACTIVE = "#000000"
+COLOR_NAV_SELECTED = "#e9e9eb"
 COLOR_SUCCESS = "#0a7c4e"
 COLOR_WARNING = "#c0392b"
-COLOR_TUTORIAL_BG = "#f0f4ff"
-COLOR_TUTORIAL_BORDER = "#c7d7fb"
+COLOR_TUTORIAL_BG = "#f7f7f8"
+COLOR_TUTORIAL_BORDER = "#e6e6e8"
+APP_DISPLAY_NAME = "HR Toolkit"
+UPDATE_DIALOG_BG = "#ffffff"
+UPDATE_DIALOG_TEXT = "#1d1d1f"
+UPDATE_DIALOG_MUTED = "#555a66"
+UPDATE_DIALOG_TRACK = "#ececec"
+UPDATE_DIALOG_PRIMARY = "#087cff"
+UPDATE_DIALOG_PRIMARY_ACTIVE = "#0069d9"
+UPDATE_DIALOG_SECONDARY = "#efeff1"
+UPDATE_DIALOG_SECONDARY_ACTIVE = "#e4e4e7"
+
+
+class CodexButton(Canvas):
+    def __init__(
+        self,
+        master,
+        *,
+        text: str = "",
+        command=None,
+        textvariable: StringVar | None = None,
+        icon: str = "",
+        variant: str = "secondary",
+        width: int | None = None,
+        height: int = 34,
+        min_width: int = 92,
+    ) -> None:
+        self._text = text
+        self._command = command
+        self._textvariable = textvariable
+        self._icon = icon
+        self._variant = variant
+        self._state = "normal"
+        self._hover = False
+        self._height = height
+        self._min_width = min_width
+        self._variable_trace: str | None = None
+        display_text = self._display_text()
+        initial_width = width or self._measure_width(display_text, icon, min_width)
+        super().__init__(
+            master,
+            width=initial_width,
+            height=height,
+            bg=COLOR_BG,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        if textvariable is not None:
+            self._variable_trace = textvariable.trace_add("write", lambda *_args: self._refresh_layout())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Configure>", lambda _event: self._redraw())
+        self._redraw()
+
+    def configure(self, cnf=None, **kwargs):  # type: ignore[override]
+        if cnf:
+            kwargs.update(cnf)
+        if "text" in kwargs:
+            self._text = kwargs.pop("text")
+        if "command" in kwargs:
+            self._command = kwargs.pop("command")
+        if "state" in kwargs:
+            self._state = kwargs.pop("state")
+            super().configure(cursor="" if self._state == "disabled" else "hand2")
+        if "textvariable" in kwargs:
+            self._textvariable = kwargs.pop("textvariable")
+        if "icon" in kwargs:
+            self._icon = kwargs.pop("icon")
+        if "variant" in kwargs:
+            self._variant = kwargs.pop("variant")
+        if kwargs:
+            super().configure(**kwargs)
+        self._refresh_layout()
+
+    config = configure
+
+    def _display_text(self) -> str:
+        if self._textvariable is not None:
+            return self._textvariable.get()
+        return self._text
+
+    def _measure_width(self, text: str, icon: str, min_width: int) -> int:
+        text_units = sum(2 if ord(char) > 127 else 1 for char in text)
+        width = 28 + text_units * 7
+        if icon:
+            width += 20
+        return max(min_width, width)
+
+    def _refresh_layout(self) -> None:
+        target_width = self._measure_width(self._display_text(), self._icon, self._min_width)
+        current_width = int(float(self.cget("width")))
+        if target_width > current_width:
+            super().configure(width=target_width)
+        self._redraw()
+
+    def _palette(self) -> tuple[str, str, str, str]:
+        if self._state == "disabled":
+            return "#f4f4f5", "#f4f4f5", COLOR_MUTED, COLOR_BORDER
+        if self._variant == "primary":
+            return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#ffffff", COLOR_PRIMARY
+        return "#ffffff", "#f5f5f6", COLOR_TEXT, COLOR_BORDER
+
+    def _on_enter(self, _event=None) -> None:
+        self._hover = True
+        self._redraw()
+
+    def _on_leave(self, _event=None) -> None:
+        self._hover = False
+        self._redraw()
+
+    def _on_click(self, _event=None) -> None:
+        if self._state == "disabled" or self._command is None:
+            return
+        self._command()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), int(float(self.cget("width"))))
+        height = max(self.winfo_height(), self._height)
+        normal, active, foreground, border = self._palette()
+        fill = active if self._hover and self._state != "disabled" else normal
+        self._draw_round_rect(1, 1, width - 1, height - 1, 9, fill=fill, outline=border, width=1)
+        text = self._display_text()
+        font = (self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family"), 10)
+        if self._icon:
+            content_width = self._measure_width(text, self._icon, 0) - 28
+            start_x = max((width - content_width) / 2, 12)
+            self.create_text(start_x + 7, height / 2, text=self._icon, fill=foreground, font=font, anchor="center")
+            self.create_text(start_x + 22, height / 2, text=text, fill=foreground, font=font, anchor="w")
+        else:
+            self.create_text(width / 2, height / 2, text=text, fill=foreground, font=font)
+
+    def _draw_round_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
+        radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+        self.create_polygon(
+            x1 + radius,
+            y1,
+            x2 - radius,
+            y1,
+            x2,
+            y1,
+            x2,
+            y1 + radius,
+            x2,
+            y2 - radius,
+            x2,
+            y2,
+            x2 - radius,
+            y2,
+            x1 + radius,
+            y2,
+            x1,
+            y2,
+            x1,
+            y2 - radius,
+            x1,
+            y1 + radius,
+            x1,
+            y1,
+            smooth=True,
+            splinesteps=16,
+            **kwargs,
+        )
 
 
 class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
-        self.root.title(f"HR工具箱 v{__version__}")
+        self.root.title(f"{APP_DISPLAY_NAME} v{__version__}")
         self.root.geometry("1000x680")
         self.root.minsize(900, 620)
         self.root.configure(bg=COLOR_BG)
@@ -113,6 +276,10 @@ class HRToolkitApp:
         self.update_window: Toplevel | None = None
         self.update_progress_var: DoubleVar | None = None
         self.update_progress_label: ttk.Label | None = None
+        self.update_progress_canvas: Canvas | None = None
+        self.update_progress_width = 248
+        self.update_progress_job: str | None = None
+        self.update_progress_phase = 0
         self.update_check_in_progress = False
         self.manual_update_check_active = False
 
@@ -136,7 +303,7 @@ class HRToolkitApp:
         self.base_font = (family, 10)
         self.small_font = (family, 9)
         self.tiny_font = (family, 8)
-        self.title_font = (family, 18, "bold")
+        self.title_font = (family, 17, "bold")
         self.section_font = (family, 10, "bold")
         self.nav_font = (family, 10)
         self.nav_selected_font = (family, 10, "bold")
@@ -152,6 +319,7 @@ class HRToolkitApp:
         style.configure("Content.TFrame", background=COLOR_BG)
         style.configure("Card.TFrame", background=COLOR_SURFACE)
         style.configure("InputWrap.TFrame", background=COLOR_SURFACE)
+        style.configure("Separator.TFrame", background=COLOR_BORDER)
         style.configure(
             "Tutorial.TFrame",
             background=COLOR_TUTORIAL_BG,
@@ -164,11 +332,11 @@ class HRToolkitApp:
         style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=1, bordercolor=COLOR_BORDER)
         style.configure("NavRow.TFrame", background=COLOR_SIDEBAR)
         style.configure("NavIndicator.TFrame", background=COLOR_SIDEBAR)
-        style.configure("NavIndicatorSelected.TFrame", background=COLOR_PRIMARY)
+        style.configure("NavIndicatorSelected.TFrame", background=COLOR_SIDEBAR)
         style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
         style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
         style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.small_font)
-        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 14, "bold"))
+        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 13, "bold"))
         style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
         style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.tiny_font)
         style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
@@ -193,7 +361,7 @@ class HRToolkitApp:
             bordercolor=COLOR_BORDER,
             lightcolor=COLOR_BORDER,
             darkcolor=COLOR_BORDER,
-            padding=(8, 6),
+            padding=(10, 7),
             relief="solid",
         )
         style.map(
@@ -208,44 +376,44 @@ class HRToolkitApp:
             foreground=COLOR_TEXT,
             bordercolor=COLOR_BORDER,
             arrowcolor=COLOR_MUTED,
-            padding=(8, 5),
+            padding=(10, 6),
         )
-        style.configure("Nav.TButton", anchor="w", padding=(10, 8), background=COLOR_SIDEBAR, foreground=COLOR_MUTED, borderwidth=0, font=self.nav_font, relief="flat")
-        style.configure("NavSelected.TButton", anchor="w", padding=(10, 8), background=COLOR_NAV_SELECTED, foreground=COLOR_TEXT, borderwidth=0, font=self.nav_selected_font, relief="flat")
-        style.map("Nav.TButton", background=[("active", "#e8ebf0")], foreground=[("active", COLOR_TEXT)])
+        style.configure("Nav.TButton", anchor="w", padding=(12, 8), background=COLOR_SIDEBAR, foreground="#4a4a4f", borderwidth=0, font=self.nav_font, relief="flat")
+        style.configure("NavSelected.TButton", anchor="w", padding=(12, 8), background=COLOR_NAV_SELECTED, foreground=COLOR_TEXT, borderwidth=0, font=self.nav_selected_font, relief="flat")
+        style.map("Nav.TButton", background=[("active", "#eeeeef")], foreground=[("active", COLOR_TEXT)])
         style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)])
-        style.configure("Primary.TButton", padding=(14, 7), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
+        style.configure("Primary.TButton", padding=(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
         style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
-        style.configure("Secondary.TButton", padding=(10, 6), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid")
-        style.map("Secondary.TButton", background=[("active", "#e8ebf0")], bordercolor=[("active", COLOR_PRIMARY)])
-        style.configure("Icon.TButton", padding=(7, 5), background=COLOR_SURFACE, foreground=COLOR_MUTED, borderwidth=0, relief="flat", font=(self.base_font[0], 10, "bold"))
-        style.map("Icon.TButton", background=[("active", "#e8ebf0")], foreground=[("active", COLOR_TEXT)])
+        style.configure("Secondary.TButton", padding=(12, 7), background="#f7f7f8", foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=1)
+        style.map("Secondary.TButton", background=[("active", "#eeeeef"), ("disabled", "#f2f2f3")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#d8d8dc")])
+        style.configure("Icon.TButton", padding=(8, 6), background="#f7f7f8", foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=1, relief="solid", font=(self.base_font[0], 10, "bold"))
+        style.map("Icon.TButton", background=[("active", "#eeeeef")], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#d8d8dc")])
         style.configure("Change.TNotebook", background=COLOR_BG, borderwidth=0)
-        style.configure("Change.TNotebook.Tab", padding=(16, 8), background=COLOR_BG, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
-        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_SURFACE)], foreground=[("selected", COLOR_TEXT)])
+        style.configure("Change.TNotebook.Tab", padding=(16, 8), background="#f7f7f8", foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
+        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_NAV_SELECTED)], foreground=[("selected", COLOR_TEXT)])
 
     def _build_layout(self) -> None:
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(root_frame, width=200, padding=(18, 22, 14, 18), style="Sidebar.TFrame")
+        left_frame = ttk.Frame(root_frame, width=220, padding=(14, 18, 10, 16), style="Sidebar.TFrame")
         left_frame.pack(side=LEFT, fill=Y)
         left_frame.pack_propagate(False)
 
-        ttk.Label(left_frame, text="HR工具箱", style="SidebarTitle.TLabel").pack(anchor="w")
+        ttk.Label(left_frame, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
         self.nav_indicators = {}
 
         nav_frame = ttk.Frame(left_frame, style="Sidebar.TFrame")
-        nav_frame.pack(fill="x", pady=(28, 0))
+        nav_frame.pack(fill="x", pady=(24, 0))
         for tool_id, label in TOOL_NAV_ITEMS:
             row = ttk.Frame(nav_frame, style="NavRow.TFrame")
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=1)
             indicator = ttk.Frame(
                 row,
-                width=3,
+                width=0,
                 style="NavIndicatorSelected.TFrame" if tool_id == self.current_tool else "NavIndicator.TFrame",
             )
-            indicator.pack(side=LEFT, fill=Y, padx=(0, 6))
+            indicator.pack(side=LEFT, fill=Y)
             button = ttk.Button(
                 row,
                 text=label,
@@ -258,7 +426,9 @@ class HRToolkitApp:
 
         ttk.Label(left_frame, text=f"v{__version__}", style="Version.TLabel").pack(side="bottom", anchor="w")
 
-        right_frame = ttk.Frame(root_frame, padding=(32, 28, 28, 24), style="Content.TFrame")
+        ttk.Frame(root_frame, width=1, style="Separator.TFrame").pack(side=LEFT, fill=Y)
+
+        right_frame = ttk.Frame(root_frame, padding=(28, 24, 28, 22), style="Content.TFrame")
         right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
 
         title_row = ttk.Frame(right_frame, style="Content.TFrame")
@@ -267,27 +437,28 @@ class HRToolkitApp:
         ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").grid(row=0, column=0, sticky="w")
         title_actions = ttk.Frame(title_row, style="Content.TFrame")
         title_actions.grid(row=0, column=1, sticky="e")
-        self.check_update_button = ttk.Button(
+        self.check_update_button = CodexButton(
             title_actions,
             text="检查更新",
             command=self._check_updates_manually,
-            style="Secondary.TButton",
+            icon="↻",
+            width=118,
         )
         self.check_update_button.pack(side=LEFT)
-        self.tutorial_toggle_button = ttk.Button(title_actions, text="使用教程", style="Secondary.TButton")
+        self.tutorial_toggle_button = CodexButton(title_actions, text="使用教程", icon="?", width=118)
         self.tutorial_toggle_button.pack(side=LEFT, padx=(8, 0))
         ttk.Label(
             right_frame,
             textvariable=self.tool_description,
             style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(6, 18))
+        ).pack(anchor="w", pady=(6, 20))
 
         self.change_tabs = ttk.Notebook(right_frame, style="Change.TNotebook")
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="异动表汇总")
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="花名册更新")
         self.change_tabs.bind("<<NotebookTabChanged>>", self._on_change_tab_changed)
 
-        self.tutorial_frame = ttk.Frame(right_frame, padding=12, style="Tutorial.TFrame")
+        self.tutorial_frame = ttk.Frame(right_frame, padding=14, style="Tutorial.TFrame")
         ttk.Label(self.tutorial_frame, text="使用教程", style="TutorialTitle.TLabel").pack(anchor="w", pady=(0, 6))
         self.tutorial_text = Text(
             self.tutorial_frame,
@@ -313,18 +484,18 @@ class HRToolkitApp:
         form.pack(fill="x")
         self.form = form
 
-        def make_input_row(row_index: int, label_text, value_var: StringVar, command) -> tuple[ttk.Label, ttk.Frame, ttk.Button]:
+        def make_input_row(row_index: int, label_text, value_var: StringVar, command) -> tuple[ttk.Label, ttk.Frame, CodexButton]:
             if isinstance(label_text, StringVar):
                 label = ttk.Label(form, textvariable=label_text, style="App.TLabel")
             else:
                 label = ttk.Label(form, text=label_text, style="App.TLabel")
-            label.grid(row=row_index, column=0, sticky="w", pady=4)
+            label.grid(row=row_index, column=0, sticky="w", pady=5)
             input_frame = ttk.Frame(form, style="InputWrap.TFrame")
-            input_frame.grid(row=row_index, column=1, sticky="ew", padx=(10, 0), pady=4)
+            input_frame.grid(row=row_index, column=1, sticky="ew", padx=(12, 0), pady=5)
             entry = ttk.Entry(input_frame, textvariable=value_var, style="App.TEntry")
             entry.pack(side=LEFT, fill=BOTH, expand=True)
-            button = ttk.Button(input_frame, text="...", width=3, command=command, style="Icon.TButton")
-            button.pack(side=RIGHT, padx=(4, 0))
+            button = CodexButton(input_frame, text="...", command=command, width=48, min_width=48)
+            button.pack(side=RIGHT, padx=(6, 0))
             return label, input_frame, button
 
         self.input_label_widget, self.input_entry_widget, self.input_choose_button = make_input_row(
@@ -345,34 +516,38 @@ class HRToolkitApp:
             self.output_dir,
             self._choose_output,
         )
-        self.change_folder_zip_button = ttk.Button(
+        self.change_folder_zip_button = CodexButton(
             self.input_entry_widget,
             text="文件夹",
             command=self._choose_change_folder,
-            style="Secondary.TButton",
+            icon="□",
+            width=96,
         )
-        self.change_file_button = ttk.Button(
+        self.change_file_button = CodexButton(
             self.input_entry_widget,
             text="文件/压缩包",
             command=self._choose_change_files_or_zip,
-            style="Secondary.TButton",
+            icon="□",
+            width=126,
         )
-        self.change_summary_folder_button = ttk.Button(
+        self.change_summary_folder_button = CodexButton(
             self.summary_entry_widget,
             text="文件夹",
             command=self._choose_change_summary_folder,
-            style="Secondary.TButton",
+            icon="□",
+            width=96,
         )
-        self.change_summary_file_button = ttk.Button(
+        self.change_summary_file_button = CodexButton(
             self.summary_entry_widget,
             text="文件",
             command=self._choose_change_summary_file,
-            style="Secondary.TButton",
+            icon="□",
+            width=84,
         )
 
-        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=10, style="Rename.TLabelframe")
-        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=12, style="Rename.TLabelframe")
+        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=5)
         self.rename_mode_widget = ttk.Combobox(
             self.rename_options_frame,
             textvariable=self.rename_mode,
@@ -381,22 +556,22 @@ class HRToolkitApp:
             width=16,
             style="App.TCombobox",
         )
-        self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=10, pady=4)
+        self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=12, pady=5)
         self.rename_mode_widget.bind("<<ComboboxSelected>>", self._on_rename_mode_changed)
 
-        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel").grid(row=1, column=0, sticky="w", pady=5)
         self.rename_target_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_target_name, style="App.TEntry")
-        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=10, pady=4)
+        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=12, pady=5)
 
         self.rename_text_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_text_label, style="App.TLabel")
-        self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=4)
+        self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=5)
         self.rename_text_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_text, style="App.TEntry")
-        self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
+        self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
 
         self.rename_replacement_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_replacement_label, style="App.TLabel")
-        self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=4)
+        self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=5)
         self.rename_replacement_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_replacement_name, style="App.TEntry")
-        self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=10, pady=4)
+        self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=12, pady=5)
         self.rename_options_frame.columnconfigure(1, weight=1)
         form.columnconfigure(1, weight=1)
         self._update_change_tabs_visibility()
@@ -419,18 +594,18 @@ class HRToolkitApp:
         self.tutorial_toggle_button.configure(command=toggle_tutorial)
 
         actions = ttk.Frame(right_frame, style="Content.TFrame")
-        actions.pack(fill="x", pady=(12, 14))
-        run_button_box = ttk.Frame(actions, width=120, height=36, style="Content.TFrame")
+        actions.pack(fill="x", pady=(14, 16))
+        run_button_box = ttk.Frame(actions, width=126, height=38, style="Content.TFrame")
         run_button_box.pack(side=LEFT)
         run_button_box.pack_propagate(False)
-        self.run_button = ttk.Button(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, style="Primary.TButton")
+        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="▶", min_width=126)
         self.run_button.pack(fill=BOTH, expand=True)
-        self.open_button = ttk.Button(actions, text="打开结果目录", command=self._open_output_dir, style="Secondary.TButton")
+        self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, icon="↗", width=132)
         self.open_button.pack(side=LEFT, padx=(8, 0))
 
         ttk.Label(right_frame, text="日志", style="Section.TLabel").pack(anchor="w")
         log_frame = ttk.Frame(right_frame, style="Content.TFrame")
-        log_frame.pack(fill=BOTH, expand=True, pady=(6, 0))
+        log_frame.pack(fill=BOTH, expand=True, pady=(8, 0))
         scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
         self.log_text = Text(
             log_frame,
@@ -444,8 +619,8 @@ class HRToolkitApp:
             highlightthickness=1,
             highlightbackground=COLOR_BORDER,
             highlightcolor=COLOR_PRIMARY,
-            padx=10,
-            pady=10,
+            padx=14,
+            pady=12,
             font=self.mono_font,
         )
         self.log_text.tag_configure("success", foreground=COLOR_SUCCESS)
@@ -468,7 +643,7 @@ class HRToolkitApp:
     def _start_update_check(self, manual: bool) -> None:
         if self.update_check_in_progress:
             if manual:
-                messagebox.showinfo("正在检查更新", "更新检查正在进行，请稍候。", parent=self.root)
+                self._focus_update_window()
             return
         self.update_check_in_progress = True
         self.manual_update_check_active = manual
@@ -499,17 +674,19 @@ class HRToolkitApp:
                 if status == "no_update":
                     manual = self.manual_update_check_active
                     self._finish_update_check()
-                    self._close_update_window()
                     self._write_log("已是最新版本。")
                     if manual:
-                        messagebox.showinfo("检查更新", "当前已经是最新版本。", parent=self.root)
+                        self._show_update_done_window()
+                    else:
+                        self._close_update_window()
                 elif status == "check_error":
                     manual = self.manual_update_check_active
                     self._finish_update_check()
-                    self._close_update_window()
                     self._write_log(f"更新检查失败，可继续使用：{payload}")
                     if manual:
-                        messagebox.showerror("检查更新失败", str(payload), parent=self.root)
+                        self._show_update_failure_window("检查更新失败", str(payload), exit_after=False)
+                    else:
+                        self._close_update_window()
                 elif status == "available":
                     self._finish_update_check()
                     self._close_update_window()
@@ -532,31 +709,28 @@ class HRToolkitApp:
             self.check_update_button.config(state="normal")
 
     def _show_update_checking_window(self) -> None:
-        self._close_update_window()
-        self.update_window = Toplevel(self.root)
-        self.update_window.title("检查更新")
-        self._center_window(self.update_window, 360, 120)
-        self.update_window.resizable(False, False)
-        self.update_window.configure(bg=COLOR_BG)
-        self.update_window.transient(self.root)
-        self.update_window.grab_set()
-        self.update_window.protocol("WM_DELETE_WINDOW", lambda: None)
-
-        frame = ttk.Frame(self.update_window, padding=18, style="Content.TFrame")
-        frame.pack(fill=BOTH, expand=True)
-        ttk.Label(frame, text="正在检查更新，请稍候...", style="App.TLabel").pack(anchor="w", pady=(2, 10))
-        ttk.Progressbar(frame, orient="horizontal", mode="indeterminate").pack(fill="x")
-        for child in frame.winfo_children():
-            if isinstance(child, ttk.Progressbar):
-                child.start(12)
+        self._show_update_progress_window(
+            title="正在检查更新...",
+            detail="请稍候，正在确认是否有新版本。",
+            indeterminate=True,
+            close_command=lambda: None,
+        )
 
     def _close_update_window(self) -> None:
+        if self.update_progress_job is not None:
+            try:
+                self.root.after_cancel(self.update_progress_job)
+            except Exception:
+                pass
+            self.update_progress_job = None
         if self.update_window is not None and self.update_window.winfo_exists():
             self.update_window.grab_release()
             self.update_window.destroy()
         self.update_window = None
         self.update_progress_var = None
         self.update_progress_label = None
+        self.update_progress_canvas = None
+        self.update_progress_phase = 0
 
     def _show_required_update(self, update: object | None) -> None:
         if not isinstance(update, UpdateInfo):
@@ -564,44 +738,32 @@ class HRToolkitApp:
         self.pending_update = update
         self._write_log(f"发现新版本：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
-        notes = "\n".join(f"- {line}" for line in update.notes[:6]) or "- 本次发布未填写更新说明"
-        message = (
+        notes = "\n".join(f"- {line}" for line in update.notes[:4]) or "本次发布未填写更新说明。"
+        detail = (
             f"发现新版本 v{update.version}，必须更新后才能继续使用。\n\n"
-            f"更新内容：\n{notes}\n\n"
-            "点击“确定”开始更新；点击“取消”将退出程序。"
+            f"更新内容：\n{notes}"
         )
-        if not messagebox.askokcancel("发现新版本", message, parent=self.root):
-            self.root.destroy()
-            return
-        self._start_update_download(update)
+        self._show_update_message_window(
+            title="发现新版本",
+            detail=detail,
+            primary_text="立即更新",
+            primary_command=lambda: self._start_update_download(update),
+            secondary_text="退出",
+            secondary_command=self.root.destroy,
+            width=360,
+            height=330,
+            close_command=self.root.destroy,
+        )
 
     def _start_update_download(self, update: UpdateInfo) -> None:
-        self._close_update_window()
         self._write_log(f"开始下载更新包：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
-        self.update_window = Toplevel(self.root)
-        self.update_window.title("正在更新 HR工具箱")
-        self._center_window(self.update_window, 420, 160)
-        self.update_window.resizable(False, False)
-        self.update_window.configure(bg=COLOR_BG)
-        self.update_window.transient(self.root)
-        self.update_window.grab_set()
-        self.update_window.protocol("WM_DELETE_WINDOW", self.root.destroy)
-
-        frame = ttk.Frame(self.update_window, padding=18, style="Content.TFrame")
-        frame.pack(fill=BOTH, expand=True)
-        ttk.Label(frame, text="正在下载更新，请不要关闭程序", style="App.TLabel").pack(anchor="w")
-        self.update_progress_label = ttk.Label(frame, text="准备下载...", style="Section.TLabel")
-        self.update_progress_label.pack(anchor="w", pady=(10, 6))
-        self.update_progress_var = DoubleVar(value=0)
-        ttk.Progressbar(
-            frame,
-            orient="horizontal",
-            mode="determinate",
-            maximum=100,
-            variable=self.update_progress_var,
-        ).pack(fill="x")
-        ttk.Button(frame, text="取消并退出", command=self.root.destroy, style="Secondary.TButton").pack(anchor="e", pady=(16, 0))
+        self._show_update_progress_window(
+            title="正在下载更新...",
+            detail="请不要关闭程序，下载完成后会自动准备安装。",
+            indeterminate=False,
+            close_command=lambda: None,
+        )
 
         worker = threading.Thread(target=self._download_update_worker, args=(update,), daemon=True)
         worker.start()
@@ -630,6 +792,7 @@ class HRToolkitApp:
             self.update_progress_var.set(percent)
         if self.update_progress_label is not None:
             self.update_progress_label.configure(text=text)
+        self._set_update_progress(percent)
 
     def _finish_update_download(self, package_path: object | None) -> None:
         if not isinstance(package_path, Path):
@@ -638,6 +801,7 @@ class HRToolkitApp:
             self.update_progress_var.set(100)
         if self.update_progress_label is not None:
             self.update_progress_label.configure(text="下载完成，正在准备安装...")
+        self._set_update_progress(100)
         self._write_log("更新包下载完成，正在启动更新程序...")
         try:
             launch_update_replacement(package_path)
@@ -650,12 +814,246 @@ class HRToolkitApp:
 
     def _handle_update_failure(self, exc: object | None) -> None:
         self._write_log(f"更新失败：{exc}")
-        messagebox.showerror(
+        self._show_update_failure_window(
             "更新失败",
             f"更新没有完成，程序将退出。\n\n原因：{exc}\n\n请联系开发重新处理安装包。",
-            parent=self.root,
+            exit_after=True,
         )
-        self.root.destroy()
+
+    def _show_update_done_window(self) -> None:
+        self._show_update_message_window(
+            title="已经是最新版本",
+            detail=f"{APP_DISPLAY_NAME} {__version__} 当前已经是最新版本。",
+            primary_text="确定",
+            primary_command=self._close_update_window,
+            width=260,
+            height=224,
+            close_command=self._close_update_window,
+        )
+
+    def _show_update_failure_window(self, title: str, detail: str, *, exit_after: bool) -> None:
+        close_command = self.root.destroy if exit_after else self._close_update_window
+        self._show_update_message_window(
+            title=title,
+            detail=detail,
+            primary_text="退出程序" if exit_after else "知道了",
+            primary_command=close_command,
+            width=380,
+            height=300,
+            close_command=close_command,
+        )
+
+    def _show_update_progress_window(
+        self,
+        *,
+        title: str,
+        detail: str,
+        indeterminate: bool,
+        close_command,
+    ) -> None:
+        _window, body = self._build_update_window(width=400, height=146, close_command=close_command)
+        body.grid_columnconfigure(1, weight=1)
+
+        icon = Canvas(body, width=58, height=58, bg=UPDATE_DIALOG_BG, highlightthickness=0)
+        icon.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(24, 14), pady=(25, 0))
+        self._draw_update_icon(icon)
+
+        Label(
+            body,
+            text=title,
+            bg=UPDATE_DIALOG_BG,
+            fg=UPDATE_DIALOG_TEXT,
+            font=(self.base_font[0], 10, "bold"),
+        ).grid(row=0, column=1, sticky="w", padx=(0, 20), pady=(30, 0))
+        self._create_update_progress_bar(body, row=1, column=1, padx=(0, 20), pady=(10, 0))
+        self.update_progress_label = Label(
+            body,
+            text=detail,
+            bg=UPDATE_DIALOG_BG,
+            fg=UPDATE_DIALOG_MUTED,
+            font=self.small_font,
+        )
+        self.update_progress_label.grid(row=2, column=1, sticky="w", padx=(0, 20), pady=(8, 0))
+        if indeterminate:
+            self._start_indeterminate_update_progress()
+        else:
+            self._set_update_progress(0)
+
+    def _show_update_message_window(
+        self,
+        *,
+        title: str,
+        detail: str,
+        primary_text: str,
+        primary_command,
+        secondary_text: str | None = None,
+        secondary_command=None,
+        width: int = 340,
+        height: int = 260,
+        close_command=None,
+    ) -> None:
+        close_command = close_command or self._close_update_window
+        _window, body = self._build_update_window(width=width, height=height, close_command=close_command)
+
+        icon = Canvas(body, width=58, height=58, bg=UPDATE_DIALOG_BG, highlightthickness=0)
+        icon.pack(anchor="w", padx=22, pady=(22, 0))
+        self._draw_update_icon(icon)
+
+        Label(
+            body,
+            text=title,
+            bg=UPDATE_DIALOG_BG,
+            fg=UPDATE_DIALOG_TEXT,
+            font=(self.base_font[0], 10, "bold"),
+        ).pack(anchor="w", padx=22, pady=(14, 6))
+        Label(
+            body,
+            text=detail,
+            bg=UPDATE_DIALOG_BG,
+            fg=UPDATE_DIALOG_TEXT,
+            font=self.base_font,
+            justify="left",
+            wraplength=width - 44,
+        ).pack(anchor="w", padx=22)
+
+        button_frame = Frame(body, bg=UPDATE_DIALOG_BG)
+        button_frame.pack(side="bottom", fill="x", padx=16, pady=(8, 16))
+        button_width = width - 32
+        self._create_update_button(
+            button_frame,
+            text=primary_text,
+            command=primary_command,
+            width=button_width,
+            fill=UPDATE_DIALOG_PRIMARY,
+            active_fill=UPDATE_DIALOG_PRIMARY_ACTIVE,
+            foreground="#ffffff",
+        ).pack(fill="x")
+        if secondary_text and secondary_command:
+            self._create_update_button(
+                button_frame,
+                text=secondary_text,
+                command=secondary_command,
+                width=button_width,
+                fill=UPDATE_DIALOG_SECONDARY,
+                active_fill=UPDATE_DIALOG_SECONDARY_ACTIVE,
+                foreground=UPDATE_DIALOG_TEXT,
+            ).pack(fill="x", pady=(8, 0))
+
+    def _build_update_window(self, *, width: int, height: int, close_command) -> tuple[Toplevel, Frame]:
+        self._close_update_window()
+        self.update_window = Toplevel(self.root)
+        self.update_window.title("软件更新")
+        self._center_window(self.update_window, width, height)
+        self.update_window.resizable(False, False)
+        self.update_window.configure(bg=UPDATE_DIALOG_BG)
+        self.update_window.transient(self.root)
+        self.update_window.grab_set()
+        self.update_window.protocol("WM_DELETE_WINDOW", close_command)
+        body = Frame(self.update_window, bg=UPDATE_DIALOG_BG, width=width, height=height)
+        body.pack(fill=BOTH, expand=True)
+        body.pack_propagate(False)
+        return self.update_window, body
+
+    def _focus_update_window(self) -> None:
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.lift()
+            self.update_window.focus_force()
+
+    def _create_update_progress_bar(self, parent: Frame, *, row: int, column: int, padx, pady) -> None:
+        self.update_progress_width = 248
+        self.update_progress_canvas = Canvas(
+            parent,
+            width=self.update_progress_width,
+            height=8,
+            bg=UPDATE_DIALOG_BG,
+            highlightthickness=0,
+        )
+        self.update_progress_canvas.grid(row=row, column=column, sticky="w", padx=padx, pady=pady)
+        self._draw_round_rect(self.update_progress_canvas, 0, 1, self.update_progress_width, 7, 3, fill=UPDATE_DIALOG_TRACK)
+
+    def _set_update_progress(self, percent: float) -> None:
+        canvas = self.update_progress_canvas
+        if canvas is None:
+            return
+        canvas.delete("fill")
+        width = max(0, min(self.update_progress_width * percent / 100, self.update_progress_width))
+        if width <= 0:
+            return
+        self._draw_round_rect(canvas, 0, 1, width, 7, 3, fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
+
+    def _start_indeterminate_update_progress(self) -> None:
+        def tick() -> None:
+            canvas = self.update_progress_canvas
+            if canvas is None:
+                return
+            canvas.delete("fill")
+            segment = 112
+            span = self.update_progress_width + segment
+            x = (self.update_progress_phase % span) - segment
+            x1 = max(0, x)
+            x2 = min(self.update_progress_width, x + segment)
+            if x2 > x1:
+                self._draw_round_rect(canvas, x1, 1, x2, 7, 3, fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
+            self.update_progress_phase += 8
+            self.update_progress_job = self.root.after(35, tick)
+
+        self.update_progress_phase = 0
+        tick()
+
+    def _create_update_button(
+        self,
+        parent: Frame,
+        *,
+        text: str,
+        command,
+        width: int,
+        fill: str,
+        active_fill: str,
+        foreground: str,
+    ) -> Canvas:
+        height = 30
+        button = Canvas(parent, width=width, height=height, bg=UPDATE_DIALOG_BG, highlightthickness=0, cursor="hand2")
+
+        def paint(color: str) -> None:
+            button.delete("all")
+            self._draw_round_rect(button, 0, 0, width, height, 10, fill=color)
+            button.create_text(width / 2, height / 2, text=text, fill=foreground, font=(self.base_font[0], 10, "bold"))
+
+        def activate(_event=None) -> None:
+            paint(active_fill)
+
+        def deactivate(_event=None) -> None:
+            paint(fill)
+
+        def click(_event=None) -> None:
+            command()
+
+        paint(fill)
+        button.bind("<Enter>", activate)
+        button.bind("<Leave>", deactivate)
+        button.bind("<Button-1>", click)
+        return button
+
+    def _draw_update_icon(self, canvas: Canvas) -> None:
+        self._draw_round_rect(canvas, 5, 6, 53, 54, 12, fill="#ffffff", outline="#dfe2e8")
+        canvas.create_oval(12, 18, 37, 44, fill="#546cff", outline="")
+        canvas.create_oval(21, 11, 49, 40, fill="#8e6cff", outline="")
+        canvas.create_oval(25, 22, 49, 47, fill="#315cff", outline="")
+        canvas.create_rectangle(18, 25, 43, 43, fill="#315cff", outline="")
+        canvas.create_text(28, 32, text="›", fill="#ffffff", font=(self.base_font[0], 18, "bold"))
+        canvas.create_text(38, 35, text="_", fill="#ffffff", font=(self.base_font[0], 14, "bold"))
+
+    def _draw_round_rect(self, canvas: Canvas, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
+        radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+        tags = kwargs.pop("tags", ())
+        fill = kwargs.pop("fill", "")
+        outline = kwargs.pop("outline", "")
+        canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline=outline, tags=tags, **kwargs)
+        canvas.create_rectangle(x1, y1 + radius, x2, y2 - radius, fill=fill, outline=outline, tags=tags, **kwargs)
+        canvas.create_oval(x1, y1, x1 + 2 * radius, y1 + 2 * radius, fill=fill, outline=outline, tags=tags, **kwargs)
+        canvas.create_oval(x2 - 2 * radius, y1, x2, y1 + 2 * radius, fill=fill, outline=outline, tags=tags, **kwargs)
+        canvas.create_oval(x1, y2 - 2 * radius, x1 + 2 * radius, y2, fill=fill, outline=outline, tags=tags, **kwargs)
+        canvas.create_oval(x2 - 2 * radius, y2 - 2 * radius, x2, y2, fill=fill, outline=outline, tags=tags, **kwargs)
 
     def _center_window(self, window: Toplevel, width: int, height: int) -> None:
         self.root.update_idletasks()
@@ -973,8 +1371,8 @@ class HRToolkitApp:
 
     def _update_summary_controls(self) -> None:
         if self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import"}:
-            self.summary_label_widget.grid(row=1, column=0, sticky="w", pady=4)
-            self.summary_entry_widget.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=4)
+            self.summary_label_widget.grid(row=1, column=0, sticky="w", pady=5)
+            self.summary_entry_widget.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=5)
             return
         self.summary_label_widget.grid_remove()
         self.summary_entry_widget.grid_remove()
@@ -1088,14 +1486,14 @@ class HRToolkitApp:
             self.output_label_widget.grid_remove()
             self.output_entry_widget.grid_remove()
             return
-        self.output_label_widget.grid(row=2, column=0, sticky="w", pady=4)
-        self.output_entry_widget.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=4)
+        self.output_label_widget.grid(row=2, column=0, sticky="w", pady=5)
+        self.output_entry_widget.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=5)
 
     def _update_rename_controls(self) -> None:
         if self.current_tool != "folder_rename":
             self.rename_options_frame.grid_remove()
             return
-        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         self._update_rename_mode_controls()
 
     def _on_rename_mode_changed(self, _event=None) -> None:
@@ -1106,16 +1504,16 @@ class HRToolkitApp:
         if mode == MODE_APPEND:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要追加的文字")
-            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=4)
-            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
+            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=5)
+            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
             self.rename_text_widget.config(state="normal")
             self.rename_replacement_label_widget.grid_remove()
             self.rename_replacement_widget.grid_remove()
         elif mode == MODE_REMOVE:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要删除的结尾文字")
-            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=4)
-            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
+            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=5)
+            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
             self.rename_text_widget.config(state="normal")
             self.rename_replacement_label_widget.grid_remove()
             self.rename_replacement_widget.grid_remove()
@@ -1124,8 +1522,8 @@ class HRToolkitApp:
             self.rename_replacement_label.set("新名称")
             self.rename_text_label_widget.grid_remove()
             self.rename_text_widget.grid_remove()
-            self.rename_replacement_label_widget.grid(row=2, column=0, sticky="w", pady=4)
-            self.rename_replacement_widget.grid(row=2, column=1, sticky="ew", padx=10, pady=4)
+            self.rename_replacement_label_widget.grid(row=2, column=0, sticky="w", pady=5)
+            self.rename_replacement_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
             self.rename_replacement_widget.config(state="normal")
 
     def _initial_log_text(self) -> str:
@@ -2084,7 +2482,7 @@ class HRToolkitApp:
             else:
                 message = "处理完成。"
         self.run_button.config(state="normal")
-        messagebox.showinfo("处理完成", message)
+        self._show_success_after_log("处理完成", message)
 
     def _handle_error(self, exc: object | None) -> None:
         action = (
@@ -2112,7 +2510,15 @@ class HRToolkitApp:
         self._write_log(f"{action}失败。")
         self._write_log(str(exc))
         self.run_button.config(state="normal")
-        messagebox.showerror(f"{action}失败", str(exc))
+        self._show_error_after_log(f"{action}失败", str(exc))
+
+    def _show_success_after_log(self, title: str, message: str) -> None:
+        self._flush_log_view()
+        self.root.after(80, lambda: messagebox.showinfo(title, message, parent=self.root))
+
+    def _show_error_after_log(self, title: str, message: str) -> None:
+        self._flush_log_view()
+        self.root.after(80, lambda: messagebox.showerror(title, message, parent=self.root))
 
     def _write_folder_rename_preview(self, result) -> None:
         payload = result.to_dict()
@@ -2176,6 +2582,11 @@ class HRToolkitApp:
         else:
             self.log_text.insert(END, text + "\n")
         self.log_text.see(END)
+
+    def _flush_log_view(self) -> None:
+        self.log_text.see(END)
+        self.log_text.update_idletasks()
+        self.root.update_idletasks()
 
     def _clear_log(self) -> None:
         self.log_text.delete("1.0", END)
