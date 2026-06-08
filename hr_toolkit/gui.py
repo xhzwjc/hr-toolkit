@@ -86,6 +86,110 @@ UPDATE_DIALOG_PRIMARY = COLOR_PRIMARY
 UPDATE_DIALOG_PRIMARY_ACTIVE = COLOR_PRIMARY_ACTIVE
 UPDATE_DIALOG_SECONDARY = "#f1f5f4"
 UPDATE_DIALOG_SECONDARY_ACTIVE = "#e7eeec"
+BASE_WINDOWS_DPI = 96
+TK_POINTS_PER_INCH = 72
+FORCE_UI_SCALE_ENV = "HR_TOOLKIT_FORCE_UI_SCALE"
+
+
+def _scale_px(value: int | float, scale: float) -> int:
+    if value == 0:
+        return 0
+    scaled = int(round(value * scale))
+    if value > 0:
+        return max(1, scaled)
+    return min(-1, scaled)
+
+
+def _scale_float(value: int | float, scale: float) -> float:
+    return float(value) * scale
+
+
+def _clamp_ui_scale(scale: float) -> float:
+    return max(1.0, min(scale, 3.0))
+
+
+def _forced_ui_scale() -> float | None:
+    raw_value = os.environ.get(FORCE_UI_SCALE_ENV, "").strip()
+    if not raw_value:
+        return None
+    try:
+        return _clamp_ui_scale(float(raw_value))
+    except ValueError:
+        return None
+
+
+def _windows_dpi_for_root(root: Tk) -> float | None:
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    try:
+        hwnd = int(root.winfo_id())
+        get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
+        if get_dpi_for_window is not None and hwnd:
+            dpi = int(get_dpi_for_window(hwnd))
+            if dpi > 0:
+                return float(dpi)
+    except Exception:
+        pass
+
+    try:
+        get_dpi_for_system = getattr(ctypes.windll.user32, "GetDpiForSystem", None)
+        if get_dpi_for_system is not None:
+            dpi = int(get_dpi_for_system())
+            if dpi > 0:
+                return float(dpi)
+    except Exception:
+        pass
+
+    hdc = None
+    try:
+        hdc = ctypes.windll.user32.GetDC(None)
+        if hdc:
+            dpi = int(ctypes.windll.gdi32.GetDeviceCaps(hdc, 88))
+            if dpi > 0:
+                return float(dpi)
+    except Exception:
+        pass
+    finally:
+        if hdc:
+            try:
+                ctypes.windll.user32.ReleaseDC(None, hdc)
+            except Exception:
+                pass
+    return None
+
+
+def _detect_ui_scale(root: Tk) -> float:
+    forced = _forced_ui_scale()
+    if forced is not None:
+        return forced
+    if not sys.platform.startswith("win"):
+        return 1.0
+    dpi = _windows_dpi_for_root(root)
+    if dpi is None:
+        try:
+            dpi = float(root.winfo_fpixels("1i"))
+        except Exception:
+            dpi = BASE_WINDOWS_DPI
+    return _clamp_ui_scale(dpi / BASE_WINDOWS_DPI)
+
+
+def _configure_tk_font_scaling(root: Tk, ui_scale: float) -> None:
+    try:
+        root.tk.call("tk", "scaling", (BASE_WINDOWS_DPI * ui_scale) / TK_POINTS_PER_INCH)
+    except Exception:
+        pass
+
+
+def _widget_ui_scale(widget) -> float:
+    try:
+        return float(getattr(widget.winfo_toplevel(), "_hr_ui_scale", 1.0))
+    except Exception:
+        return 1.0
 
 
 class CodexButton(Canvas):
@@ -102,6 +206,7 @@ class CodexButton(Canvas):
         height: int = 34,
         min_width: int = 92,
     ) -> None:
+        self._scale = _widget_ui_scale(master)
         self._text = text
         self._command = command
         self._textvariable = textvariable
@@ -109,16 +214,16 @@ class CodexButton(Canvas):
         self._variant = variant
         self._state = "normal"
         self._hover = False
-        self._height = height
-        self._min_width = min_width
+        self._height = self._px(height)
+        self._min_width = self._px(min_width)
         self._variable_trace: str | None = None
         display_text = self._display_text()
-        initial_width = width or self._measure_width(display_text, icon, min_width)
+        initial_width = self._px(width) if width is not None else self._measure_width(display_text, icon, self._min_width)
         self._canvas_bg = self._resolve_parent_bg(master)
         super().__init__(
             master,
             width=initial_width,
-            height=height,
+            height=self._height,
             bg=self._canvas_bg,
             highlightthickness=0,
             bd=0,
@@ -172,6 +277,12 @@ class CodexButton(Canvas):
             pass
         return COLOR_BG
 
+    def _px(self, value: int | float) -> int:
+        return _scale_px(value, self._scale)
+
+    def _pxf(self, value: int | float) -> float:
+        return _scale_float(value, self._scale)
+
     def _display_text(self) -> str:
         if self._textvariable is not None:
             return self._textvariable.get()
@@ -179,9 +290,9 @@ class CodexButton(Canvas):
 
     def _measure_width(self, text: str, icon: str, min_width: int) -> int:
         text_units = sum(2 if ord(char) > 127 else 1 for char in text)
-        width = 28 + text_units * 7
+        width = self._px(28) + text_units * self._px(7)
         if icon:
-            width += 20
+            width += self._px(20)
         return max(min_width, width)
 
     def _palette(self) -> tuple[str, str, str, str]:
@@ -210,14 +321,15 @@ class CodexButton(Canvas):
         height = max(self.winfo_height(), self._height)
         normal, active, foreground, border = self._palette()
         fill = active if self._hover and self._state != "disabled" else normal
-        self._draw_round_rect(1, 1, width - 1, height - 1, 8, fill=fill, outline=border, width=1)
+        inset = self._pxf(1)
+        self._draw_round_rect(inset, inset, width - inset, height - inset, self._pxf(8), fill=fill, outline=border, width=self._pxf(1))
         text = self._display_text()
         font = (self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family"), 10)
         if self._icon:
-            content_width = self._measure_width(text, self._icon, 0) - 28
-            start_x = max((width - content_width) / 2, 12)
-            self.create_text(start_x + 7, height / 2, text=self._icon, fill=foreground, font=font, anchor="center")
-            self.create_text(start_x + 22, height / 2, text=text, fill=foreground, font=font, anchor="w")
+            content_width = self._measure_width(text, self._icon, 0) - self._px(28)
+            start_x = max((width - content_width) / 2, self._pxf(12))
+            self.create_text(start_x + self._pxf(7), height / 2, text=self._icon, fill=foreground, font=font, anchor="center")
+            self.create_text(start_x + self._pxf(22), height / 2, text=text, fill=foreground, font=font, anchor="w")
         else:
             self.create_text(width / 2, height / 2, text=text, fill=foreground, font=font)
 
@@ -257,9 +369,16 @@ class CodexButton(Canvas):
 class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
+        self.ui_scale = _detect_ui_scale(root)
+        setattr(self.root, "_hr_ui_scale", self.ui_scale)
+        if sys.platform.startswith("win") or _forced_ui_scale() is not None:
+            _configure_tk_font_scaling(self.root, self.ui_scale)
+
         self.root.title(f"{APP_DISPLAY_NAME} v{__version__}")
-        self.root.geometry("1180x760")
-        self.root.minsize(1020, 680)
+        initial_width, initial_height = self._window_size(1180, 760)
+        min_width, min_height = self._window_size(1020, 680)
+        self.root.geometry(f"{initial_width}x{initial_height}")
+        self.root.minsize(min_width, min_height)
         self.root.configure(bg=COLOR_BG)
 
         self.current_tool = "social_security"
@@ -302,7 +421,7 @@ class HRToolkitApp:
         self.update_progress_var: DoubleVar | None = None
         self.update_progress_label: ttk.Label | None = None
         self.update_progress_canvas: Canvas | None = None
-        self.update_progress_width = 248
+        self.update_progress_width = self._px(248)
         self.update_progress_job: str | None = None
         self.update_progress_phase = 0
         self.update_check_in_progress = False
@@ -314,6 +433,61 @@ class HRToolkitApp:
         self._poll_status_queue()
         self._poll_update_queue()
         self.root.after(600, self._check_updates_on_startup)
+
+    def _px(self, value: int | float) -> int:
+        return _scale_px(value, self.ui_scale)
+
+    def _pxf(self, value: int | float) -> float:
+        return _scale_float(value, self.ui_scale)
+
+    def _pad(self, *values: int | float) -> tuple[int, ...]:
+        return tuple(self._px(value) for value in values)
+
+    def _window_size(self, width: int, height: int) -> tuple[int, int]:
+        scaled_width = self._px(width)
+        scaled_height = self._px(height)
+        if self.ui_scale <= 1.0:
+            return scaled_width, scaled_height
+        try:
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            max_width = max(1, screen_width - self._px(48))
+            max_height = max(1, screen_height - self._px(72))
+        except Exception:
+            return scaled_width, scaled_height
+        return min(scaled_width, max_width), min(scaled_height, max_height)
+
+    def _update_dialog_size(self, width: int, height: int) -> tuple[int, int]:
+        scaled_width = self._px(width)
+        scaled_height = self._px(height)
+        try:
+            max_width = max(1, self.root.winfo_screenwidth() - self._px(48))
+            max_height = max(1, self.root.winfo_screenheight() - self._px(72))
+        except Exception:
+            return scaled_width, scaled_height
+        return min(scaled_width, max_width), min(scaled_height, max_height)
+
+    def _logical_screen_width(self) -> float:
+        try:
+            return self.root.winfo_screenwidth() / max(self.ui_scale, 1.0)
+        except Exception:
+            return 1180.0
+
+    def _responsive_content_padding(self) -> tuple[int, int, int, int]:
+        logical_width = self._logical_screen_width()
+        if self.ui_scale >= 1.75 and logical_width < 900:
+            return self._pad(16, 24, 16, 20)
+        if logical_width < 1100:
+            return self._pad(24, 28, 28, 24)
+        return self._pad(42, 34, 58, 28)
+
+    def _responsive_form_padding(self) -> tuple[int, int, int, int]:
+        logical_width = self._logical_screen_width()
+        if self.ui_scale >= 1.75 and logical_width < 900:
+            return self._pad(12, 16, 12, 16)
+        if logical_width < 1100:
+            return self._pad(16, 18, 16, 18)
+        return self._pad(24, 22, 24, 22)
 
     def _configure_style(self) -> None:
         if sys.platform == "darwin":
@@ -333,6 +507,7 @@ class HRToolkitApp:
         self.nav_font = (family, 10)
         self.nav_selected_font = (family, 10, "bold")
         self.mono_font = (mono_family, 10)
+        self.root.option_add("*TCombobox*Listbox.font", self.base_font)
 
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
@@ -343,7 +518,7 @@ class HRToolkitApp:
         style.configure("Sidebar.TFrame", background=COLOR_SIDEBAR)
         style.configure("SidebarElevated.TFrame", background=COLOR_SIDEBAR_ELEVATED)
         style.configure("Content.TFrame", background=COLOR_BG)
-        style.configure("Card.TFrame", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=1)
+        style.configure("Card.TFrame", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
         style.configure("InputWrap.TFrame", background=COLOR_SURFACE)
         style.configure("Separator.TFrame", background=COLOR_BORDER)
         style.configure(
@@ -352,10 +527,10 @@ class HRToolkitApp:
             bordercolor=COLOR_TUTORIAL_BORDER,
             lightcolor=COLOR_TUTORIAL_BORDER,
             darkcolor=COLOR_TUTORIAL_BORDER,
-            borderwidth=1,
+            borderwidth=self._px(1),
             relief="solid",
         )
-        style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=1, bordercolor=COLOR_BORDER)
+        style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=self._px(1), bordercolor=COLOR_BORDER)
         style.configure("NavRow.TFrame", background=COLOR_SIDEBAR)
         style.configure("NavIndicator.TFrame", background=COLOR_SIDEBAR)
         style.configure("NavIndicatorSelected.TFrame", background=COLOR_ACCENT)
@@ -368,7 +543,7 @@ class HRToolkitApp:
         style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=(self.base_font[0], 8, "bold"))
         style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=self.tiny_font)
         style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
-        style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=(8, 6))
+        style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=self._pad(8, 6))
         style.configure(
             "Card.TLabelframe",
             background=COLOR_SURFACE,
@@ -376,9 +551,10 @@ class HRToolkitApp:
             lightcolor=COLOR_BORDER,
             darkcolor=COLOR_BORDER,
             relief="solid",
+            borderwidth=self._px(1),
         )
         style.configure("Card.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
-        style.configure("Rename.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid")
+        style.configure("Rename.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
         style.configure("Rename.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("App.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
         style.configure(
@@ -389,7 +565,7 @@ class HRToolkitApp:
             bordercolor=COLOR_BORDER,
             lightcolor=COLOR_BORDER,
             darkcolor=COLOR_BORDER,
-            padding=(12, 8),
+            padding=self._pad(12, 8),
             relief="solid",
         )
         style.map(
@@ -404,10 +580,10 @@ class HRToolkitApp:
             foreground=COLOR_TEXT,
             bordercolor=COLOR_BORDER,
             arrowcolor=COLOR_MUTED,
-            padding=(12, 7),
+            padding=self._pad(12, 7),
         )
-        style.configure("Nav.TButton", anchor="w", padding=(8, 10), background=COLOR_SIDEBAR, foreground=COLOR_NAV_TEXT, borderwidth=0, font=self.nav_font, relief="flat")
-        style.configure("NavSelected.TButton", anchor="w", padding=(8, 10), background=COLOR_NAV_SELECTED, foreground=COLOR_NAV_TEXT_SELECTED, borderwidth=0, font=self.nav_selected_font, relief="flat")
+        style.configure("Nav.TButton", anchor="w", padding=self._pad(8, 10), background=COLOR_SIDEBAR, foreground=COLOR_NAV_TEXT, borderwidth=0, font=self.nav_font, relief="flat")
+        style.configure("NavSelected.TButton", anchor="w", padding=self._pad(8, 10), background=COLOR_NAV_SELECTED, foreground=COLOR_NAV_TEXT_SELECTED, borderwidth=0, font=self.nav_selected_font, relief="flat")
         nav_button_layout = [
             (
                 "Button.border",
@@ -430,45 +606,154 @@ class HRToolkitApp:
         style.layout("NavSelected.TButton", nav_button_layout)
         style.map("Nav.TButton", background=[("active", COLOR_NAV_HOVER)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
         style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
-        style.configure("Primary.TButton", padding=(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
+        style.configure("Primary.TButton", padding=self._pad(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
         style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
-        style.configure("Secondary.TButton", padding=(12, 7), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=1)
+        style.configure("Secondary.TButton", padding=self._pad(12, 7), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
         style.map("Secondary.TButton", background=[("active", COLOR_SURFACE_ALT), ("disabled", "#eef1f0")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#cbd5d3")])
-        style.configure("Icon.TButton", padding=(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=1, relief="solid", font=(self.base_font[0], 10, "bold"))
+        style.configure("Icon.TButton", padding=self._pad(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=self._px(1), relief="solid", font=(self.base_font[0], 10, "bold"))
         style.map("Icon.TButton", background=[("active", COLOR_SURFACE_ALT)], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#cbd5d3")])
         style.configure("Change.TNotebook", background=COLOR_BG, borderwidth=0)
-        style.configure("Change.TNotebook.Tab", padding=(18, 9), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
+        style.configure("Change.TNotebook.Tab", padding=self._pad(18, 9), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
         style.map("Change.TNotebook.Tab", background=[("selected", COLOR_NAV_SELECTED)], foreground=[("selected", COLOR_PRIMARY)])
 
     def _build_layout(self) -> None:
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(root_frame, width=286, padding=(24, 28, 26, 18), style="Sidebar.TFrame")
+        left_frame = ttk.Frame(root_frame, width=self._px(286), style="Sidebar.TFrame")
         left_frame.pack(side=LEFT, fill=Y)
         left_frame.pack_propagate(False)
+        left_frame.grid_rowconfigure(0, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
 
-        brand_row = ttk.Frame(left_frame, style="Sidebar.TFrame")
+        left_canvas = Canvas(left_frame, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        left_canvas.grid(row=0, column=0, sticky="nsew")
+        left_vscroll = ttk.Scrollbar(left_frame, orient=VERTICAL, command=left_canvas.yview)
+        left_vscroll.grid(row=0, column=1, sticky="ns")
+        left_vscroll.grid_remove()
+        left_canvas.configure(yscrollcommand=left_vscroll.set)
+
+        left_content = ttk.Frame(left_canvas, padding=self._pad(24, 28, 26, 18), style="Sidebar.TFrame")
+        left_canvas_window = left_canvas.create_window((0, 0), window=left_content, anchor="nw")
+
+        def _sync_left_canvas(_event=None) -> None:
+            canvas_width = max(left_canvas.winfo_width(), 1)
+            canvas_height = max(left_canvas.winfo_height(), 1)
+            content_height = left_content.winfo_reqheight()
+            window_height = max(content_height, canvas_height)
+            left_canvas.itemconfig(left_canvas_window, width=canvas_width, height=window_height)
+            left_canvas.configure(scrollregion=(0, 0, canvas_width, window_height))
+            if content_height > canvas_height:
+                if not left_vscroll.winfo_ismapped():
+                    left_vscroll.grid(row=0, column=1, sticky="ns")
+            else:
+                left_canvas.yview_moveto(0)
+                if left_vscroll.winfo_ismapped():
+                    left_vscroll.grid_remove()
+
+        left_wheel_accumulator = 0.0
+
+        def _left_mousewheel_units(event) -> int:
+            nonlocal left_wheel_accumulator
+            if sys.platform.startswith("win"):
+                left_wheel_accumulator += -float(getattr(event, "delta", 0) or 0) / 120.0
+                units = int(left_wheel_accumulator)
+                left_wheel_accumulator -= units
+                return units
+            if sys.platform == "darwin":
+                delta = int(getattr(event, "delta", 0) or 0)
+                if abs(delta) >= 120:
+                    return int(delta / -40)
+                return int(-1 * delta)
+            if getattr(event, "num", None) == 4:
+                return -1
+            if getattr(event, "num", None) == 5:
+                return 1
+            return 0
+
+        def _left_touchpad_deltas(event) -> tuple[int, int]:
+            encoded_delta = int(getattr(event, "delta", 0) or 0)
+            delta_x = encoded_delta >> 16
+            low_word = encoded_delta & 0xFFFF
+            delta_y = low_word if low_word < 0x8000 else low_word - 0x10000
+            return delta_x, delta_y
+
+        def _left_can_scroll() -> bool:
+            first, last = left_canvas.yview()
+            return first > 0 or last < 1
+
+        def _on_left_wheel(event):
+            delta_units = _left_mousewheel_units(event)
+            if delta_units and _left_can_scroll():
+                left_canvas.yview_scroll(delta_units, "units")
+                return "break"
+            return None
+
+        def _on_left_touchpad(event):
+            _delta_x, delta_y = _left_touchpad_deltas(event)
+            if delta_y and _left_can_scroll():
+                canvas_height = max(left_canvas.winfo_height(), 1)
+                top = left_canvas.yview()[0]
+                left_canvas.yview_moveto(top - (delta_y / canvas_height))
+                return "break"
+            return None
+
+        def _on_left_linux_up(_event):
+            if _left_can_scroll():
+                left_canvas.yview_scroll(-1, "units")
+                return "break"
+            return None
+
+        def _on_left_linux_down(_event):
+            if _left_can_scroll():
+                left_canvas.yview_scroll(1, "units")
+                return "break"
+            return None
+
+        LEFT_SCROLL_TAG = "LeftPanelScroll"
+
+        def _safe_bind_left_class(sequence: str, handler) -> None:
+            try:
+                left_canvas.bind_class(LEFT_SCROLL_TAG, sequence, handler)
+            except Exception:
+                pass
+
+        _safe_bind_left_class("<MouseWheel>", _on_left_wheel)
+        _safe_bind_left_class("<TouchpadScroll>", _on_left_touchpad)
+        _safe_bind_left_class("<Button-4>", _on_left_linux_up)
+        _safe_bind_left_class("<Button-5>", _on_left_linux_down)
+
+        def _apply_left_scroll_tag(widget) -> None:
+            try:
+                current = list(widget.bindtags())
+                if LEFT_SCROLL_TAG not in current:
+                    widget.bindtags([LEFT_SCROLL_TAG] + current)
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                _apply_left_scroll_tag(child)
+
+        brand_row = ttk.Frame(left_content, style="Sidebar.TFrame")
         brand_row.pack(fill="x")
-        brand_mark = Canvas(brand_row, width=48, height=48, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        brand_mark = Canvas(brand_row, width=self._px(48), height=self._px(48), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
         brand_mark.pack(side=LEFT)
-        self._draw_round_rect(brand_mark, 2, 2, 46, 46, 11, fill="#e8f6ee", outline="")
-        brand_mark.create_text(24, 24, text="HR", fill=COLOR_PRIMARY, font=(self.base_font[0], 12, "bold"))
+        self._draw_round_rect(brand_mark, self._pxf(2), self._pxf(2), self._pxf(46), self._pxf(46), self._pxf(11), fill="#e8f6ee", outline="")
+        brand_mark.create_text(self._pxf(24), self._pxf(24), text="HR", fill=COLOR_PRIMARY, font=(self.base_font[0], 12, "bold"))
         brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
-        brand_text.pack(side=LEFT, fill="x", expand=True, padx=(14, 0))
+        brand_text.pack(side=LEFT, fill="x", expand=True, padx=self._pad(14, 0))
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
-        ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w", pady=self._pad(3, 0))
 
-        ttk.Label(left_frame, text="WORKFLOWS", style="SidebarSection.TLabel").pack(anchor="w", pady=(36, 10))
+        ttk.Label(left_content, text="WORKFLOWS", style="SidebarSection.TLabel").pack(anchor="w", pady=self._pad(36, 10))
         self.nav_indicators = {}
 
-        nav_frame = ttk.Frame(left_frame, style="Sidebar.TFrame")
+        nav_frame = ttk.Frame(left_content, style="Sidebar.TFrame")
         nav_frame.pack(fill="x")
         for tool_id, label in TOOL_NAV_ITEMS:
             selected = tool_id == self.current_tool
             row = ttk.Frame(nav_frame, style="NavRow.TFrame")
-            row.pack(fill="x", pady=3)
-            indicator_width = 4
+            row.pack(fill="x", pady=self._px(3))
+            indicator_width = self._px(4)
             indicator = ttk.Frame(
                 row,
                 width=indicator_width,
@@ -477,7 +762,7 @@ class HRToolkitApp:
             indicator.pack(side=LEFT, fill=Y)
             indicator.pack_propagate(False)
             icon_bg = COLOR_NAV_SELECTED if selected else COLOR_SIDEBAR
-            icon = Canvas(row, width=28, height=40, bg=icon_bg, highlightthickness=0, bd=0, cursor="hand2")
+            icon = Canvas(row, width=self._px(28), height=self._px(40), bg=icon_bg, highlightthickness=0, bd=0, cursor="hand2")
             icon.pack(side=LEFT, fill=Y)
             icon.bind("<Button-1>", lambda _event, selected_tool=tool_id: self._select_tool(selected_tool))
             self._draw_nav_icon(icon, tool_id, selected)
@@ -493,13 +778,19 @@ class HRToolkitApp:
             self.nav_indicators[tool_id] = indicator
             self.nav_icons[tool_id] = icon
 
-        sidebar_footer = ttk.Frame(left_frame, style="Sidebar.TFrame")
+        sidebar_footer = ttk.Frame(left_content, style="Sidebar.TFrame")
         sidebar_footer.pack(side="bottom", fill="x")
-        ttk.Frame(sidebar_footer, height=1, style="Separator.TFrame").pack(fill="x", pady=(0, 12))
+        ttk.Frame(sidebar_footer, height=self._px(1), style="Separator.TFrame").pack(fill="x", pady=self._pad(0, 12))
         ttk.Label(sidebar_footer, text="本地处理 · 不上传数据", style="SidebarMuted.TLabel").pack(anchor="w")
-        ttk.Label(sidebar_footer, text=f"Version {__version__}", style="Version.TLabel").pack(anchor="w", pady=(5, 0))
+        ttk.Label(sidebar_footer, text=f"Version {__version__}", style="Version.TLabel").pack(anchor="w", pady=self._pad(5, 0))
 
-        ttk.Frame(root_frame, width=1, style="Separator.TFrame").pack(side=LEFT, fill=Y)
+        _apply_left_scroll_tag(left_canvas)
+        _apply_left_scroll_tag(left_content)
+        left_content.bind("<Configure>", _sync_left_canvas)
+        left_canvas.bind("<Configure>", _sync_left_canvas)
+        self.root.after_idle(_sync_left_canvas)
+
+        ttk.Frame(root_frame, width=self._px(1), style="Separator.TFrame").pack(side=LEFT, fill=Y)
 
         # Scrollable right panel: Canvas acts as the viewport; right_frame is
         # the inner content frame that all existing children are placed into.
@@ -519,25 +810,106 @@ class HRToolkitApp:
         self._right_canvas.pack(side=LEFT, fill=BOTH, expand=True)
         right_vscroll.config(command=self._right_canvas.yview)
 
-        right_frame = ttk.Frame(self._right_canvas, padding=(42, 34, 58, 28), style="Content.TFrame")
+        right_frame = ttk.Frame(self._right_canvas, padding=self._responsive_content_padding(), style="Content.TFrame")
         self._right_canvas_window = self._right_canvas.create_window(
             (0, 0), window=right_frame, anchor="nw"
         )
+        self._right_canvas_sync_pending = False
+        self._right_canvas_sync_repeat = 0
+
+        def _split_dimension_values(value) -> list[int]:
+            try:
+                if isinstance(value, tuple):
+                    parts = value
+                else:
+                    parts = self.root.tk.splitlist(value)
+                return [int(round(float(part))) for part in parts]
+            except Exception:
+                try:
+                    return [int(round(float(value)))]
+                except Exception:
+                    return []
+
+        def _frame_vertical_padding_sum(value) -> int:
+            parts = _split_dimension_values(value)
+            if not parts:
+                return 0
+            if len(parts) == 1:
+                return parts[0] * 2
+            if len(parts) == 2:
+                return parts[1] * 2
+            if len(parts) >= 4:
+                return parts[1] + parts[3]
+            return parts[1] * 2
+
+        def _pack_vertical_padding_sum(value) -> int:
+            parts = _split_dimension_values(value)
+            if not parts:
+                return 0
+            if len(parts) == 1:
+                return parts[0] * 2
+            return parts[0] + parts[1]
+
+        def _right_frame_natural_height() -> int:
+            try:
+                height = _frame_vertical_padding_sum(right_frame.cget("padding"))
+            except Exception:
+                height = 0
+            children = []
+            try:
+                children = list(right_frame.pack_slaves())
+            except Exception:
+                pass
+            if not children:
+                return right_frame.winfo_reqheight()
+            for child in children:
+                try:
+                    pack_info = child.pack_info()
+                except Exception:
+                    continue
+                try:
+                    height += child.winfo_reqheight()
+                except Exception:
+                    height += child.winfo_height()
+                height += _pack_vertical_padding_sum(pack_info.get("pady", 0))
+            return height
 
         def _sync_right_canvas_window(_event=None):
-            canvas_width = self._right_canvas.winfo_width()
-            canvas_height = self._right_canvas.winfo_height()
-            content_height = right_frame.winfo_reqheight()
+            canvas_width = max(self._right_canvas.winfo_width(), 1)
+            canvas_height = max(self._right_canvas.winfo_height(), 1)
+            content_height = _right_frame_natural_height()
+            window_height = max(content_height, canvas_height)
             self._right_canvas.itemconfig(
                 self._right_canvas_window,
                 width=canvas_width,
-                height=max(content_height, canvas_height),
+                height=window_height,
             )
-            self._right_canvas.configure(scrollregion=self._right_canvas.bbox("all"))
+            self._right_canvas.configure(
+                scrollregion=(0, 0, canvas_width, window_height)
+            )
+            if window_height <= canvas_height:
+                self._right_canvas.yview_moveto(0)
 
-        self._sync_right_canvas_window = _sync_right_canvas_window
-        right_frame.bind("<Configure>", _sync_right_canvas_window)
-        self._right_canvas.bind("<Configure>", _sync_right_canvas_window)
+        def _run_right_canvas_sync():
+            self._right_canvas_sync_pending = False
+            _sync_right_canvas_window()
+            if self._right_canvas_sync_repeat > 0:
+                self._right_canvas_sync_repeat -= 1
+                _queue_right_canvas_sync()
+
+        def _queue_right_canvas_sync() -> None:
+            if self._right_canvas_sync_pending:
+                return
+            self._right_canvas_sync_pending = True
+            self.root.after_idle(_run_right_canvas_sync)
+
+        def _schedule_right_canvas_sync(_event=None):
+            self._right_canvas_sync_repeat = max(self._right_canvas_sync_repeat, 2)
+            _queue_right_canvas_sync()
+
+        self._sync_right_canvas_window = _schedule_right_canvas_sync
+        right_frame.bind("<Configure>", _schedule_right_canvas_sync)
+        self._right_canvas.bind("<Configure>", _schedule_right_canvas_sync)
 
         SCROLL_TAG = "RightPanelScroll"
 
@@ -545,9 +917,21 @@ class HRToolkitApp:
             self._right_canvas.yview_scroll(delta_units, "units")
 
         def _scroll_page_pixels(delta_y: int) -> None:
-            canvas_height = max(self._right_canvas.winfo_height(), 1)
+            total_height = max(self._right_canvas.winfo_height(), 1)
+            try:
+                parts = [float(part) for part in self._right_canvas.cget("scrollregion").split()]
+                if len(parts) == 4:
+                    total_height = max(parts[3] - parts[1], 1)
+            except Exception:
+                try:
+                    bbox = self._right_canvas.bbox("all")
+                    if bbox:
+                        total_height = max(bbox[3] - bbox[1], 1)
+                except Exception:
+                    pass
             top = self._right_canvas.yview()[0]
-            self._right_canvas.yview_moveto(top - (delta_y / canvas_height))
+            new_top = max(0.0, min(1.0, top - (delta_y / total_height)))
+            self._right_canvas.yview_moveto(new_top)
 
         def _touchpad_deltas(event) -> tuple[int, int]:
             encoded_delta = int(getattr(event, "delta", 0) or 0)
@@ -556,9 +940,15 @@ class HRToolkitApp:
             delta_y = low_word if low_word < 0x8000 else low_word - 0x10000
             return delta_x, delta_y
 
+        wheel_accumulator = 0.0
+
         def _mousewheel_units(event) -> int:
+            nonlocal wheel_accumulator
             if sys.platform.startswith("win"):
-                return int(-1 * (event.delta / 120))
+                wheel_accumulator += -float(getattr(event, "delta", 0) or 0) / 120.0
+                units = int(wheel_accumulator)
+                wheel_accumulator -= units
+                return units
             if sys.platform == "darwin":
                 delta = int(getattr(event, "delta", 0) or 0)
                 if abs(delta) >= 120:
@@ -631,7 +1021,8 @@ class HRToolkitApp:
         title_row.pack(fill="x")
         title_row.columnconfigure(0, weight=1)
         ttk.Label(title_row, text="人员运营自动化", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 0))
+        self.title_label = ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel", justify="left")
+        self.title_label.grid(row=1, column=0, sticky="w", pady=self._pad(5, 0))
         title_actions = ttk.Frame(title_row, style="Content.TFrame")
         title_actions.grid(row=0, column=1, rowspan=2, sticky="ne")
         self.check_update_button = CodexButton(
@@ -643,31 +1034,79 @@ class HRToolkitApp:
         )
         self.check_update_button.pack(side=LEFT)
         self.tutorial_toggle_button = CodexButton(title_actions, text="使用教程", icon="i", width=118)
-        self.tutorial_toggle_button.pack(side=LEFT, padx=(8, 0))
-        ttk.Label(
+        self.tutorial_toggle_button.pack(side=LEFT, padx=self._pad(8, 0))
+        self.subtitle_label = Label(
             right_frame,
             textvariable=self.tool_description,
-            style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(10, 26))
+            bg=COLOR_BG,
+            fg=COLOR_MUTED,
+            font=self.base_font,
+            justify="left",
+            anchor="w",
+        )
+        self.subtitle_label.pack(anchor="w", fill="x", pady=self._pad(10, 26))
+
+        self._title_actions_vertical = False
+
+        def _pack_title_actions(vertical: bool) -> None:
+            if self._title_actions_vertical == vertical:
+                return
+            self._title_actions_vertical = vertical
+            self.check_update_button.pack_forget()
+            self.tutorial_toggle_button.pack_forget()
+            if vertical:
+                self.check_update_button.pack(anchor="w")
+                self.tutorial_toggle_button.pack(anchor="w", pady=self._pad(8, 0))
+            else:
+                self.check_update_button.pack(side=LEFT)
+                self.tutorial_toggle_button.pack(side=LEFT, padx=self._pad(8, 0))
+
+        def _update_text_wraps(_event=None) -> None:
+            title_row_width = title_row.winfo_width()
+            if title_row_width <= 1:
+                title_row_width = self._px(240)
+            horizontal_actions_width = self._px(118 + 8 + 118)
+            vertical_actions_width = self._px(118)
+            tight_header = title_row_width < self._px(620)
+            vertical_actions = title_row_width < horizontal_actions_width + self._px(32)
+            _pack_title_actions(vertical_actions)
+
+            if tight_header:
+                title_actions.grid_configure(row=2, column=0, columnspan=2, rowspan=1, sticky="w", pady=self._pad(12, 0))
+                actions_width = vertical_actions_width if vertical_actions else horizontal_actions_width
+                title_wrap = title_row_width
+            else:
+                title_actions.grid_configure(row=0, column=1, columnspan=1, rowspan=2, sticky="ne", pady=0)
+                actions_width = horizontal_actions_width
+                title_wrap = title_row_width - actions_width - self._px(24)
+
+            title_wrap = max(1, title_wrap)
+            subtitle_wrap = max(1, title_row_width - self._px(8))
+            self.title_label.configure(wraplength=title_wrap)
+            self.subtitle_label.configure(wraplength=subtitle_wrap)
+
+        title_row.bind("<Configure>", _update_text_wraps, add="+")
+        right_frame.bind("<Configure>", _update_text_wraps, add="+")
+        self.root.after_idle(_update_text_wraps)
 
         self.change_tabs = ttk.Notebook(right_frame, style="Change.TNotebook")
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="异动表汇总")
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="花名册更新")
         self.change_tabs.bind("<<NotebookTabChanged>>", self._on_change_tab_changed)
 
-        self.tutorial_frame = ttk.Frame(right_frame, padding=14, style="Tutorial.TFrame")
-        ttk.Label(self.tutorial_frame, text="使用教程", style="TutorialTitle.TLabel").pack(anchor="w", pady=(0, 6))
+        self.tutorial_frame = ttk.Frame(right_frame, padding=self._px(14), style="Tutorial.TFrame")
+        ttk.Label(self.tutorial_frame, text="使用教程", style="TutorialTitle.TLabel").pack(anchor="w", pady=self._pad(0, 6))
         self.tutorial_text = Text(
             self.tutorial_frame,
             height=6,
             wrap="word",
-            padx=10,
-            pady=8,
+            padx=self._px(10),
+            pady=self._px(8),
             bg=COLOR_TUTORIAL_BG,
             fg=COLOR_TEXT,
             relief="flat",
             bd=0,
-            highlightthickness=1,
+            highlightthickness=self._px(1),
             highlightbackground=COLOR_TUTORIAL_BORDER,
             highlightcolor=COLOR_TUTORIAL_BORDER,
             font=self.base_font,
@@ -677,70 +1116,90 @@ class HRToolkitApp:
         self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], 10, "bold"))
         self._set_tutorial_text()
 
-        form = ttk.Frame(right_frame, padding=(24, 22, 24, 22), style="Card.TFrame")
+        form = ttk.Frame(right_frame, padding=self._responsive_form_padding(), style="Card.TFrame")
         form.pack(fill="x")
         self.form = form
+        self._form_compact_layout = False
+        self._summary_row_visible = True
+        self._output_row_visible = True
+        self._rename_row_visible = True
+        self._form_rows = {}
 
-        def make_input_row(row_index: int, label_text, value_var: StringVar, command) -> tuple[ttk.Label, ttk.Frame, CodexButton]:
+        def make_input_row(row_key: str, row_index: int, label_text, value_var: StringVar, command) -> tuple[ttk.Label, ttk.Frame, CodexButton]:
             if isinstance(label_text, StringVar):
                 label = ttk.Label(form, textvariable=label_text, style="App.TLabel")
             else:
                 label = ttk.Label(form, text=label_text, style="App.TLabel")
-            label.grid(row=row_index, column=0, sticky="w", pady=7)
+            label.grid(row=row_index, column=0, sticky="w", pady=self._px(7))
             input_frame = ttk.Frame(form, style="InputWrap.TFrame")
-            input_frame.grid(row=row_index, column=1, sticky="ew", padx=(18, 0), pady=7)
+            input_frame.grid(row=row_index, column=1, sticky="ew", padx=self._pad(18, 0), pady=self._px(7))
             entry = ttk.Entry(input_frame, textvariable=value_var, style="App.TEntry")
             entry.pack(side=LEFT, fill=BOTH, expand=True)
-            button = CodexButton(input_frame, text="选择", command=command, width=64, min_width=64)
-            button.pack(side=RIGHT, padx=(10, 0))
+            button_bar = ttk.Frame(input_frame, style="InputWrap.TFrame")
+            button_bar.pack(side=RIGHT)
+            button = CodexButton(button_bar, text="选择", command=command, width=64, min_width=64)
+            setattr(button, "_hr_picker_visible", True)
+            button.pack(side=RIGHT, padx=self._pad(10, 0))
+            setattr(input_frame, "_hr_entry", entry)
+            setattr(input_frame, "_hr_button_bar", button_bar)
+            self._form_rows[row_key] = {
+                "index": row_index,
+                "label": label,
+                "frame": input_frame,
+                "entry": entry,
+                "button_bar": button_bar,
+            }
             return label, input_frame, button
 
         self.input_label_widget, self.input_entry_widget, self.input_choose_button = make_input_row(
+            "input",
             0,
             self.input_label,
             self.input_path,
             self._choose_input,
         )
         self.summary_label_widget, self.summary_entry_widget, self.summary_choose_button = make_input_row(
+            "summary",
             1,
             self.summary_label,
             self.summary_path,
             self._choose_summary,
         )
         self.output_label_widget, self.output_entry_widget, self.output_choose_button = make_input_row(
+            "output",
             2,
             "保存位置",
             self.output_dir,
             self._choose_output,
         )
         self.change_folder_zip_button = CodexButton(
-            self.input_entry_widget,
+            getattr(self.input_entry_widget, "_hr_button_bar"),
             text="文件夹",
             command=self._choose_change_folder,
             width=96,
         )
         self.change_file_button = CodexButton(
-            self.input_entry_widget,
+            getattr(self.input_entry_widget, "_hr_button_bar"),
             text="文件/压缩包",
             command=self._choose_change_files_or_zip,
             width=126,
         )
         self.change_summary_folder_button = CodexButton(
-            self.summary_entry_widget,
+            getattr(self.summary_entry_widget, "_hr_button_bar"),
             text="文件夹",
             command=self._choose_change_summary_folder,
             width=96,
         )
         self.change_summary_file_button = CodexButton(
-            self.summary_entry_widget,
+            getattr(self.summary_entry_widget, "_hr_button_bar"),
             text="文件",
             command=self._choose_change_summary_file,
             width=84,
         )
 
-        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=12, style="Rename.TLabelframe")
-        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=5)
+        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=self._px(12), style="Rename.TLabelframe")
+        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
+        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=self._px(5))
         self.rename_mode_widget = ttk.Combobox(
             self.rename_options_frame,
             textvariable=self.rename_mode,
@@ -749,24 +1208,130 @@ class HRToolkitApp:
             width=16,
             style="App.TCombobox",
         )
-        self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=12, pady=5)
+        self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=self._px(12), pady=self._px(5))
         self.rename_mode_widget.bind("<<ComboboxSelected>>", self._on_rename_mode_changed)
 
-        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel").grid(row=1, column=0, sticky="w", pady=self._px(5))
         self.rename_target_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_target_name, style="App.TEntry")
-        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=12, pady=5)
+        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
 
         self.rename_text_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_text_label, style="App.TLabel")
-        self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=5)
+        self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=self._px(5))
         self.rename_text_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_text, style="App.TEntry")
-        self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
+        self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
 
         self.rename_replacement_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_replacement_label, style="App.TLabel")
-        self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=5)
+        self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=self._px(5))
         self.rename_replacement_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_replacement_name, style="App.TEntry")
-        self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=12, pady=5)
+        self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
         self.rename_options_frame.columnconfigure(1, weight=1)
-        form.columnconfigure(1, weight=1)
+
+        def _refresh_picker_button_bar(button_bar) -> None:
+            visible_buttons = [child for child in button_bar.winfo_children() if getattr(child, "_hr_picker_visible", False)]
+            for child in button_bar.winfo_children():
+                child.pack_forget()
+            if self._form_compact_layout:
+                for index, child in enumerate(visible_buttons):
+                    pady = self._pad(0, 6) if index < len(visible_buttons) - 1 else 0
+                    child.pack(fill="x", pady=pady)
+                return
+            for child in reversed(visible_buttons):
+                child.pack(side=RIGHT, padx=self._pad(4, 0))
+
+        def _set_picker_button_visible(button, visible: bool) -> None:
+            setattr(button, "_hr_picker_visible", visible)
+            parent = button.master
+            if visible:
+                _refresh_picker_button_bar(parent)
+                return
+            button.pack_forget()
+
+        def _layout_input_frame(row_data) -> None:
+            entry = row_data["entry"]
+            button_bar = row_data["button_bar"]
+            entry.pack_forget()
+            button_bar.pack_forget()
+            if self._form_compact_layout:
+                entry.pack(side="top", fill="x")
+                button_bar.pack(side="top", fill="x", pady=self._pad(8, 0))
+                _refresh_picker_button_bar(button_bar)
+                return
+            entry.pack(side=LEFT, fill=BOTH, expand=True)
+            button_bar.pack(side=RIGHT)
+            _refresh_picker_button_bar(button_bar)
+
+        def _apply_form_layout() -> None:
+            form.columnconfigure(0, weight=1 if self._form_compact_layout else 0)
+            form.columnconfigure(1, weight=0 if self._form_compact_layout else 1)
+            visible_keys = ["input"]
+            if self._summary_row_visible:
+                visible_keys.append("summary")
+            if self._output_row_visible:
+                visible_keys.append("output")
+
+            for key, row_data in self._form_rows.items():
+                label = row_data["label"]
+                frame = row_data["frame"]
+                _layout_input_frame(row_data)
+                if key not in visible_keys:
+                    label.grid_remove()
+                    frame.grid_remove()
+                    continue
+                if self._form_compact_layout:
+                    display_index = visible_keys.index(key)
+                    label.grid(
+                        row=display_index * 2,
+                        column=0,
+                        columnspan=2,
+                        sticky="w",
+                        padx=0,
+                        pady=self._pad(4, 2),
+                    )
+                    frame.grid(
+                        row=display_index * 2 + 1,
+                        column=0,
+                        columnspan=2,
+                        sticky="ew",
+                        padx=0,
+                        pady=self._pad(0, 8),
+                    )
+                    continue
+                frame_padx = self._pad(18, 0) if key == "input" else self._pad(12, 0)
+                label.grid(row=row_data["index"], column=0, sticky="w", padx=0, pady=self._px(7))
+                frame.grid(row=row_data["index"], column=1, sticky="ew", padx=frame_padx, pady=self._px(7))
+
+            if self._rename_row_visible:
+                rename_row = len(visible_keys) * 2 if self._form_compact_layout else 3
+                self.rename_options_frame.grid(row=rename_row, column=0, columnspan=2, sticky="ew", pady=self._pad(10, 0))
+            else:
+                self.rename_options_frame.grid_remove()
+
+            if hasattr(self, "_sync_right_canvas_window"):
+                self.root.after_idle(self._sync_right_canvas_window)
+
+        def _update_form_responsive_layout(_event=None) -> None:
+            content_padding = self._responsive_content_padding()
+            form_padding = self._responsive_form_padding()
+            if getattr(self, "_right_content_padding", None) != content_padding:
+                self._right_content_padding = content_padding
+                right_frame.configure(padding=content_padding)
+            if getattr(self, "_form_padding", None) != form_padding:
+                self._form_padding = form_padding
+                form.configure(padding=form_padding)
+            canvas_width = self._right_canvas.winfo_width()
+            compact = canvas_width > 1 and (canvas_width / max(self.ui_scale, 1.0)) < 560
+            if compact != self._form_compact_layout:
+                self._form_compact_layout = compact
+            _apply_form_layout()
+
+        self._apply_form_layout = _apply_form_layout
+        self._update_form_responsive_layout = _update_form_responsive_layout
+        self._show_picker_button = lambda button: _set_picker_button_visible(button, True)
+        self._hide_picker_button = lambda button: _set_picker_button_visible(button, False)
+        self._right_content_padding = self._responsive_content_padding()
+        self._form_padding = self._responsive_form_padding()
+        self._right_canvas.bind("<Configure>", _update_form_responsive_layout, add="+")
+        self.root.after_idle(_update_form_responsive_layout)
         self._update_change_tabs_visibility()
         self._update_change_picker_buttons()
         self._update_summary_controls()
@@ -778,7 +1343,7 @@ class HRToolkitApp:
         def toggle_tutorial() -> None:
             self.tutorial_expanded = not self.tutorial_expanded
             if self.tutorial_expanded:
-                self.tutorial_frame.pack(fill="x", pady=(0, 16), before=form)
+                self.tutorial_frame.pack(fill="x", pady=self._pad(0, 16), before=form)
                 self.tutorial_toggle_button.configure(text="收起教程")
             else:
                 self.tutorial_frame.pack_forget()
@@ -788,18 +1353,18 @@ class HRToolkitApp:
         self.tutorial_toggle_button.configure(command=toggle_tutorial)
 
         actions = ttk.Frame(right_frame, style="Content.TFrame")
-        actions.pack(fill="x", pady=(24, 22))
-        run_button_box = ttk.Frame(actions, width=132, height=42, style="Content.TFrame")
+        actions.pack(fill="x", pady=self._pad(24, 22))
+        run_button_box = ttk.Frame(actions, width=self._px(132), height=self._px(42), style="Content.TFrame")
         run_button_box.pack(side=LEFT)
         run_button_box.pack_propagate(False)
         self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="→", min_width=132, height=42)
         self.run_button.pack(fill=BOTH, expand=True)
         self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, icon="↗", width=148, height=42)
-        self.open_button.pack(side=LEFT, padx=(12, 0))
+        self.open_button.pack(side=LEFT, padx=self._pad(12, 0))
 
         ttk.Label(right_frame, text="运行日志", style="Section.TLabel").pack(anchor="w")
-        log_frame = ttk.Frame(right_frame, padding=(1, 1, 1, 1), style="Card.TFrame")
-        log_frame.pack(fill=BOTH, expand=True, pady=(10, 0))
+        log_frame = ttk.Frame(right_frame, padding=self._pad(1, 1, 1, 1), style="Card.TFrame")
+        log_frame.pack(fill=BOTH, expand=True, pady=self._pad(10, 0))
         scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
         self.log_text = Text(
             log_frame,
@@ -812,8 +1377,8 @@ class HRToolkitApp:
             bd=0,
             highlightthickness=0,
             insertbackground=COLOR_LOG_TEXT,
-            padx=16,
-            pady=14,
+            padx=self._px(16),
+            pady=self._px(14),
             font=self.base_font,
         )
         self.log_text.tag_configure("success", foreground=COLOR_SUCCESS)
@@ -840,6 +1405,20 @@ class HRToolkitApp:
                 self._right_canvas.yview_scroll(delta_units, "units")
             return "break"
 
+        def _scroll_log_text_pixels(delta_y: int) -> None:
+            line_height = self._px(18)
+            try:
+                line_info = self.log_text.dlineinfo("@0,0")
+                if line_info and line_info[3] > 0:
+                    line_height = line_info[3]
+            except Exception:
+                pass
+            units = int(round(-delta_y / max(line_height, 1)))
+            if units == 0 and delta_y:
+                units = -1 if delta_y > 0 else 1
+            if units:
+                self.log_text.yview_scroll(units, "units")
+
         def _on_log_touchpad(event):
             top, bottom = self.log_text.yview()
             _delta_x, delta_y = _touchpad_deltas(event)
@@ -848,7 +1427,7 @@ class HRToolkitApp:
             can_scroll_up = top > 0
             can_scroll_down = bottom < 1.0
             if (delta_y > 0 and can_scroll_up) or (delta_y < 0 and can_scroll_down):
-                self.log_text.yview_scroll(-delta_y, "pixels")
+                _scroll_log_text_pixels(delta_y)
             else:
                 _scroll_page_pixels(delta_y)
             return "break"
@@ -862,8 +1441,13 @@ class HRToolkitApp:
 
         # One-time full scan after all widgets are rendered.
         self.root.after_idle(lambda: _apply_scroll_tag(right_frame))
+        self.root.after_idle(self._sync_right_canvas_window)
 
         self._write_log(self._initial_log_text())
+        self.root.update_idletasks()
+        _sync_right_canvas_window()
+        self.root.update_idletasks()
+        _sync_right_canvas_window()
 
     def _check_updates_on_startup(self) -> None:
         if not update_check_enabled():
@@ -1082,11 +1666,12 @@ class HRToolkitApp:
         indeterminate: bool,
         close_command,
     ) -> None:
-        _window, body = self._build_update_window(width=400, height=146, close_command=close_command)
+        _window, body, dialog_width, _dialog_height = self._build_update_window(width=400, height=146, close_command=close_command)
         body.grid_columnconfigure(1, weight=1)
+        progress_width = min(self._px(248), max(1, dialog_width - self._px(116)))
 
-        icon = Canvas(body, width=58, height=58, bg=UPDATE_DIALOG_BG, highlightthickness=0)
-        icon.grid(row=0, column=0, rowspan=3, sticky="nw", padx=(24, 14), pady=(25, 0))
+        icon = Canvas(body, width=self._px(58), height=self._px(58), bg=UPDATE_DIALOG_BG, highlightthickness=0)
+        icon.grid(row=0, column=0, rowspan=3, sticky="nw", padx=self._pad(24, 14), pady=self._pad(25, 0))
         self._draw_update_icon(icon)
 
         Label(
@@ -1095,16 +1680,18 @@ class HRToolkitApp:
             bg=UPDATE_DIALOG_BG,
             fg=UPDATE_DIALOG_TEXT,
             font=(self.base_font[0], 10, "bold"),
-        ).grid(row=0, column=1, sticky="w", padx=(0, 20), pady=(30, 0))
-        self._create_update_progress_bar(body, row=1, column=1, padx=(0, 20), pady=(10, 0))
+            wraplength=progress_width,
+        ).grid(row=0, column=1, sticky="w", padx=self._pad(0, 20), pady=self._pad(30, 0))
+        self._create_update_progress_bar(body, row=1, column=1, padx=self._pad(0, 20), pady=self._pad(10, 0), width=progress_width)
         self.update_progress_label = Label(
             body,
             text=detail,
             bg=UPDATE_DIALOG_BG,
             fg=UPDATE_DIALOG_MUTED,
             font=self.small_font,
+            wraplength=progress_width,
         )
-        self.update_progress_label.grid(row=2, column=1, sticky="w", padx=(0, 20), pady=(8, 0))
+        self.update_progress_label.grid(row=2, column=1, sticky="w", padx=self._pad(0, 20), pady=self._pad(8, 0))
         if indeterminate:
             self._start_indeterminate_update_progress()
         else:
@@ -1124,10 +1711,14 @@ class HRToolkitApp:
         close_command=None,
     ) -> None:
         close_command = close_command or self._close_update_window
-        _window, body = self._build_update_window(width=width, height=height, close_command=close_command)
+        _window, body, dialog_width, _dialog_height = self._build_update_window(width=width, height=height, close_command=close_command)
+        content_pad_x = self._px(22)
+        button_pad_x = self._px(16)
+        text_wrap_width = max(1, dialog_width - content_pad_x * 2)
+        button_width = max(1, dialog_width - button_pad_x * 2)
 
-        icon = Canvas(body, width=58, height=58, bg=UPDATE_DIALOG_BG, highlightthickness=0)
-        icon.pack(anchor="w", padx=22, pady=(22, 0))
+        icon = Canvas(body, width=self._px(58), height=self._px(58), bg=UPDATE_DIALOG_BG, highlightthickness=0)
+        icon.pack(anchor="w", padx=content_pad_x, pady=self._pad(22, 0))
         self._draw_update_icon(icon)
 
         Label(
@@ -1136,7 +1727,8 @@ class HRToolkitApp:
             bg=UPDATE_DIALOG_BG,
             fg=UPDATE_DIALOG_TEXT,
             font=(self.base_font[0], 10, "bold"),
-        ).pack(anchor="w", padx=22, pady=(14, 6))
+            wraplength=text_wrap_width,
+        ).pack(anchor="w", padx=content_pad_x, pady=self._pad(14, 6))
         Label(
             body,
             text=detail,
@@ -1144,12 +1736,11 @@ class HRToolkitApp:
             fg=UPDATE_DIALOG_TEXT,
             font=self.base_font,
             justify="left",
-            wraplength=width - 44,
-        ).pack(anchor="w", padx=22)
+            wraplength=text_wrap_width,
+        ).pack(anchor="w", padx=content_pad_x)
 
         button_frame = Frame(body, bg=UPDATE_DIALOG_BG)
-        button_frame.pack(side="bottom", fill="x", padx=16, pady=(8, 16))
-        button_width = width - 32
+        button_frame.pack(side="bottom", fill="x", padx=button_pad_x, pady=self._pad(8, 16))
         self._create_update_button(
             button_frame,
             text=primary_text,
@@ -1168,39 +1759,40 @@ class HRToolkitApp:
                 fill=UPDATE_DIALOG_SECONDARY,
                 active_fill=UPDATE_DIALOG_SECONDARY_ACTIVE,
                 foreground=UPDATE_DIALOG_TEXT,
-            ).pack(fill="x", pady=(8, 0))
+            ).pack(fill="x", pady=self._pad(8, 0))
 
-    def _build_update_window(self, *, width: int, height: int, close_command) -> tuple[Toplevel, Frame]:
+    def _build_update_window(self, *, width: int, height: int, close_command) -> tuple[Toplevel, Frame, int, int]:
         self._close_update_window()
+        scaled_width, scaled_height = self._update_dialog_size(width, height)
         self.update_window = Toplevel(self.root)
         self.update_window.title("软件更新")
-        self._center_window(self.update_window, width, height)
+        self._center_window(self.update_window, scaled_width, scaled_height)
         self.update_window.resizable(False, False)
         self.update_window.configure(bg=UPDATE_DIALOG_BG)
         self.update_window.transient(self.root)
         self.update_window.grab_set()
         self.update_window.protocol("WM_DELETE_WINDOW", close_command)
-        body = Frame(self.update_window, bg=UPDATE_DIALOG_BG, width=width, height=height)
+        body = Frame(self.update_window, bg=UPDATE_DIALOG_BG, width=scaled_width, height=scaled_height)
         body.pack(fill=BOTH, expand=True)
         body.pack_propagate(False)
-        return self.update_window, body
+        return self.update_window, body, scaled_width, scaled_height
 
     def _focus_update_window(self) -> None:
         if self.update_window is not None and self.update_window.winfo_exists():
             self.update_window.lift()
             self.update_window.focus_force()
 
-    def _create_update_progress_bar(self, parent: Frame, *, row: int, column: int, padx, pady) -> None:
-        self.update_progress_width = 248
+    def _create_update_progress_bar(self, parent: Frame, *, row: int, column: int, padx, pady, width: int | None = None) -> None:
+        self.update_progress_width = width if width is not None else self._px(248)
         self.update_progress_canvas = Canvas(
             parent,
             width=self.update_progress_width,
-            height=8,
+            height=self._px(8),
             bg=UPDATE_DIALOG_BG,
             highlightthickness=0,
         )
         self.update_progress_canvas.grid(row=row, column=column, sticky="w", padx=padx, pady=pady)
-        self._draw_round_rect(self.update_progress_canvas, 0, 1, self.update_progress_width, 7, 3, fill=UPDATE_DIALOG_TRACK)
+        self._draw_round_rect(self.update_progress_canvas, 0, self._pxf(1), self.update_progress_width, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_TRACK)
 
     def _set_update_progress(self, percent: float) -> None:
         canvas = self.update_progress_canvas
@@ -1210,7 +1802,7 @@ class HRToolkitApp:
         width = max(0, min(self.update_progress_width * percent / 100, self.update_progress_width))
         if width <= 0:
             return
-        self._draw_round_rect(canvas, 0, 1, width, 7, 3, fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
+        self._draw_round_rect(canvas, 0, self._pxf(1), width, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
 
     def _start_indeterminate_update_progress(self) -> None:
         def tick() -> None:
@@ -1218,14 +1810,14 @@ class HRToolkitApp:
             if canvas is None:
                 return
             canvas.delete("fill")
-            segment = 112
+            segment = self._px(112)
             span = self.update_progress_width + segment
             x = (self.update_progress_phase % span) - segment
             x1 = max(0, x)
             x2 = min(self.update_progress_width, x + segment)
             if x2 > x1:
-                self._draw_round_rect(canvas, x1, 1, x2, 7, 3, fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
-            self.update_progress_phase += 8
+                self._draw_round_rect(canvas, x1, self._pxf(1), x2, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
+            self.update_progress_phase += self._px(8)
             self.update_progress_job = self.root.after(35, tick)
 
         self.update_progress_phase = 0
@@ -1242,12 +1834,12 @@ class HRToolkitApp:
         active_fill: str,
         foreground: str,
     ) -> Canvas:
-        height = 30
+        height = self._px(30)
         button = Canvas(parent, width=width, height=height, bg=UPDATE_DIALOG_BG, highlightthickness=0, cursor="hand2")
 
         def paint(color: str) -> None:
             button.delete("all")
-            self._draw_round_rect(button, 0, 0, width, height, 10, fill=color)
+            self._draw_round_rect(button, 0, 0, width, height, self._pxf(10), fill=color)
             button.create_text(width / 2, height / 2, text=text, fill=foreground, font=(self.base_font[0], 10, "bold"))
 
         def activate(_event=None) -> None:
@@ -1266,13 +1858,14 @@ class HRToolkitApp:
         return button
 
     def _draw_update_icon(self, canvas: Canvas) -> None:
-        self._draw_round_rect(canvas, 5, 6, 53, 54, 12, fill="#ffffff", outline="#dfe2e8")
-        canvas.create_oval(12, 18, 37, 44, fill="#546cff", outline="")
-        canvas.create_oval(21, 11, 49, 40, fill="#8e6cff", outline="")
-        canvas.create_oval(25, 22, 49, 47, fill="#315cff", outline="")
-        canvas.create_rectangle(18, 25, 43, 43, fill="#315cff", outline="")
-        canvas.create_text(28, 32, text="›", fill="#ffffff", font=(self.base_font[0], 18, "bold"))
-        canvas.create_text(38, 35, text="_", fill="#ffffff", font=(self.base_font[0], 14, "bold"))
+        p = self._pxf
+        self._draw_round_rect(canvas, p(5), p(6), p(53), p(54), p(12), fill="#ffffff", outline="#dfe2e8")
+        canvas.create_oval(p(12), p(18), p(37), p(44), fill="#546cff", outline="")
+        canvas.create_oval(p(21), p(11), p(49), p(40), fill="#8e6cff", outline="")
+        canvas.create_oval(p(25), p(22), p(49), p(47), fill="#315cff", outline="")
+        canvas.create_rectangle(p(18), p(25), p(43), p(43), fill="#315cff", outline="")
+        canvas.create_text(p(28), p(32), text="›", fill="#ffffff", font=(self.base_font[0], 18, "bold"))
+        canvas.create_text(p(38), p(35), text="_", fill="#ffffff", font=(self.base_font[0], 14, "bold"))
 
     def _draw_round_rect(self, canvas: Canvas, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
         radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
@@ -1383,7 +1976,7 @@ class HRToolkitApp:
             indicator = self.nav_indicators.get(tool_id)
             if indicator is not None:
                 indicator_style = "NavIndicatorSelected.TFrame" if selected else "NavIndicator.TFrame"
-                indicator.configure(style=indicator_style, width=4)
+                indicator.configure(style=indicator_style, width=self._px(4))
             icon = self.nav_icons.get(tool_id)
             if icon is not None:
                 self._draw_nav_icon(icon, tool_id, selected)
@@ -1393,46 +1986,48 @@ class HRToolkitApp:
         background = COLOR_NAV_SELECTED if selected else COLOR_SIDEBAR
         foreground = COLOR_PRIMARY if selected else COLOR_NAV_TEXT
         canvas.configure(bg=background)
-        line = {"fill": foreground, "width": 1.35}
+        p = self._pxf
+        line_width = max(1.0, p(1.35))
+        line = {"fill": foreground, "width": line_width}
 
         if tool_id == "social_security":
-            canvas.create_rectangle(9, 12, 19, 24, outline=foreground, width=1.35)
-            canvas.create_line(12, 15, 17, 15, **line)
-            canvas.create_line(12, 18, 17, 18, **line)
-            canvas.create_line(12, 21, 16, 21, **line)
+            canvas.create_rectangle(p(9), p(12), p(19), p(24), outline=foreground, width=line_width)
+            canvas.create_line(p(12), p(15), p(17), p(15), **line)
+            canvas.create_line(p(12), p(18), p(17), p(18), **line)
+            canvas.create_line(p(12), p(21), p(16), p(21), **line)
         elif tool_id == "data_statistics":
-            canvas.create_line(8, 25, 21, 25, **line)
-            canvas.create_rectangle(9, 19, 11, 25, outline=foreground, width=1.35)
-            canvas.create_rectangle(14, 15, 16, 25, outline=foreground, width=1.35)
-            canvas.create_rectangle(19, 11, 21, 25, outline=foreground, width=1.35)
+            canvas.create_line(p(8), p(25), p(21), p(25), **line)
+            canvas.create_rectangle(p(9), p(19), p(11), p(25), outline=foreground, width=line_width)
+            canvas.create_rectangle(p(14), p(15), p(16), p(25), outline=foreground, width=line_width)
+            canvas.create_rectangle(p(19), p(11), p(21), p(25), outline=foreground, width=line_width)
         elif tool_id == "insurance_ledger":
-            canvas.create_polygon(14, 10, 21, 13, 20, 21, 14, 26, 8, 21, 7, 13, outline=foreground, fill=background, width=1.35)
-            canvas.create_line(11, 18, 13, 20, 17, 15, **line)
+            canvas.create_polygon(p(14), p(10), p(21), p(13), p(20), p(21), p(14), p(26), p(8), p(21), p(7), p(13), outline=foreground, fill=background, width=line_width)
+            canvas.create_line(p(11), p(18), p(13), p(20), p(17), p(15), **line)
         elif tool_id == "salary_split":
-            canvas.create_oval(8, 12, 12, 16, outline=foreground, width=1.35)
-            canvas.create_oval(8, 23, 12, 27, outline=foreground, width=1.35)
-            canvas.create_line(12, 15, 21, 24, **line)
-            canvas.create_line(12, 24, 21, 15, **line)
+            canvas.create_oval(p(8), p(12), p(12), p(16), outline=foreground, width=line_width)
+            canvas.create_oval(p(8), p(23), p(12), p(27), outline=foreground, width=line_width)
+            canvas.create_line(p(12), p(15), p(21), p(24), **line)
+            canvas.create_line(p(12), p(24), p(21), p(15), **line)
         elif tool_id == "salary_merge":
-            canvas.create_line(8, 16, 20, 16, **line)
-            canvas.create_polygon(20, 16, 16, 13, 16, 19, fill=foreground, outline=foreground)
-            canvas.create_line(20, 22, 8, 22, **line)
-            canvas.create_polygon(8, 22, 12, 19, 12, 25, fill=foreground, outline=foreground)
+            canvas.create_line(p(8), p(16), p(20), p(16), **line)
+            canvas.create_polygon(p(20), p(16), p(16), p(13), p(16), p(19), fill=foreground, outline=foreground)
+            canvas.create_line(p(20), p(22), p(8), p(22), **line)
+            canvas.create_polygon(p(8), p(22), p(12), p(19), p(12), p(25), fill=foreground, outline=foreground)
         elif tool_id == "personnel_change_merge":
-            canvas.create_arc(8, 11, 21, 24, start=35, extent=245, style="arc", outline=foreground, width=1.35)
-            canvas.create_polygon(18, 11, 22, 12, 20, 16, fill=foreground, outline=foreground)
-            canvas.create_arc(7, 13, 20, 26, start=215, extent=245, style="arc", outline=foreground, width=1.35)
-            canvas.create_polygon(10, 26, 6, 25, 8, 21, fill=foreground, outline=foreground)
+            canvas.create_arc(p(8), p(11), p(21), p(24), start=35, extent=245, style="arc", outline=foreground, width=line_width)
+            canvas.create_polygon(p(18), p(11), p(22), p(12), p(20), p(16), fill=foreground, outline=foreground)
+            canvas.create_arc(p(7), p(13), p(20), p(26), start=215, extent=245, style="arc", outline=foreground, width=line_width)
+            canvas.create_polygon(p(10), p(26), p(6), p(25), p(8), p(21), fill=foreground, outline=foreground)
         elif tool_id == "archive_import":
-            canvas.create_rectangle(8, 13, 20, 25, outline=foreground, width=1.35)
-            canvas.create_rectangle(10, 11, 18, 13, outline=foreground, width=1.35)
-            canvas.create_line(11, 17, 17, 17, **line)
-            canvas.create_line(11, 20, 16, 20, **line)
+            canvas.create_rectangle(p(8), p(13), p(20), p(25), outline=foreground, width=line_width)
+            canvas.create_rectangle(p(10), p(11), p(18), p(13), outline=foreground, width=line_width)
+            canvas.create_line(p(11), p(17), p(17), p(17), **line)
+            canvas.create_line(p(11), p(20), p(16), p(20), **line)
         elif tool_id == "folder_rename":
-            canvas.create_polygon(9, 13, 16, 13, 21, 18, 14, 25, 7, 18, outline=foreground, fill=background, width=1.35)
-            canvas.create_oval(11, 16, 13, 18, outline=foreground, width=1.35)
+            canvas.create_polygon(p(9), p(13), p(16), p(13), p(21), p(18), p(14), p(25), p(7), p(18), outline=foreground, fill=background, width=line_width)
+            canvas.create_oval(p(11), p(16), p(13), p(18), outline=foreground, width=line_width)
         else:
-            canvas.create_oval(10, 14, 18, 22, outline=foreground, width=1.35)
+            canvas.create_oval(p(10), p(14), p(18), p(22), outline=foreground, width=line_width)
 
     def _set_tool_texts(self) -> None:
         if self.current_tool == "social_security":
@@ -1646,71 +2241,54 @@ class HRToolkitApp:
                 self.change_tabs.tab(1, text="花名册更新")
                 target_index = 1 if self.change_mode == "roster" else 0
             if not self.change_tabs.winfo_ismapped():
-                self.change_tabs.pack(fill="x", pady=(0, 16), before=self.form)
+                self.change_tabs.pack(fill="x", pady=self._pad(0, 16), before=self.form)
             if self.change_tabs.index("current") != target_index:
                 self.change_tabs.select(target_index)
             return
         self.change_tabs.pack_forget()
 
     def _update_summary_controls(self) -> None:
-        if self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import"}:
-            self.summary_label_widget.grid(row=1, column=0, sticky="w", pady=5)
-            self.summary_entry_widget.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=5)
-            return
-        self.summary_label_widget.grid_remove()
-        self.summary_entry_widget.grid_remove()
+        self._summary_row_visible = self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import"}
+        if hasattr(self, "_apply_form_layout"):
+            self._apply_form_layout()
 
     def _update_change_picker_buttons(self) -> None:
+        def hide(*buttons) -> None:
+            for button in buttons:
+                self._hide_picker_button(button)
+
+        def show(*buttons) -> None:
+            for button in buttons:
+                self._show_picker_button(button)
+
         if self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import"}:
-            self.input_choose_button.pack_forget()
-            self.summary_choose_button.pack_forget()
+            hide(self.input_choose_button, self.summary_choose_button)
             if self.current_tool == "social_security":
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_social_security_folder)
                 self.change_file_button.configure(text="文件/压缩包", command=self._choose_social_security_files_or_zip)
-                self.change_summary_folder_button.pack_forget()
+                hide(self.change_summary_folder_button)
                 self.change_summary_file_button.configure(text="文件", command=self._choose_social_security_roster_file)
-                if not self.change_file_button.winfo_ismapped():
-                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_folder_zip_button.winfo_ismapped():
-                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_summary_file_button.winfo_ismapped():
-                    self.change_summary_file_button.pack(side=RIGHT, padx=(4, 0))
+                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
                 return
             if self.current_tool == "data_statistics":
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_data_statistics_folder)
                 self.change_file_button.configure(text="文件/压缩包", command=self._choose_data_statistics_files_or_zip)
-                self.change_summary_folder_button.pack_forget()
+                hide(self.change_summary_folder_button)
                 self.change_summary_file_button.configure(text="文件", command=self._choose_data_statistics_staff_file)
-                if not self.change_file_button.winfo_ismapped():
-                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_folder_zip_button.winfo_ismapped():
-                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_summary_file_button.winfo_ismapped():
-                    self.change_summary_file_button.pack(side=RIGHT, padx=(4, 0))
+                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
                 return
             if self.current_tool == "insurance_ledger":
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_insurance_folder)
                 self.change_file_button.configure(text="文件/压缩包", command=self._choose_insurance_files_or_zip)
-                self.change_summary_folder_button.pack_forget()
+                hide(self.change_summary_folder_button)
                 self.change_summary_file_button.configure(text="文件", command=self._choose_insurance_roster_file)
-                if not self.change_file_button.winfo_ismapped():
-                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_folder_zip_button.winfo_ismapped():
-                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_summary_file_button.winfo_ismapped():
-                    self.change_summary_file_button.pack(side=RIGHT, padx=(4, 0))
+                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
                 return
             if self.current_tool == "salary_merge":
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_salary_folder)
                 self.change_file_button.configure(text="文件/压缩包", command=self._choose_salary_files_or_zip)
-                self.change_summary_folder_button.pack_forget()
-                self.change_summary_file_button.pack_forget()
-                if not self.change_file_button.winfo_ismapped():
-                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_folder_zip_button.winfo_ismapped():
-                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.summary_choose_button.winfo_ismapped():
-                    self.summary_choose_button.pack(side=RIGHT, padx=(4, 0))
+                hide(self.change_summary_folder_button, self.change_summary_file_button)
+                show(self.change_file_button, self.change_folder_zip_button, self.summary_choose_button)
                 return
             if self.current_tool == "archive_import":
                 if self.archive_mode == "export":
@@ -1722,81 +2300,65 @@ class HRToolkitApp:
                     self.change_folder_zip_button.configure(text="文件夹", command=self._choose_archive_folder)
                     self.change_file_button.configure(text="文件/压缩包", command=self._choose_archive_files_or_zip)
                     self.change_summary_file_button.configure(text="文件", command=self._choose_archive_summary_file)
-                    self.change_summary_folder_button.pack_forget()
-                if not self.change_file_button.winfo_ismapped():
-                    self.change_file_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_folder_zip_button.winfo_ismapped():
-                    self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
-                if self.archive_mode == "export" and not self.change_summary_folder_button.winfo_ismapped():
-                    self.change_summary_folder_button.pack(side=RIGHT, padx=(4, 0))
-                if not self.change_summary_file_button.winfo_ismapped():
-                    self.change_summary_file_button.pack(side=RIGHT, padx=(4, 0))
+                    hide(self.change_summary_folder_button)
+                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
+                if self.archive_mode == "export":
+                    show(self.change_summary_folder_button)
                 return
             if self.change_mode == "roster":
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_roster_summary_folder)
                 self.change_file_button.configure(text="文件/压缩包", command=self._choose_roster_summary_files)
                 self.change_summary_file_button.configure(text="文件", command=self._choose_roster_analysis_file)
-                self.change_summary_folder_button.pack_forget()
+                hide(self.change_summary_folder_button)
             else:
                 self.change_folder_zip_button.configure(text="文件夹", command=self._choose_change_folder)
                 self.change_file_button.configure(text="文件/压缩包", command=self._choose_change_files_or_zip)
                 self.change_summary_folder_button.configure(text="文件夹", command=self._choose_change_summary_folder)
                 self.change_summary_file_button.configure(text="文件", command=self._choose_change_summary_file)
-            if not self.change_file_button.winfo_ismapped():
-                self.change_file_button.pack(side=RIGHT, padx=(4, 0))
-            if not self.change_folder_zip_button.winfo_ismapped():
-                self.change_folder_zip_button.pack(side=RIGHT, padx=(4, 0))
-            if self.change_mode != "roster" and not self.change_summary_folder_button.winfo_ismapped():
-                self.change_summary_folder_button.pack(side=RIGHT, padx=(4, 0))
-            if not self.change_summary_file_button.winfo_ismapped():
-                self.change_summary_file_button.pack(side=RIGHT, padx=(4, 0))
+                show(self.change_summary_folder_button)
+            show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
             return
 
-        for button in (
+        hide(
             self.change_folder_zip_button,
             self.change_file_button,
             self.change_summary_folder_button,
             self.change_summary_file_button,
-        ):
-            button.pack_forget()
-        if not self.input_choose_button.winfo_ismapped():
-            self.input_choose_button.pack(side=RIGHT, padx=(4, 0))
-        if not self.summary_choose_button.winfo_ismapped():
-            self.summary_choose_button.pack(side=RIGHT, padx=(4, 0))
+        )
+        show(self.input_choose_button, self.summary_choose_button)
 
     def _update_output_controls(self) -> None:
-        if self.current_tool == "folder_rename":
-            self.output_label_widget.grid_remove()
-            self.output_entry_widget.grid_remove()
-            return
-        self.output_label_widget.grid(row=2, column=0, sticky="w", pady=5)
-        self.output_entry_widget.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=5)
+        self._output_row_visible = self.current_tool != "folder_rename"
+        if hasattr(self, "_apply_form_layout"):
+            self._apply_form_layout()
 
     def _update_rename_controls(self) -> None:
-        if self.current_tool != "folder_rename":
-            self.rename_options_frame.grid_remove()
-            return
-        self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        self._update_rename_mode_controls()
+        self._rename_row_visible = self.current_tool == "folder_rename"
+        if hasattr(self, "_apply_form_layout"):
+            self._apply_form_layout()
+        if self._rename_row_visible:
+            self._update_rename_mode_controls()
 
     def _on_rename_mode_changed(self, _event=None) -> None:
         self._update_rename_mode_controls()
+        if hasattr(self, "_sync_right_canvas_window"):
+            self.root.after_idle(self._sync_right_canvas_window)
 
     def _update_rename_mode_controls(self) -> None:
         mode = RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
         if mode == MODE_APPEND:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要追加的文字")
-            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=5)
-            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
+            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=self._px(5))
+            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
             self.rename_text_widget.config(state="normal")
             self.rename_replacement_label_widget.grid_remove()
             self.rename_replacement_widget.grid_remove()
         elif mode == MODE_REMOVE:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要删除的结尾文字")
-            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=5)
-            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
+            self.rename_text_label_widget.grid(row=2, column=0, sticky="w", pady=self._px(5))
+            self.rename_text_widget.grid(row=2, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
             self.rename_text_widget.config(state="normal")
             self.rename_replacement_label_widget.grid_remove()
             self.rename_replacement_widget.grid_remove()
@@ -1805,8 +2367,8 @@ class HRToolkitApp:
             self.rename_replacement_label.set("新名称")
             self.rename_text_label_widget.grid_remove()
             self.rename_text_widget.grid_remove()
-            self.rename_replacement_label_widget.grid(row=2, column=0, sticky="w", pady=5)
-            self.rename_replacement_widget.grid(row=2, column=1, sticky="ew", padx=12, pady=5)
+            self.rename_replacement_label_widget.grid(row=2, column=0, sticky="w", pady=self._px(5))
+            self.rename_replacement_widget.grid(row=2, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
             self.rename_replacement_widget.config(state="normal")
 
     def _initial_log_text(self) -> str:
@@ -2926,13 +3488,15 @@ def _enable_high_dpi_rendering() -> None:
     except Exception:
         return
 
+    # Tk widgets are scaled once at startup; System-aware avoids runtime DPI
+    # changes that can leave fixed Canvas geometry out of sync.
     try:
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-2)):
             return
     except Exception:
         pass
     try:
-        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:
             return
     except Exception:
         pass

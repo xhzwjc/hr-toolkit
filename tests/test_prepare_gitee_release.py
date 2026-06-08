@@ -36,67 +36,54 @@ class PrepareGiteeReleaseTest(unittest.TestCase):
                 for version in ("9.9.6", "9.9.7", "9.9.8"):
                     (root_dir / "releases" / f"HRToolkit-{version}-win.zip").write_text(version, encoding="utf-8")
                     (root_dir / "tools" / f"HRToolkitUpdater-{version}-win.exe").write_text(version, encoding="utf-8")
-            manifest_path = prepare_gitee_release.REPO_ROOT / "release" / "latest.json"
-            original_manifest = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else None
+            exit_code = prepare_gitee_release.main([
+                "--platform",
+                "windows",
+                "--version",
+                "9.9.9",
+                "--notes",
+                "测试发布",
+                "--app-dir",
+                str(app_dir),
+                "--updater",
+                str(updater),
+                "--output-dir",
+                str(output_dir),
+                "--bundle-dir",
+                str(bundle_dir),
+                "--publish-dir",
+                str(publish_dir),
+            ])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual((app_dir / "update_url.txt").read_text(encoding="utf-8").strip(), prepare_gitee_release.SCRIPT_HUB_MANIFEST_URL)
+            self.assertTrue((app_dir / "HRToolkitUpdater.exe").exists())
 
-            try:
-                exit_code = prepare_gitee_release.main([
-                    "--platform",
-                    "windows",
-                    "--version",
-                    "9.9.9",
-                    "--notes",
-                    "测试发布",
-                    "--app-dir",
-                    str(app_dir),
-                    "--updater",
-                    str(updater),
-                    "--output-dir",
-                    str(output_dir),
-                    "--bundle-dir",
-                    str(bundle_dir),
-                    "--publish-dir",
-                    str(publish_dir),
-                ])
-                self.assertEqual(exit_code, 0)
-                self.assertEqual((app_dir / "update_url.txt").read_text(encoding="utf-8").strip(), prepare_gitee_release.SCRIPT_HUB_MANIFEST_URL)
-                self.assertTrue((app_dir / "HRToolkitUpdater.exe").exists())
+            zip_path = output_dir / "HRToolkit-9.9.9-win.zip"
+            self.assertTrue(zip_path.exists())
+            with zipfile.ZipFile(zip_path) as archive:
+                self.assertIn("HRToolkit.exe", archive.namelist())
+                self.assertIn("HRToolkitUpdater.exe", archive.namelist())
+                self.assertIn("update_url.txt", archive.namelist())
 
-                zip_path = output_dir / "HRToolkit-9.9.9-win.zip"
-                self.assertTrue(zip_path.exists())
-                with zipfile.ZipFile(zip_path) as archive:
-                    self.assertIn("HRToolkit.exe", archive.namelist())
-                    self.assertIn("HRToolkitUpdater.exe", archive.namelist())
-                    self.assertIn("update_url.txt", archive.namelist())
-
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                self.assertEqual(manifest["version"], "9.9.9")
-                self.assertEqual(manifest["notes"], ["测试发布"])
-                self.assertEqual(
-                    manifest["platforms"]["windows"]["file_url"],
-                    "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-9.9.9-win.zip",
-                )
-                self.assertTrue((bundle_dir / "latest.json").exists())
-                self.assertTrue((bundle_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
-                self.assertTrue((bundle_dir / "releases" / "HRToolkit-9.9.8-win.zip").exists())
-                self.assertFalse((bundle_dir / "releases" / "HRToolkit-9.9.7-win.zip").exists())
-                self.assertTrue((bundle_dir / "tools" / "HRToolkitUpdater-9.9.9-win.exe").exists())
-                self.assertTrue((bundle_dir / "tools" / "HRToolkitUpdater-9.9.8-win.exe").exists())
-                self.assertFalse((bundle_dir / "tools" / "HRToolkitUpdater-9.9.7-win.exe").exists())
-                self.assertTrue((publish_dir / "latest.json").exists())
-                self.assertTrue((publish_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
-                self.assertTrue((publish_dir / "releases" / "HRToolkit-9.9.8-win.zip").exists())
-                self.assertFalse((publish_dir / "releases" / "HRToolkit-9.9.7-win.zip").exists())
-                self.assertTrue((publish_dir / "tools" / "HRToolkitUpdater-9.9.9-win.exe").exists())
-                self.assertTrue((publish_dir / "tools" / "HRToolkitUpdater-9.9.8-win.exe").exists())
-                self.assertFalse((publish_dir / "tools" / "HRToolkitUpdater-9.9.7-win.exe").exists())
-                self.assertTrue((output_dir / "HRToolkit-9.9.8-win.zip").exists())
-                self.assertFalse((output_dir / "HRToolkit-9.9.7-win.zip").exists())
-            finally:
-                if original_manifest is None:
-                    manifest_path.unlink(missing_ok=True)
-                else:
-                    manifest_path.write_text(original_manifest, encoding="utf-8")
+            manifest = json.loads((bundle_dir / "latest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["version"], "9.9.9")
+            self.assertEqual(manifest["notes"], ["测试发布"])
+            self.assertEqual(
+                manifest["platforms"]["windows"]["file_url"],
+                "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-9.9.9-win.zip",
+            )
+            self.assertTrue((bundle_dir / "latest.json").exists())
+            self.assertTrue((bundle_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
+            self.assertFalse((bundle_dir / "releases" / "HRToolkit-9.9.8-win.zip").exists())
+            self.assertFalse((bundle_dir / "releases" / "HRToolkit-9.9.7-win.zip").exists())
+            self.assertFalse((bundle_dir / "tools").exists())
+            self.assertTrue((publish_dir / "latest.json").exists())
+            self.assertTrue((publish_dir / "releases" / "HRToolkit-9.9.9-win.zip").exists())
+            self.assertFalse((publish_dir / "releases" / "HRToolkit-9.9.8-win.zip").exists())
+            self.assertFalse((publish_dir / "releases" / "HRToolkit-9.9.7-win.zip").exists())
+            self.assertFalse((publish_dir / "tools").exists())
+            self.assertFalse((output_dir / "HRToolkit-9.9.8-win.zip").exists())
+            self.assertFalse((output_dir / "HRToolkit-9.9.7-win.zip").exists())
 
 
 if __name__ == "__main__":
