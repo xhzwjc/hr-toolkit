@@ -18,7 +18,6 @@ from hr_toolkit.app_update import (
     download_update_package,
     launch_update_replacement,
     update_check_enabled,
-    update_manifest_url,
 )
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
@@ -881,11 +880,9 @@ class HRToolkitApp:
             return
         self.update_check_in_progress = True
         self.manual_update_check_active = manual
-        manifest_url = update_manifest_url()
         if hasattr(self, "check_update_button"):
             self.check_update_button.config(state="disabled")
         self._write_log("正在检查更新...")
-        self._write_log(f"更新配置：{manifest_url}")
         self._show_update_checking_window()
         worker = threading.Thread(target=self._update_check_worker, daemon=True)
         worker.start()
