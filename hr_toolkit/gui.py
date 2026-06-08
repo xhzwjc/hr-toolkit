@@ -489,6 +489,16 @@ class HRToolkitApp:
             return self._pad(16, 18, 16, 18)
         return self._pad(24, 22, 24, 22)
 
+    def _responsive_sidebar_width(self) -> int:
+        logical_width = self._logical_screen_width()
+        if self.ui_scale >= 1.75 and logical_width < 900:
+            return self._px(200)
+        if self.ui_scale >= 1.5 and logical_width < 900:
+            return self._px(240)
+        if logical_width < 1100:
+            return self._px(260)
+        return self._px(286)
+
     def _configure_style(self) -> None:
         if sys.platform == "darwin":
             family = "PingFang SC"
@@ -620,13 +630,14 @@ class HRToolkitApp:
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(root_frame, width=self._px(286), style="Sidebar.TFrame")
+        left_frame = ttk.Frame(root_frame, width=self._responsive_sidebar_width(), style="Sidebar.TFrame")
         left_frame.pack(side=LEFT, fill=Y)
         left_frame.pack_propagate(False)
+        left_frame.grid_propagate(False)
         left_frame.grid_rowconfigure(0, weight=1)
         left_frame.grid_columnconfigure(0, weight=1)
 
-        left_canvas = Canvas(left_frame, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        left_canvas = Canvas(left_frame, width=1, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
         left_canvas.grid(row=0, column=0, sticky="nsew")
         left_vscroll = ttk.Scrollbar(left_frame, orient=VERTICAL, command=left_canvas.yview)
         left_vscroll.grid(row=0, column=1, sticky="ns")
