@@ -52,41 +52,41 @@ TOOL_NAV_ITEMS = (
     ("folder_rename", "08  文件夹改名"),
 )
 
-# A restrained, operations-console palette: warm canvas, ink sidebar,
-# and one calm accent color. It gives the tool a recognizable product
-# language without the over-styled “AI template” look.
-COLOR_BG = "#f6f2ea"
-COLOR_SIDEBAR = "#141b24"
-COLOR_SIDEBAR_ELEVATED = "#1d2733"
-COLOR_SURFACE = "#fffdf8"
-COLOR_SURFACE_ALT = "#fbf7ef"
-COLOR_BORDER = "#ded4c3"
-COLOR_TEXT = "#1f2932"
-COLOR_MUTED = "#6f7680"
-COLOR_PRIMARY = "#2f6f5e"
-COLOR_PRIMARY_ACTIVE = "#235445"
-COLOR_ACCENT = "#d2ae68"
-COLOR_NAV_SELECTED = "#243140"
-COLOR_NAV_HOVER = "#1c2632"
-COLOR_NAV_TEXT = "#c5ced8"
-COLOR_NAV_TEXT_SELECTED = "#fffaf0"
-COLOR_SUCCESS = "#16825d"
-COLOR_WARNING = "#a84632"
-COLOR_TUTORIAL_BG = "#fff8e7"
-COLOR_TUTORIAL_BORDER = "#ead7ab"
-COLOR_LOG_BG = "#101820"
-COLOR_LOG_TEXT = "#dfe7ee"
-COLOR_LOG_MUTED = "#8f9baa"
+# Clean HR operations workspace palette. It mirrors the reference mockup:
+# white sidebar, soft gray workspace, green action color, and low-contrast
+# cards built for repeated office use.
+COLOR_BG = "#f7f8f6"
+COLOR_SIDEBAR = "#ffffff"
+COLOR_SIDEBAR_ELEVATED = "#f4faf6"
+COLOR_SURFACE = "#ffffff"
+COLOR_SURFACE_ALT = "#f6faf8"
+COLOR_BORDER = "#dfe4e3"
+COLOR_TEXT = "#17202c"
+COLOR_MUTED = "#6b7280"
+COLOR_PRIMARY = "#007f5f"
+COLOR_PRIMARY_ACTIVE = "#006b50"
+COLOR_ACCENT = "#0f8f68"
+COLOR_NAV_SELECTED = "#edf7f1"
+COLOR_NAV_HOVER = "#f5f8f6"
+COLOR_NAV_TEXT = "#4b5563"
+COLOR_NAV_TEXT_SELECTED = "#17202c"
+COLOR_SUCCESS = "#18a76f"
+COLOR_WARNING = "#d3483f"
+COLOR_TUTORIAL_BG = "#ffffff"
+COLOR_TUTORIAL_BORDER = "#dfe4e3"
+COLOR_LOG_BG = "#ffffff"
+COLOR_LOG_TEXT = "#24303d"
+COLOR_LOG_MUTED = "#7b8491"
 APP_DISPLAY_NAME = "HR Workbench"
 APP_SUBTITLE = "Excel 批处理 · 台账生成"
-UPDATE_DIALOG_BG = "#fffdf8"
-UPDATE_DIALOG_TEXT = "#1f2932"
-UPDATE_DIALOG_MUTED = "#6f7680"
-UPDATE_DIALOG_TRACK = "#eadfce"
+UPDATE_DIALOG_BG = COLOR_SURFACE
+UPDATE_DIALOG_TEXT = COLOR_TEXT
+UPDATE_DIALOG_MUTED = COLOR_MUTED
+UPDATE_DIALOG_TRACK = "#e8edf0"
 UPDATE_DIALOG_PRIMARY = COLOR_PRIMARY
 UPDATE_DIALOG_PRIMARY_ACTIVE = COLOR_PRIMARY_ACTIVE
-UPDATE_DIALOG_SECONDARY = "#eee5d7"
-UPDATE_DIALOG_SECONDARY_ACTIVE = "#e4d7c4"
+UPDATE_DIALOG_SECONDARY = "#f1f5f4"
+UPDATE_DIALOG_SECONDARY_ACTIVE = "#e7eeec"
 
 
 class CodexButton(Canvas):
@@ -187,9 +187,9 @@ class CodexButton(Canvas):
 
     def _palette(self) -> tuple[str, str, str, str]:
         if self._state == "disabled":
-            return "#eee7dc", "#eee7dc", "#9b9286", "#ddd2c1"
+            return "#eef1f0", "#eef1f0", "#9aa3ad", COLOR_BORDER
         if self._variant == "primary":
-            return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#fffdf8", COLOR_PRIMARY
+            return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#ffffff", COLOR_PRIMARY
         return COLOR_SURFACE, COLOR_SURFACE_ALT, COLOR_TEXT, COLOR_BORDER
 
     def _on_enter(self, _event=None) -> None:
@@ -211,7 +211,7 @@ class CodexButton(Canvas):
         height = max(self.winfo_height(), self._height)
         normal, active, foreground, border = self._palette()
         fill = active if self._hover and self._state != "disabled" else normal
-        self._draw_round_rect(1, 1, width - 1, height - 1, 9, fill=fill, outline=border, width=1)
+        self._draw_round_rect(1, 1, width - 1, height - 1, 8, fill=fill, outline=border, width=1)
         text = self._display_text()
         font = (self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family"), 10)
         if self._icon:
@@ -259,12 +259,13 @@ class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title(f"{APP_DISPLAY_NAME} v{__version__}")
-        self.root.geometry("1080x720")
-        self.root.minsize(980, 660)
+        self.root.geometry("1180x760")
+        self.root.minsize(1020, 680)
         self.root.configure(bg=COLOR_BG)
 
         self.current_tool = "social_security"
         self.nav_buttons: dict[str, ttk.Button] = {}
+        self.nav_icons: dict[str, Canvas] = {}
         self.tool_title = StringVar()
         self.tool_description = StringVar()
         self.input_label = StringVar()
@@ -328,7 +329,7 @@ class HRToolkitApp:
         self.base_font = (family, 10)
         self.small_font = (family, 9)
         self.tiny_font = (family, 8)
-        self.title_font = (family, 20, "bold")
+        self.title_font = (family, 22, "bold")
         self.section_font = (family, 10, "bold")
         self.nav_font = (family, 10)
         self.nav_selected_font = (family, 10, "bold")
@@ -362,11 +363,11 @@ class HRToolkitApp:
         style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
         style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
         style.configure("Eyebrow.TLabel", background=COLOR_BG, foreground=COLOR_PRIMARY, font=(self.base_font[0], 9, "bold"))
-        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], 9, "bold"))
-        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground="#fffaf0", font=(self.base_font[0], 13, "bold"))
-        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground="#96a1ad", font=self.small_font)
-        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#7f8c99", font=(self.base_font[0], 8, "bold"))
-        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#7f8c99", font=self.tiny_font)
+        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], 10))
+        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 14, "bold"))
+        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
+        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#7c8591", font=(self.base_font[0], 8, "bold"))
+        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#7c8591", font=self.tiny_font)
         style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=(8, 6))
         style.configure(
@@ -389,7 +390,7 @@ class HRToolkitApp:
             bordercolor=COLOR_BORDER,
             lightcolor=COLOR_BORDER,
             darkcolor=COLOR_BORDER,
-            padding=(10, 7),
+            padding=(12, 8),
             relief="solid",
         )
         style.map(
@@ -404,75 +405,104 @@ class HRToolkitApp:
             foreground=COLOR_TEXT,
             bordercolor=COLOR_BORDER,
             arrowcolor=COLOR_MUTED,
-            padding=(10, 6),
+            padding=(12, 7),
         )
-        style.configure("Nav.TButton", anchor="w", padding=(14, 9), background=COLOR_SIDEBAR, foreground=COLOR_NAV_TEXT, borderwidth=0, font=self.nav_font, relief="flat")
-        style.configure("NavSelected.TButton", anchor="w", padding=(14, 9), background=COLOR_NAV_SELECTED, foreground=COLOR_NAV_TEXT_SELECTED, borderwidth=0, font=self.nav_selected_font, relief="flat")
+        style.configure("Nav.TButton", anchor="w", padding=(8, 10), background=COLOR_SIDEBAR, foreground=COLOR_NAV_TEXT, borderwidth=0, font=self.nav_font, relief="flat")
+        style.configure("NavSelected.TButton", anchor="w", padding=(8, 10), background=COLOR_NAV_SELECTED, foreground=COLOR_NAV_TEXT_SELECTED, borderwidth=0, font=self.nav_selected_font, relief="flat")
+        nav_button_layout = [
+            (
+                "Button.border",
+                {
+                    "sticky": "nswe",
+                    "border": "0",
+                    "children": [
+                        (
+                            "Button.padding",
+                            {
+                                "sticky": "nswe",
+                                "children": [("Button.label", {"sticky": "nswe"})],
+                            },
+                        )
+                    ],
+                },
+            )
+        ]
+        style.layout("Nav.TButton", nav_button_layout)
+        style.layout("NavSelected.TButton", nav_button_layout)
         style.map("Nav.TButton", background=[("active", COLOR_NAV_HOVER)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
         style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
-        style.configure("Primary.TButton", padding=(16, 8), background=COLOR_PRIMARY, foreground="#fffdf8", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
+        style.configure("Primary.TButton", padding=(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
         style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
         style.configure("Secondary.TButton", padding=(12, 7), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=1)
-        style.map("Secondary.TButton", background=[("active", COLOR_SURFACE_ALT), ("disabled", "#eee7dc")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#c9bda9")])
+        style.map("Secondary.TButton", background=[("active", COLOR_SURFACE_ALT), ("disabled", "#eef1f0")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#cbd5d3")])
         style.configure("Icon.TButton", padding=(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=1, relief="solid", font=(self.base_font[0], 10, "bold"))
-        style.map("Icon.TButton", background=[("active", COLOR_SURFACE_ALT)], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#c9bda9")])
+        style.map("Icon.TButton", background=[("active", COLOR_SURFACE_ALT)], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#cbd5d3")])
         style.configure("Change.TNotebook", background=COLOR_BG, borderwidth=0)
         style.configure("Change.TNotebook.Tab", padding=(18, 9), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
-        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_PRIMARY)], foreground=[("selected", "#fffdf8")])
+        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_NAV_SELECTED)], foreground=[("selected", COLOR_PRIMARY)])
 
     def _build_layout(self) -> None:
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(root_frame, width=252, padding=(18, 22, 16, 16), style="Sidebar.TFrame")
+        left_frame = ttk.Frame(root_frame, width=286, padding=(24, 28, 26, 18), style="Sidebar.TFrame")
         left_frame.pack(side=LEFT, fill=Y)
         left_frame.pack_propagate(False)
 
         brand_row = ttk.Frame(left_frame, style="Sidebar.TFrame")
         brand_row.pack(fill="x")
-        brand_mark = Canvas(brand_row, width=42, height=42, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        brand_mark = Canvas(brand_row, width=48, height=48, bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
         brand_mark.pack(side=LEFT)
-        self._draw_round_rect(brand_mark, 2, 2, 40, 40, 10, fill=COLOR_ACCENT, outline="")
-        brand_mark.create_text(21, 21, text="HR", fill=COLOR_SIDEBAR, font=(self.base_font[0], 11, "bold"))
+        self._draw_round_rect(brand_mark, 2, 2, 46, 46, 11, fill="#e8f6ee", outline="")
+        brand_mark.create_text(24, 24, text="HR", fill=COLOR_PRIMARY, font=(self.base_font[0], 12, "bold"))
         brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
-        brand_text.pack(side=LEFT, fill="x", expand=True, padx=(10, 0))
+        brand_text.pack(side=LEFT, fill="x", expand=True, padx=(14, 0))
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
         ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w", pady=(3, 0))
 
-        ttk.Label(left_frame, text="WORKFLOWS", style="SidebarSection.TLabel").pack(anchor="w", pady=(28, 8))
+        ttk.Label(left_frame, text="WORKFLOWS", style="SidebarSection.TLabel").pack(anchor="w", pady=(36, 10))
         self.nav_indicators = {}
 
         nav_frame = ttk.Frame(left_frame, style="Sidebar.TFrame")
         nav_frame.pack(fill="x")
         for tool_id, label in TOOL_NAV_ITEMS:
+            selected = tool_id == self.current_tool
             row = ttk.Frame(nav_frame, style="NavRow.TFrame")
-            row.pack(fill="x", pady=2)
-            indicator_width = 4 if tool_id == self.current_tool else 0
+            row.pack(fill="x", pady=3)
+            indicator_width = 4
             indicator = ttk.Frame(
                 row,
                 width=indicator_width,
-                style="NavIndicatorSelected.TFrame" if tool_id == self.current_tool else "NavIndicator.TFrame",
+                style="NavIndicatorSelected.TFrame" if selected else "NavIndicator.TFrame",
             )
             indicator.pack(side=LEFT, fill=Y)
             indicator.pack_propagate(False)
+            icon_bg = COLOR_NAV_SELECTED if selected else COLOR_SIDEBAR
+            icon = Canvas(row, width=28, height=40, bg=icon_bg, highlightthickness=0, bd=0, cursor="hand2")
+            icon.pack(side=LEFT, fill=Y)
+            icon.bind("<Button-1>", lambda _event, selected_tool=tool_id: self._select_tool(selected_tool))
+            self._draw_nav_icon(icon, tool_id, selected)
             button = ttk.Button(
                 row,
                 text=label,
-                style="NavSelected.TButton" if tool_id == self.current_tool else "Nav.TButton",
+                style="NavSelected.TButton" if selected else "Nav.TButton",
+                takefocus=False,
                 command=lambda selected=tool_id: self._select_tool(selected),
             )
             button.pack(side=LEFT, fill="x", expand=True)
             self.nav_buttons[tool_id] = button
             self.nav_indicators[tool_id] = indicator
+            self.nav_icons[tool_id] = icon
 
         sidebar_footer = ttk.Frame(left_frame, style="Sidebar.TFrame")
         sidebar_footer.pack(side="bottom", fill="x")
+        ttk.Frame(sidebar_footer, height=1, style="Separator.TFrame").pack(fill="x", pady=(0, 12))
         ttk.Label(sidebar_footer, text="本地处理 · 不上传数据", style="SidebarMuted.TLabel").pack(anchor="w")
         ttk.Label(sidebar_footer, text=f"Version {__version__}", style="Version.TLabel").pack(anchor="w", pady=(5, 0))
 
         ttk.Frame(root_frame, width=1, style="Separator.TFrame").pack(side=LEFT, fill=Y)
 
-        right_frame = ttk.Frame(root_frame, padding=(34, 30, 34, 24), style="Content.TFrame")
+        right_frame = ttk.Frame(root_frame, padding=(42, 34, 58, 28), style="Content.TFrame")
         right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
 
         title_row = ttk.Frame(right_frame, style="Content.TFrame")
@@ -496,7 +526,7 @@ class HRToolkitApp:
             right_frame,
             textvariable=self.tool_description,
             style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(8, 22))
+        ).pack(anchor="w", pady=(10, 26))
 
         self.change_tabs = ttk.Notebook(right_frame, style="Change.TNotebook")
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="异动表汇总")
@@ -525,7 +555,7 @@ class HRToolkitApp:
         self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], 10, "bold"))
         self._set_tutorial_text()
 
-        form = ttk.Frame(right_frame, padding=(18, 16, 18, 16), style="Card.TFrame")
+        form = ttk.Frame(right_frame, padding=(24, 22, 24, 22), style="Card.TFrame")
         form.pack(fill="x")
         self.form = form
 
@@ -534,13 +564,13 @@ class HRToolkitApp:
                 label = ttk.Label(form, textvariable=label_text, style="App.TLabel")
             else:
                 label = ttk.Label(form, text=label_text, style="App.TLabel")
-            label.grid(row=row_index, column=0, sticky="w", pady=5)
+            label.grid(row=row_index, column=0, sticky="w", pady=7)
             input_frame = ttk.Frame(form, style="InputWrap.TFrame")
-            input_frame.grid(row=row_index, column=1, sticky="ew", padx=(12, 0), pady=5)
+            input_frame.grid(row=row_index, column=1, sticky="ew", padx=(18, 0), pady=7)
             entry = ttk.Entry(input_frame, textvariable=value_var, style="App.TEntry")
             entry.pack(side=LEFT, fill=BOTH, expand=True)
             button = CodexButton(input_frame, text="选择", command=command, width=64, min_width=64)
-            button.pack(side=RIGHT, padx=(6, 0))
+            button.pack(side=RIGHT, padx=(10, 0))
             return label, input_frame, button
 
         self.input_label_widget, self.input_entry_widget, self.input_choose_button = make_input_row(
@@ -635,18 +665,18 @@ class HRToolkitApp:
         self.tutorial_toggle_button.configure(command=toggle_tutorial)
 
         actions = ttk.Frame(right_frame, style="Content.TFrame")
-        actions.pack(fill="x", pady=(14, 16))
-        run_button_box = ttk.Frame(actions, width=126, height=38, style="Content.TFrame")
+        actions.pack(fill="x", pady=(24, 22))
+        run_button_box = ttk.Frame(actions, width=132, height=42, style="Content.TFrame")
         run_button_box.pack(side=LEFT)
         run_button_box.pack_propagate(False)
-        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="→", min_width=126)
+        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="→", min_width=132, height=42)
         self.run_button.pack(fill=BOTH, expand=True)
-        self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, icon="↗", width=132)
-        self.open_button.pack(side=LEFT, padx=(8, 0))
+        self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, icon="↗", width=148, height=42)
+        self.open_button.pack(side=LEFT, padx=(12, 0))
 
         ttk.Label(right_frame, text="运行日志", style="Section.TLabel").pack(anchor="w")
         log_frame = ttk.Frame(right_frame, padding=(1, 1, 1, 1), style="Card.TFrame")
-        log_frame.pack(fill=BOTH, expand=True, pady=(8, 0))
+        log_frame.pack(fill=BOTH, expand=True, pady=(10, 0))
         scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
         self.log_text = Text(
             log_frame,
@@ -661,10 +691,10 @@ class HRToolkitApp:
             insertbackground=COLOR_LOG_TEXT,
             padx=16,
             pady=14,
-            font=self.mono_font,
+            font=self.base_font,
         )
-        self.log_text.tag_configure("success", foreground="#49c08d")
-        self.log_text.tag_configure("warning", foreground="#ffb86b")
+        self.log_text.tag_configure("success", foreground=COLOR_SUCCESS)
+        self.log_text.tag_configure("warning", foreground=COLOR_WARNING)
         self.log_text.tag_configure("muted", foreground=COLOR_LOG_MUTED)
         scrollbar.config(command=self.log_text.yview)
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
@@ -1192,7 +1222,56 @@ class HRToolkitApp:
             indicator = self.nav_indicators.get(tool_id)
             if indicator is not None:
                 indicator_style = "NavIndicatorSelected.TFrame" if selected else "NavIndicator.TFrame"
-                indicator.configure(style=indicator_style, width=4 if selected else 0)
+                indicator.configure(style=indicator_style, width=4)
+            icon = self.nav_icons.get(tool_id)
+            if icon is not None:
+                self._draw_nav_icon(icon, tool_id, selected)
+
+    def _draw_nav_icon(self, canvas: Canvas, tool_id: str, selected: bool) -> None:
+        canvas.delete("all")
+        background = COLOR_NAV_SELECTED if selected else COLOR_SIDEBAR
+        foreground = COLOR_PRIMARY if selected else COLOR_NAV_TEXT
+        canvas.configure(bg=background)
+        line = {"fill": foreground, "width": 1.35}
+
+        if tool_id == "social_security":
+            canvas.create_rectangle(9, 12, 19, 24, outline=foreground, width=1.35)
+            canvas.create_line(12, 15, 17, 15, **line)
+            canvas.create_line(12, 18, 17, 18, **line)
+            canvas.create_line(12, 21, 16, 21, **line)
+        elif tool_id == "data_statistics":
+            canvas.create_line(8, 25, 21, 25, **line)
+            canvas.create_rectangle(9, 19, 11, 25, outline=foreground, width=1.35)
+            canvas.create_rectangle(14, 15, 16, 25, outline=foreground, width=1.35)
+            canvas.create_rectangle(19, 11, 21, 25, outline=foreground, width=1.35)
+        elif tool_id == "insurance_ledger":
+            canvas.create_polygon(14, 10, 21, 13, 20, 21, 14, 26, 8, 21, 7, 13, outline=foreground, fill=background, width=1.35)
+            canvas.create_line(11, 18, 13, 20, 17, 15, **line)
+        elif tool_id == "salary_split":
+            canvas.create_oval(8, 12, 12, 16, outline=foreground, width=1.35)
+            canvas.create_oval(8, 23, 12, 27, outline=foreground, width=1.35)
+            canvas.create_line(12, 15, 21, 24, **line)
+            canvas.create_line(12, 24, 21, 15, **line)
+        elif tool_id == "salary_merge":
+            canvas.create_line(8, 16, 20, 16, **line)
+            canvas.create_polygon(20, 16, 16, 13, 16, 19, fill=foreground, outline=foreground)
+            canvas.create_line(20, 22, 8, 22, **line)
+            canvas.create_polygon(8, 22, 12, 19, 12, 25, fill=foreground, outline=foreground)
+        elif tool_id == "personnel_change_merge":
+            canvas.create_arc(8, 11, 21, 24, start=35, extent=245, style="arc", outline=foreground, width=1.35)
+            canvas.create_polygon(18, 11, 22, 12, 20, 16, fill=foreground, outline=foreground)
+            canvas.create_arc(7, 13, 20, 26, start=215, extent=245, style="arc", outline=foreground, width=1.35)
+            canvas.create_polygon(10, 26, 6, 25, 8, 21, fill=foreground, outline=foreground)
+        elif tool_id == "archive_import":
+            canvas.create_rectangle(8, 13, 20, 25, outline=foreground, width=1.35)
+            canvas.create_rectangle(10, 11, 18, 13, outline=foreground, width=1.35)
+            canvas.create_line(11, 17, 17, 17, **line)
+            canvas.create_line(11, 20, 16, 20, **line)
+        elif tool_id == "folder_rename":
+            canvas.create_polygon(9, 13, 16, 13, 21, 18, 14, 25, 7, 18, outline=foreground, fill=background, width=1.35)
+            canvas.create_oval(11, 16, 13, 18, outline=foreground, width=1.35)
+        else:
+            canvas.create_oval(10, 14, 18, 22, outline=foreground, width=1.35)
 
     def _set_tool_texts(self) -> None:
         if self.current_tool == "social_security":
