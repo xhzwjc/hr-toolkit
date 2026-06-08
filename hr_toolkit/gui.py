@@ -62,7 +62,7 @@ COLOR_SURFACE = "#ffffff"
 COLOR_SURFACE_ALT = "#f6faf8"
 COLOR_BORDER = "#dfe4e3"
 COLOR_TEXT = "#17202c"
-COLOR_MUTED = "#6b7280"
+COLOR_MUTED = "#4f5b68"
 COLOR_PRIMARY = "#007f5f"
 COLOR_PRIMARY_ACTIVE = "#006b50"
 COLOR_ACCENT = "#0f8f68"
@@ -76,7 +76,7 @@ COLOR_TUTORIAL_BG = "#ffffff"
 COLOR_TUTORIAL_BORDER = "#dfe4e3"
 COLOR_LOG_BG = "#ffffff"
 COLOR_LOG_TEXT = "#24303d"
-COLOR_LOG_MUTED = "#7b8491"
+COLOR_LOG_MUTED = "#52606d"
 APP_DISPLAY_NAME = "HR Workbench"
 APP_SUBTITLE = "Excel 批处理 · 台账生成"
 UPDATE_DIALOG_BG = COLOR_SURFACE
@@ -366,8 +366,8 @@ class HRToolkitApp:
         style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], 10))
         style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 14, "bold"))
         style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
-        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#7c8591", font=(self.base_font[0], 8, "bold"))
-        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#7c8591", font=self.tiny_font)
+        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=(self.base_font[0], 8, "bold"))
+        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=self.tiny_font)
         style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=(8, 6))
         style.configure(
@@ -2755,7 +2755,32 @@ def open_path(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def _enable_high_dpi_rendering() -> None:
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+    except Exception:
+        return
+
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _enable_high_dpi_rendering()
     root = Tk()
     HRToolkitApp(root)
     root.mainloop()

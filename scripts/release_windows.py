@@ -12,6 +12,7 @@ from prepare_gitee_release import main as prepare_gitee_release
 from versioning import REPO_ROOT, bump_project_version
 
 
+WINDOWS_DPI_MANIFEST = REPO_ROOT / "packaging" / "windows" / "HRToolkit.manifest"
 WINDOWS_BUILD_MODULES = {
     "PyInstaller": "pyinstaller",
     "openpyxl": "openpyxl",
@@ -43,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         "--onedir",
         "--windowed",
         "--clean",
+        "--manifest",
+        str(WINDOWS_DPI_MANIFEST),
         "--add-data",
         "README.md;.",
         "--add-data",
