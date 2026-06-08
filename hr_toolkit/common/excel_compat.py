@@ -73,8 +73,14 @@ def _convert_xls_to_xlsx(source: Path, output_path: Path) -> None:
 
 
 def _convert_with_windows_com(source: Path, output_path: Path) -> None:
-    import pythoncom  # type: ignore[import-not-found]
-    import win32com.client  # type: ignore[import-not-found]
+    try:
+        import pythoncom  # type: ignore[import-not-found]
+        import win32com.client  # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "缺少 Windows .xls 转换依赖 pywin32。请在 Windows 打包环境执行 "
+            "`python -m pip install -r requirements.txt` 后重新打包。"
+        ) from exc
 
     pythoncom.CoInitialize()
     app = None
