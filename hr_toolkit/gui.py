@@ -502,8 +502,131 @@ class HRToolkitApp:
 
         ttk.Frame(root_frame, width=1, style="Separator.TFrame").pack(side=LEFT, fill=Y)
 
-        right_frame = ttk.Frame(root_frame, padding=(42, 34, 58, 28), style="Content.TFrame")
-        right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
+        # Scrollable right panel: Canvas acts as the viewport; right_frame is
+        # the inner content frame that all existing children are placed into.
+        right_outer = ttk.Frame(root_frame, style="Content.TFrame")
+        right_outer.pack(side=RIGHT, fill=BOTH, expand=True)
+
+        right_vscroll = ttk.Scrollbar(right_outer, orient=VERTICAL)
+        right_vscroll.pack(side=RIGHT, fill=Y)
+
+        self._right_canvas = Canvas(
+            right_outer,
+            bg=COLOR_BG,
+            highlightthickness=0,
+            bd=0,
+            yscrollcommand=right_vscroll.set,
+        )
+        self._right_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        right_vscroll.config(command=self._right_canvas.yview)
+
+        right_frame = ttk.Frame(self._right_canvas, padding=(42, 34, 58, 28), style="Content.TFrame")
+        self._right_canvas_window = self._right_canvas.create_window(
+            (0, 0), window=right_frame, anchor="nw"
+        )
+
+        def _sync_right_canvas_window(_event=None):
+            canvas_width = self._right_canvas.winfo_width()
+            canvas_height = self._right_canvas.winfo_height()
+            content_height = right_frame.winfo_reqheight()
+            self._right_canvas.itemconfig(
+                self._right_canvas_window,
+                width=canvas_width,
+                height=max(content_height, canvas_height),
+            )
+            self._right_canvas.configure(scrollregion=self._right_canvas.bbox("all"))
+
+        self._sync_right_canvas_window = _sync_right_canvas_window
+        right_frame.bind("<Configure>", _sync_right_canvas_window)
+        self._right_canvas.bind("<Configure>", _sync_right_canvas_window)
+
+        SCROLL_TAG = "RightPanelScroll"
+
+        def _scroll_page(delta_units: int) -> None:
+            self._right_canvas.yview_scroll(delta_units, "units")
+
+        def _scroll_page_pixels(delta_y: int) -> None:
+            canvas_height = max(self._right_canvas.winfo_height(), 1)
+            top = self._right_canvas.yview()[0]
+            self._right_canvas.yview_moveto(top - (delta_y / canvas_height))
+
+        def _touchpad_deltas(event) -> tuple[int, int]:
+            encoded_delta = int(getattr(event, "delta", 0) or 0)
+            delta_x = encoded_delta >> 16
+            low_word = encoded_delta & 0xFFFF
+            delta_y = low_word if low_word < 0x8000 else low_word - 0x10000
+            return delta_x, delta_y
+
+        def _mousewheel_units(event) -> int:
+            if sys.platform.startswith("win"):
+                return int(-1 * (event.delta / 120))
+            if sys.platform == "darwin":
+                delta = int(getattr(event, "delta", 0) or 0)
+                if abs(delta) >= 120:
+                    return int(delta / -40)
+                return int(-1 * delta)
+            if getattr(event, "num", None) == 4:
+                return -1
+            if getattr(event, "num", None) == 5:
+                return 1
+            return 0
+
+        def _safe_bind_class(sequence: str, handler) -> None:
+            try:
+                self.root.bind_class(SCROLL_TAG, sequence, handler)
+            except Exception:
+                pass
+
+        def _safe_bind_widget(widget, sequence: str, handler) -> None:
+            try:
+                widget.bind(sequence, handler)
+            except Exception:
+                pass
+
+        def _on_scroll_tag_wheel(event):
+            delta_units = _mousewheel_units(event)
+            if delta_units:
+                _scroll_page(delta_units)
+            return "break"
+
+        def _on_scroll_tag_touchpad(event):
+            _delta_x, delta_y = _touchpad_deltas(event)
+            if delta_y:
+                _scroll_page_pixels(delta_y)
+            return "break"
+
+        def _on_scroll_tag_linux_up(event):
+            _scroll_page(-1)
+            return "break"
+
+        def _on_scroll_tag_linux_down(event):
+            _scroll_page(1)
+            return "break"
+
+        # Register handlers on the named tag (not on any specific widget)
+        _safe_bind_class("<MouseWheel>", _on_scroll_tag_wheel)
+        _safe_bind_class("<TouchpadScroll>", _on_scroll_tag_touchpad)
+        _safe_bind_class("<Button-4>", _on_scroll_tag_linux_up)
+        _safe_bind_class("<Button-5>", _on_scroll_tag_linux_down)
+
+        def _apply_scroll_tag(widget) -> None:
+            if hasattr(self, "log_text") and widget is self.log_text:
+                return
+            try:
+                current = list(widget.bindtags())
+                if SCROLL_TAG not in current:
+                    widget.bindtags([SCROLL_TAG] + current)
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                _apply_scroll_tag(child)
+
+        # Also keep a direct canvas binding as fallback (when cursor is on
+        # the canvas background between widgets)
+        _safe_bind_widget(self._right_canvas, "<MouseWheel>", _on_scroll_tag_wheel)
+        _safe_bind_widget(self._right_canvas, "<TouchpadScroll>", _on_scroll_tag_touchpad)
+        _safe_bind_widget(self._right_canvas, "<Button-4>", _on_scroll_tag_linux_up)
+        _safe_bind_widget(self._right_canvas, "<Button-5>", _on_scroll_tag_linux_down)
 
         title_row = ttk.Frame(right_frame, style="Content.TFrame")
         title_row.pack(fill="x")
@@ -661,6 +784,7 @@ class HRToolkitApp:
             else:
                 self.tutorial_frame.pack_forget()
                 self.tutorial_toggle_button.configure(text="使用教程")
+            self.root.after_idle(self._sync_right_canvas_window)
 
         self.tutorial_toggle_button.configure(command=toggle_tutorial)
 
@@ -699,6 +823,46 @@ class HRToolkitApp:
         scrollbar.config(command=self.log_text.yview)
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
+
+        # Mousewheel on log_text:
+        #  • log has scrollable content in that direction → scroll the log
+        #  • log is at top/bottom (or too short) → scroll the outer canvas
+        # Note: widget-level bind() takes priority over bind_all(), so we
+        # must handle both cases explicitly here.
+        def _on_log_mousewheel(event):
+            top, bottom = self.log_text.yview()
+            delta_units = _mousewheel_units(event)
+
+            can_scroll_up   = (top > 0)
+            can_scroll_down = (bottom < 1.0)
+            if (delta_units < 0 and can_scroll_up) or (delta_units > 0 and can_scroll_down):
+                self.log_text.yview_scroll(delta_units, "units")
+            else:
+                self._right_canvas.yview_scroll(delta_units, "units")
+            return "break"
+
+        def _on_log_touchpad(event):
+            top, bottom = self.log_text.yview()
+            _delta_x, delta_y = _touchpad_deltas(event)
+            if not delta_y:
+                return "break"
+            can_scroll_up = top > 0
+            can_scroll_down = bottom < 1.0
+            if (delta_y > 0 and can_scroll_up) or (delta_y < 0 and can_scroll_down):
+                self.log_text.yview_scroll(-delta_y, "pixels")
+            else:
+                _scroll_page_pixels(delta_y)
+            return "break"
+
+        # log_text has its own smart handler — keep it as a widget-level
+        # binding so it takes priority over the SCROLL_TAG class binding.
+        self.log_text.bind("<MouseWheel>", _on_log_mousewheel)
+        _safe_bind_widget(self.log_text, "<TouchpadScroll>", _on_log_touchpad)
+        self.log_text.bind("<Button-4>",   _on_log_mousewheel)
+        self.log_text.bind("<Button-5>",   _on_log_mousewheel)
+
+        # One-time full scan after all widgets are rendered.
+        self.root.after_idle(lambda: _apply_scroll_tag(right_frame))
 
         self._write_log(self._initial_log_text())
 
@@ -1370,6 +1534,8 @@ class HRToolkitApp:
             self._update_rename_controls()
         if hasattr(self, "tutorial_text"):
             self._set_tutorial_text()
+        if hasattr(self, "_sync_right_canvas_window"):
+            self.root.after_idle(self._sync_right_canvas_window)
 
     def _set_tutorial_text(self) -> None:
         self.tutorial_text.config(state="normal")
