@@ -5,7 +5,6 @@ import shutil
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
 
@@ -839,17 +839,15 @@ def _detect_region_code(record: ArchiveTransferRecord) -> str | None:
 
 
 def _copy_default_archive_template(temp_dir: Path) -> Path:
-    template = resources.files("hr_toolkit.templates").joinpath(DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE)
     target = temp_dir / DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE
-    with template.open("rb") as source, target.open("wb") as output:
+    with open_template_resource(DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE) as source, target.open("wb") as output:
         shutil.copyfileobj(source, output)
     return target
 
 
 def _copy_default_company_archive_template(temp_dir: Path) -> Path:
-    template = resources.files("hr_toolkit.templates").joinpath(DEFAULT_ARCHIVE_COMPANY_TEMPLATE_RESOURCE)
     target = temp_dir / DEFAULT_ARCHIVE_COMPANY_TEMPLATE_RESOURCE
-    with template.open("rb") as source, target.open("wb") as output:
+    with open_template_resource(DEFAULT_ARCHIVE_COMPANY_TEMPLATE_RESOURCE) as source, target.open("wb") as output:
         shutil.copyfileobj(source, output)
     return target
 

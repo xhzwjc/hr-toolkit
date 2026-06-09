@@ -6,7 +6,6 @@ import tempfile
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +14,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 
@@ -533,9 +533,8 @@ def _write_output_workbook(
 
 
 def _copy_template(temp_dir: Path) -> Path:
-    template = resources.files("hr_toolkit.templates").joinpath(TEMPLATE_RESOURCE)
     target = temp_dir / TEMPLATE_RESOURCE
-    with template.open("rb") as source, target.open("wb") as output:
+    with open_template_resource(TEMPLATE_RESOURCE) as source, target.open("wb") as output:
         shutil.copyfileobj(source, output)
     return target
 

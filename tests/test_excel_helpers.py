@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
+from hr_toolkit.common import resources as package_resources
 from hr_toolkit.common.excel import _translate_same_row_formula
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook
+from hr_toolkit.common.resources import open_template_resource
 
 
 class ExcelHelperTest(unittest.TestCase):
@@ -61,6 +63,11 @@ class ExcelHelperTest(unittest.TestCase):
             loaded = load_workbook(converted, data_only=True)
             self.assertEqual(loaded.active["A1"].value, "已转换")
             loaded.close()
+
+    def test_open_template_resource_falls_back_without_files_api(self) -> None:
+        with patch.object(package_resources.resources, "files", None):
+            with open_template_resource("data_statistics_template.xlsx") as handle:
+                self.assertEqual(handle.read(2), b"PK")
 
 
 if __name__ == "__main__":

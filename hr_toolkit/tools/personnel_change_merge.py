@@ -5,7 +5,6 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +14,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
+from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
 
@@ -898,8 +898,7 @@ def _create_default_summary_workbook(period: str | None) -> Workbook:
 
 def _load_packaged_summary_template() -> Workbook | None:
     try:
-        template = resources.files("hr_toolkit.templates").joinpath(DEFAULT_SUMMARY_TEMPLATE_RESOURCE)
-        with template.open("rb") as handle:
+        with open_template_resource(DEFAULT_SUMMARY_TEMPLATE_RESOURCE) as handle:
             return load_workbook(handle)
     except Exception:
         return None

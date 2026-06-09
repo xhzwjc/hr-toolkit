@@ -7,7 +7,6 @@ import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +15,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
 from hr_toolkit.common.excel_compat import SUPPORTED_EXCEL_SUFFIXES, ensure_xlsx_workbook, is_supported_excel_file
 
@@ -1103,9 +1103,8 @@ def _group_summary_records(records: list[DetailRecord]) -> OrderedDict[tuple[str
 
 
 def _copy_template(resource_name: str, temp_dir: Path) -> Path:
-    template = resources.files("hr_toolkit.templates").joinpath(resource_name)
     target = temp_dir / resource_name
-    with template.open("rb") as source, target.open("wb") as output:
+    with open_template_resource(resource_name) as source, target.open("wb") as output:
         shutil.copyfileobj(source, output)
     return target
 
