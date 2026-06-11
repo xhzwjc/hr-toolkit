@@ -3,4 +3,4 @@
 Reusable automation tools for HR Excel workflows.
 """
 
-__version__ = "0.1.23"
+__version__ = "0.1.24"
