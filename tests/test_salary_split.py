@@ -47,6 +47,20 @@ class SalarySplitTest(unittest.TestCase):
             self.assertEqual(summary["A7"].value, "广东河源市2026年4月移动线路代维项目")
             self.assertEqual(summary["C6"].value, "='明细表'!P18")
             self.assertEqual(summary["C7"].value, "='明细表'!P25")
+            wb.close()
+
+            empty_section_wb = load_workbook(companies["岩亨"]["file_path"], data_only=False)
+            empty_detail = empty_section_wb["明细表"]
+            detail_labels = [empty_detail.cell(row, 1).value for row in range(1, empty_detail.max_row + 1)]
+            self.assertIn("河源无线代维合计", detail_labels)
+            self.assertNotIn("河源传输代维合计", detail_labels)
+            empty_summary = empty_section_wb["汇总表"]
+            summary_labels = [empty_summary.cell(row, 1).value for row in range(1, empty_summary.max_row + 1)]
+            self.assertIn("广东河源市2026年4月移动基站代维项目", summary_labels)
+            self.assertNotIn("广东河源市2026年4月移动线路代维项目", summary_labels)
+            self.assertEqual(empty_summary["A7"].value, "合计")
+            self.assertEqual(empty_summary["C7"].value, "=SUM(C6:C6)")
+            empty_section_wb.close()
 
     def test_manifest_is_optional(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

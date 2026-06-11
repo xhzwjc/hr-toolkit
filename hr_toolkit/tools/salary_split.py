@@ -325,6 +325,8 @@ def _rebuild_detail_sheet(
     rows_by_section = _group_sections(rows)
     for section in sections:
         section_rows = rows_by_section.get(section.label, [])
+        if not section_rows:
+            continue
         data_start_row = current_row
         for employee in section_rows:
             apply_row_snapshot(ws, current_row, employee.snapshot, translate_formulas=True)
@@ -422,7 +424,7 @@ def _write_detail_section_total_formulas(
             if last_data_row >= first_data_row:
                 cell.value = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})"
             else:
-                cell.value = 0
+                cell.value = None
         else:
             cell.value = None
 
@@ -442,7 +444,7 @@ def _write_detail_grand_total_formulas(
             if subtotal_rows:
                 cell.value = "=" + "+".join(f"{col_letter}{row}" for row in subtotal_rows)
             else:
-                cell.value = 0
+                cell.value = None
         else:
             cell.value = None
 
@@ -522,7 +524,9 @@ def _write_summary_section_formulas(
             f"=COUNT({detail}!$A${section.data_start_row}:$A${section.data_end_row})"
         )
     else:
-        count_formula = 0
+        for col_index in range(2, 22):
+            ws.cell(row_index, col_index).value = None
+        return
     formulas = {
         2: count_formula,
         3: f"={detail}!P{subtotal_row}",
@@ -556,7 +560,7 @@ def _write_summary_total_formulas(ws: Worksheet, first_row: int, total_row: int)
         if last_row >= first_row:
             ws.cell(total_row, col_index).value = f"=SUM({col_letter}{first_row}:{col_letter}{last_row})"
         else:
-            ws.cell(total_row, col_index).value = 0
+            ws.cell(total_row, col_index).value = None
 
 
 def _cell_text(ws: Worksheet, row_index: int, col_index: int) -> str:
