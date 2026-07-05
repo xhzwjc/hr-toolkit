@@ -920,7 +920,17 @@ def _match_company_archive_file(archive_file: Path, companies: list[str], warnin
         if not archive_sheet_titles:
             warnings.append(f"{archive_file.name} 未识别到公司档案表表头，已跳过。")
             return []
+        # 精确匹配
         matched = [company for company in companies if company in archive_sheet_titles]
+        if matched:
+            return matched
+        # 模糊匹配：规范化名称相同
+        for company in companies:
+            company_normalized = _normalize_company_name(company)
+            for title in archive_sheet_titles:
+                if company_normalized == _normalize_company_name(title):
+                    matched.append(company)
+                    break
         if matched:
             return matched
         filename_matches = [company for company in companies if company and company in archive_file.stem]
@@ -1100,9 +1110,27 @@ def _count_by_company(records: list[ArchiveTransferRecord]) -> dict[str, int]:
 
 def _group_by_company(records: list[ArchiveTransferRecord]) -> dict[str, list[ArchiveTransferRecord]]:
     grouped: dict[str, list[ArchiveTransferRecord]] = {}
+    # 建立规范化名称到标准名称的映射，用于模糊匹配
+    canonical_names: dict[str, str] = {}
     for record in records:
-        grouped.setdefault(record.company, []).append(record)
+        normalized = _normalize_company_name(record.company)
+        if normalized in canonical_names:
+            # 使用已有的标准名称
+            canonical = canonical_names[normalized]
+        else:
+            # 新的规范化名称，使用当前公司名作为标准名称
+            canonical = record.company
+            canonical_names[normalized] = canonical
+        grouped.setdefault(canonical, []).append(record)
     return grouped
+
+
+def _normalize_company_name(name: str) -> str:
+    """规范化公司名称：移除空格和标点，字符排序，用于模糊匹配"""
+    # 移除空格、标点符号
+    cleaned = re.sub(r"[\s　·.。、，,（）()\-—_]", "", name)
+    # 字符排序，使"北京春苗"和"春苗北京"得到相同的规范化结果
+    return "".join(sorted(cleaned))
 
 
 def _normalize_header(value: Any) -> str:

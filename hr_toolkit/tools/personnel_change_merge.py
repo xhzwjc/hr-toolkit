@@ -662,12 +662,15 @@ def _write_summary_workbook(
 
 
 def _append_sheet_rows(ws: Worksheet, rows: list[ChangeRow]) -> dict[str, int]:
+    if not rows:
+        return {"inserted_count": 0, "updated_count": 0, "skipped_count": 0}
     inserted_count = 0
     updated_count = 0
     skipped_count = 0
+    # 在循环外一次性计算 layout 和 existing 索引，避免 O(N²) 复杂度
+    layout = _detect_sheet_layout(ws)
+    existing = _existing_change_index(ws, layout, rows[0].sheet_name)
     for row in rows:
-        layout = _detect_sheet_layout(ws)
-        existing = _existing_change_index(ws, layout, row.sheet_name)
         row_key = _change_key_from_source(row, layout)
         if row_key and row_key in existing:
             if _merge_existing_change_row(ws, layout, existing[row_key], row):
@@ -676,10 +679,23 @@ def _append_sheet_rows(ws: Worksheet, rows: list[ChangeRow]) -> dict[str, int]:
                 skipped_count += 1
             continue
         target_row = _next_summary_write_row(ws, layout)
-        layout = _detect_sheet_layout(ws)
+        # 插入新行后，更新 layout 的 footer_start_row
+        if target_row >= layout.footer_start_row:
+            layout = ChangeSheetLayout(
+                sheet_name=layout.sheet_name,
+                header_row=layout.header_row,
+                data_start_row=layout.data_start_row,
+                footer_start_row=layout.footer_start_row + 1,
+                max_column=layout.max_column,
+                headers=layout.headers,
+            )
         _write_change_row(ws, layout, target_row, row)
+        # 将新插入的行添加到 existing 索引中
+        new_key = _change_key_from_target(ws, layout, target_row, row.sheet_name)
+        if new_key:
+            existing[new_key] = target_row
         inserted_count += 1
-    _renumber_summary_sheet(ws, _detect_sheet_layout(ws))
+    _renumber_summary_sheet(ws, layout)
     return {"inserted_count": inserted_count, "updated_count": updated_count, "skipped_count": skipped_count}
 
 

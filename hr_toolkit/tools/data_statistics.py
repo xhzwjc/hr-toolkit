@@ -331,6 +331,8 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
             headers = _read_headers(ws, header_row)
             if _is_attendance_sheet(headers):
                 attendance_rows.extend(_read_attendance_sheet(ws, headers, header_row, file_path.name))
+            elif _is_summary_attendance_sheet(headers):
+                attendance_rows.extend(_read_summary_attendance_sheet(ws, headers, header_row, file_path.name))
             elif _is_report_sheet(headers):
                 report_type = _report_type_from_name(file_path.name, ws.title)
                 if report_type is None:
@@ -354,6 +356,12 @@ def _find_header_row(ws: Worksheet) -> int | None:
             return row_index
         if "汇报编号" in values and "汇报人" in values:
             return row_index
+        # 汇总格式考勤表：有姓名和应出勤天数/应出勤小时数，但没有日期列
+        if "姓名" in values and ("应出勤天数" in values or "应出勤小时数" in values) and "日期" not in values:
+            return row_index
+        # 汇总格式考勤表（几维等）：有姓名和事假/病假等字段，但没有日期列
+        if "姓名" in values and ("事假" in values or "事假（天）" in values or "病假" in values or "病假（天）" in values) and "日期" not in values:
+            return row_index
     return None
 
 
@@ -369,6 +377,18 @@ def _read_headers(ws: Worksheet, header_row: int) -> dict[str, int]:
 
 def _is_attendance_sheet(headers: dict[str, int]) -> bool:
     return {"姓名", "日期", "漏打卡次数", "应出勤小时数"}.issubset(headers)
+
+
+def _is_summary_attendance_sheet(headers: dict[str, int]) -> bool:
+    """判断是否为汇总格式的考勤表（没有日期列，直接按人汇总）"""
+    if "姓名" not in headers:
+        return False
+    if "日期" in headers:
+        return False
+    # 必须有应出勤天数/应出勤小时数，或者有事假/病假等字段
+    has_attendance = "应出勤天数" in headers or "应出勤小时数" in headers
+    has_leave = any(h in headers for h in ("事假", "事假（天）", "事假\n(天)", "事假\n(小时)", "病假", "病假（天）", "病假\n(天)"))
+    return has_attendance or has_leave
 
 
 def _is_report_sheet(headers: dict[str, int]) -> bool:
@@ -409,6 +429,85 @@ def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: i
             )
         )
     return rows
+
+
+def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
+    """读取汇总格式的考勤表（没有日期列，直接按人汇总）"""
+    rows: list[AttendanceSourceRow] = []
+    # 从文件名或标题行推断月份
+    month = _infer_month_from_filename(file_name)
+    default_date = date(date.today().year, month, 1) if month else date.today()
+    for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
+        name = _cell_text(_header_value(ws, row_index, headers, "姓名"))
+        if not name:
+            continue
+        # 跳过表头行（姓名列值为"姓名"等）
+        if name in ("姓名", "员工姓名", "人员姓名"):
+            continue
+        # 获取公司和部门
+        company_text = _cell_text(_header_value(ws, row_index, headers, "公司"))
+        department_text = _cell_text(_header_value(ws, row_index, headers, "部门（片区）"))
+        if not department_text:
+            department_text = _cell_text(_header_value(ws, row_index, headers, "部门名称"))
+        if not department_text:
+            department_text = _cell_text(_header_value(ws, row_index, headers, "部门"))
+        company, department = _company_department_from_text(department_text)
+        if company_text:
+            company = company_text
+        # 读取各项数据，支持不同的字段名
+        personal_leave = _number(_header_value_any(ws, row_index, headers, ("事假", "事假（天）", "事假\n(天)", "事假\n(小时)")))
+        sick_leave = _number(_header_value_any(ws, row_index, headers, ("病假天数", "病假", "病假（天）", "病假\n(天)")))
+        paid_leave = _number(_header_value_any(ws, row_index, headers, ("年假天数", "年假", "年假\n（天）", "年假\n(天)", "带薪休假", "带薪休假（天）")))
+        rest_days = _number(_header_value_any(ws, row_index, headers, ("调休", "调休（小时）", "总调休", "总调休\n(小时)", "总调休（小时）")))
+        overtime_days = _number(_header_value_any(ws, row_index, headers, ("加班计调休时长", "当月加班时长", "当月加班（小时）")))
+        absence_days = _number(_header_value_any(ws, row_index, headers, ("旷工天数", "旷工", "旷工（天）")))
+        late_count = int(_number(_header_value_any(ws, row_index, headers, ("迟到次数", "迟到", "迟到（次）"))))
+        early_count = int(_number(_header_value_any(ws, row_index, headers, ("早退次数", "早退", "早退（次）"))))
+        missing_punch = int(_number(_header_value_any(ws, row_index, headers, ("漏打卡次数", "漏打卡", "漏打卡（次）"))))
+        # 应出勤和实出勤
+        expected_hours = _number(_header_value_any(ws, row_index, headers, ("应出勤小时数", "应出勤天数")))
+        actual_hours = _number(_header_value_any(ws, row_index, headers, ("实出勤小时数", "实际出勤天数")))
+        rows.append(
+            AttendanceSourceRow(
+                source_file=file_name,
+                source_row=row_index,
+                name=name,
+                company=company,
+                department=department,
+                day=default_date,
+                personal_leave_days=_to_days(personal_leave),
+                sick_leave_days=_to_days(sick_leave),
+                paid_leave_days=_to_days(paid_leave),
+                rest_days=_to_days(rest_days),
+                overtime_days=_to_days(overtime_days),
+                absence_days=absence_days,
+                late_count=late_count,
+                early_count=early_count,
+                missing_punch_count=missing_punch,
+                expected_hours=expected_hours,
+                actual_hours=actual_hours,
+            )
+        )
+    return rows
+
+
+def _infer_month_from_filename(file_name: str) -> int | None:
+    """从文件名推断月份"""
+    match = re.search(r"(\d{1,2})\s*月", file_name)
+    if match:
+        month = int(match.group(1))
+        if 1 <= month <= 12:
+            return month
+    return None
+
+
+def _header_value_any(ws: Worksheet, row_index: int, headers: dict[str, int], candidates: tuple[str, ...]) -> Any:
+    """尝试多个表头名，返回第一个匹配的值"""
+    for candidate in candidates:
+        col_index = headers.get(_normalize_header(candidate))
+        if col_index is not None:
+            return ws.cell(row_index, col_index).value
+    return None
 
 
 def _read_report_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str, report_type: str) -> list[ReportRecord]:

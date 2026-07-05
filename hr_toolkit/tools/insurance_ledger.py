@@ -451,8 +451,10 @@ def _build_ledger(
 ) -> tuple[list[LedgerPerson], list[str], list[InsuranceWarning]]:
     ledger_by_id: OrderedDict[str, LedgerPerson] = OrderedDict()
     policy_order: list[str] = []
+    policy_seen: set[str] = set()
     for entry in entries:
-        if entry.policy_no not in policy_order:
+        if entry.policy_no not in policy_seen:
+            policy_seen.add(entry.policy_no)
             policy_order.append(entry.policy_no)
         roster_person = roster_people.get(entry.id_card)
         person = ledger_by_id.setdefault(
@@ -540,10 +542,14 @@ def _copy_template(temp_dir: Path) -> Path:
 
 
 def _write_ledger_sheet(ws: Worksheet, ledger_people: list[LedgerPerson], policy_order: list[str]) -> None:
-    max_col = 4 + len(policy_order) * 2 + 2
+    headers = _build_headers(policy_order)
+    max_col = len(headers)
     row_snapshot = snapshot_row(ws, 3, min(ws.max_column, 9))
     if ws.max_row >= 3:
         ws.delete_rows(3, ws.max_row - 2)
+    # 清除模板多余列，避免残留模板数据
+    if ws.max_column > max_col:
+        ws.delete_cols(max_col + 1, ws.max_column - max_col)
     _write_ledger_headers(ws, policy_order)
     for offset, person in enumerate(ledger_people):
         row_index = 3 + offset
@@ -571,11 +577,16 @@ def _write_ledger_sheet(ws: Worksheet, ledger_people: list[LedgerPerson], policy
     ws.freeze_panes = "A3"
 
 
-def _write_ledger_headers(ws: Worksheet, policy_order: list[str]) -> None:
+def _build_headers(policy_order: list[str]) -> list[str]:
     headers = ["序号", "姓名", "身份证号码", "项目/部门"]
     for index, _policy_no in enumerate(policy_order, start=1):
         headers.extend([f"保单号{index}", "保额"])
     headers.extend(["保额合计", "预警"])
+    return headers
+
+
+def _write_ledger_headers(ws: Worksheet, policy_order: list[str]) -> None:
+    headers = _build_headers(policy_order)
     for col_index, header in enumerate(headers, start=1):
         ws.cell(2, col_index).value = header
     if ws.max_column > len(headers):
@@ -610,16 +621,24 @@ def _write_roster_warning_workbook(
         return
     workbook = load_workbook(source_workbook)
     try:
+        # 按 sheet 缓存 header_row 和 headers，避免重复扫描
+        header_cache: dict[str, tuple[int, dict[str, int]]] = {}
         for person in roster_people.values():
             if person.id_card not in add_warning_ids:
                 continue
             if person.sheet_name not in workbook.sheetnames:
                 continue
             ws = workbook[person.sheet_name]
-            header_row = _find_roster_header_row(ws)
-            if header_row is None:
+            if person.sheet_name not in header_cache:
+                header_row = _find_roster_header_row(ws)
+                if header_row is None:
+                    header_cache[person.sheet_name] = (0, {})
+                    continue
+                headers = _read_headers_first(ws, header_row)
+                header_cache[person.sheet_name] = (header_row, headers)
+            header_row, headers = header_cache[person.sheet_name]
+            if header_row == 0:
                 continue
-            headers = _read_headers_first(ws, header_row)
             warning_col = headers.get("保险预警")
             if warning_col is None:
                 warning_col = _last_header_column(ws, header_row) + 1
@@ -628,6 +647,9 @@ def _write_roster_warning_workbook(
                 ws.cell(header_row, warning_col).font = Font(name="宋体", size=10, bold=True)
                 ws.cell(header_row, warning_col).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 ws.column_dimensions[get_column_letter(warning_col)].width = 16
+                # 更新缓存的 headers，避免重复创建新列
+                headers["保险预警"] = warning_col
+                header_cache[person.sheet_name] = (header_row, headers)
             cell = ws.cell(person.source_row, warning_col)
             cell.value = "需加保"
             cell.fill = WARNING_FILL

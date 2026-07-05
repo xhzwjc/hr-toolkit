@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .tools.folder_rename import rename_person_folders
+from .tools.folder_rename import rename_person_folders, FILE_TYPE_FOLDER
 from .tools.archive_import import export_company_archive_tables, import_archive_transfers
 from .tools.data_statistics import generate_data_statistics_reports
 from .tools.insurance_ledger import generate_insurance_ledger
@@ -294,7 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         required=True,
         choices=["append", "remove", "replace"],
-        help="append=追加文字，remove=删除结尾文字，replace=修改单个文件夹名",
+        help="append=追加文字，remove=删除结尾文字，replace=修改名称",
     )
     folder_rename.add_argument(
         "--text",
@@ -304,12 +304,18 @@ def build_parser() -> argparse.ArgumentParser:
     folder_rename.add_argument(
         "--target",
         default="",
-        help="指定单个人员/原文件夹名；不填时 append/remove 处理全部子文件夹",
+        help="指定单个项目/原名称；不填时 append/remove 处理全部匹配项",
     )
     folder_rename.add_argument(
         "--replacement",
         default="",
-        help="replace 模式下的新文件夹名",
+        help="replace 模式下的新名称",
+    )
+    folder_rename.add_argument(
+        "--file-type",
+        default="folder",
+        choices=["folder", "pdf", "image", "document", "all"],
+        help="要改名的类型：folder=文件夹，pdf=PDF，image=图片，document=文档，all=全部",
     )
     folder_rename.add_argument(
         "--apply",
@@ -536,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
             text=args.text,
             target_name=args.target,
             replacement_name=args.replacement,
+            file_type=args.file_type,
             dry_run=not args.apply,
         )
         payload = result.to_dict()

@@ -24,6 +24,11 @@ from hr_toolkit.tools.folder_rename import (
     MODE_REMOVE,
     MODE_REPLACE,
     rename_person_folders,
+    FILE_TYPE_FOLDER,
+    FILE_TYPE_ALL,
+    FILE_TYPE_PDF,
+    FILE_TYPE_IMAGE,
+    FILE_TYPE_DOCUMENT,
 )
 from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
 from hr_toolkit.tools.data_statistics import generate_data_statistics_reports
@@ -39,6 +44,15 @@ RENAME_MODE_LABELS = {
     "删除结尾文字": MODE_REMOVE,
     "修改单人名称": MODE_REPLACE,
 }
+
+RENAME_FILE_TYPE_LABELS = {
+    "文件夹": FILE_TYPE_FOLDER,
+    "PDF": FILE_TYPE_PDF,
+    "图片（jpg/png/gif等）": FILE_TYPE_IMAGE,
+    "文档（doc/xls/ppt/txt等）": FILE_TYPE_DOCUMENT,
+    "全部": FILE_TYPE_ALL,
+}
+RENAME_FILE_TYPE_LABELS_REVERSE = {v: k for k, v in RENAME_FILE_TYPE_LABELS.items()}
 
 TOOL_NAV_ITEMS = (
     ("social_security", "01  社保汇总"),
@@ -408,6 +422,7 @@ class HRToolkitApp:
         self.rename_target_name = StringVar()
         self.rename_text = StringVar()
         self.rename_replacement_name = StringVar()
+        self.rename_file_type = StringVar(value="文件夹")
         self.input_path = StringVar()
         self.summary_path = StringVar()
         self.output_dir = StringVar(value=str(default_output_parent_dir(self.current_tool)))
@@ -1235,6 +1250,18 @@ class HRToolkitApp:
         self.rename_replacement_label_widget.grid(row=3, column=0, sticky="w", pady=self._px(5))
         self.rename_replacement_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_replacement_name, style="App.TEntry")
         self.rename_replacement_widget.grid(row=3, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
+
+        self.rename_file_type_label_widget = ttk.Label(self.rename_options_frame, text="文件类型", style="App.TLabel")
+        self.rename_file_type_label_widget.grid(row=4, column=0, sticky="w", pady=self._px(5))
+        self.rename_file_type_widget = ttk.Combobox(
+            self.rename_options_frame,
+            textvariable=self.rename_file_type,
+            values=["文件夹", "PDF", "图片（jpg/png/gif等）", "文档（doc/xls/ppt/txt等）", "全部"],
+            state="readonly",
+            width=22,
+        )
+        self.rename_file_type_widget.grid(row=4, column=1, sticky="w", padx=self._px(12), pady=self._px(5))
+
         self.rename_options_frame.columnconfigure(1, weight=1)
 
         def _refresh_picker_button_bar(button_bar) -> None:
@@ -2357,6 +2384,9 @@ class HRToolkitApp:
 
     def _update_rename_mode_controls(self) -> None:
         mode = RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
+        # 文件类型选择器始终显示
+        self.rename_file_type_label_widget.grid(row=4, column=0, sticky="w", pady=self._px(5))
+        self.rename_file_type_widget.grid(row=4, column=1, sticky="w", padx=self._px(12), pady=self._px(5))
         if mode == MODE_APPEND:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要追加的文字")
@@ -2374,7 +2404,7 @@ class HRToolkitApp:
             self.rename_replacement_label_widget.grid_remove()
             self.rename_replacement_widget.grid_remove()
         else:
-            self.rename_target_label.set("原姓名")
+            self.rename_target_label.set("原名称")
             self.rename_replacement_label.set("新名称")
             self.rename_text_label_widget.grid_remove()
             self.rename_text_widget.grid_remove()
@@ -3046,6 +3076,10 @@ class HRToolkitApp:
             return
 
         mode = RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
+        # 获取文件类型
+        file_type_label = self.rename_file_type.get()
+        file_type = RENAME_FILE_TYPE_LABELS.get(file_type_label, FILE_TYPE_FOLDER)
+
         try:
             preview = rename_person_folders(
                 root_dir=root_dir,
@@ -3053,6 +3087,7 @@ class HRToolkitApp:
                 text=self.rename_text.get(),
                 target_name=self.rename_target_name.get(),
                 replacement_name=self.rename_replacement_name.get(),
+                file_type=file_type,
                 dry_run=True,
             )
         except Exception as exc:
@@ -3063,7 +3098,7 @@ class HRToolkitApp:
         self._write_log("预览结果：")
         self._write_folder_rename_preview(preview)
         if preview.operation_count == 0:
-            messagebox.showinfo("没有可改名文件夹", "没有找到需要改名的文件夹，请检查输入内容。")
+            messagebox.showinfo("没有可改名项目", "没有找到需要改名的项目，请检查输入内容。")
             return
 
         message = self._folder_rename_confirm_message(preview)
@@ -3075,7 +3110,7 @@ class HRToolkitApp:
         self._write_log("开始执行改名...")
         worker = threading.Thread(
             target=self._folder_rename_worker,
-            args=(root_dir, mode, self.rename_text.get(), self.rename_target_name.get(), self.rename_replacement_name.get()),
+            args=(root_dir, mode, self.rename_text.get(), self.rename_target_name.get(), self.rename_replacement_name.get(), file_type),
             daemon=True,
         )
         worker.start()
@@ -3159,6 +3194,7 @@ class HRToolkitApp:
         text: str,
         target_name: str,
         replacement_name: str,
+        file_type: str = FILE_TYPE_FOLDER,
     ) -> None:
         try:
             result = rename_person_folders(
@@ -3167,6 +3203,7 @@ class HRToolkitApp:
                 text=text,
                 target_name=target_name,
                 replacement_name=replacement_name,
+                file_type=file_type,
             )
         except Exception as exc:
             self.status_queue.put(("error", exc))
