@@ -632,24 +632,23 @@ def _write_roster_warning_workbook(
             if person.sheet_name not in header_cache:
                 header_row = _find_roster_header_row(ws)
                 if header_row is None:
-                    header_cache[person.sheet_name] = (0, {})
+                    header_cache[person.sheet_name] = (0, None, 0)
                     continue
                 headers = _read_headers_first(ws, header_row)
-                header_cache[person.sheet_name] = (header_row, headers)
-            header_row, headers = header_cache[person.sheet_name]
+                header_cache[person.sheet_name] = (header_row, headers, 0)
+            header_row, headers, warning_col = header_cache[person.sheet_name]
             if header_row == 0:
                 continue
-            warning_col = headers.get("保险预警")
-            if warning_col is None:
+            if warning_col == 0:
                 warning_col = _last_header_column(ws, header_row) + 1
                 ws.cell(header_row, warning_col).value = "保险预警"
                 ws.cell(header_row, warning_col).fill = PatternFill("solid", fgColor="FCE4D6")
                 ws.cell(header_row, warning_col).font = Font(name="宋体", size=10, bold=True)
                 ws.cell(header_row, warning_col).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 ws.column_dimensions[get_column_letter(warning_col)].width = 16
-                # 更新缓存的 headers，避免重复创建新列
-                headers["保险预警"] = warning_col
-                header_cache[person.sheet_name] = (header_row, headers)
+                # 缓存刚创建的新列号，headers 字典保持只读不被破坏
+                header_cache[person.sheet_name] = (header_row, headers, warning_col)
+            warning_col = header_cache[person.sheet_name][2]
             cell = ws.cell(person.source_row, warning_col)
             cell.value = "需加保"
             cell.fill = WARNING_FILL

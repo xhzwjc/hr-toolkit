@@ -20,16 +20,29 @@ class FolderRenameTest(unittest.TestCase):
             (root / "李四").mkdir()
             (root / "说明.txt").write_text("ignore", encoding="utf-8")
 
-            preview = rename_person_folders(root, mode=MODE_APPEND, text="劳动合同", dry_run=True)
+            # “-劳动合同”带前缀追加;右侧注释验证“劳动合同”不带前缀时直传
+            preview = rename_person_folders(root, mode=MODE_APPEND, text="-劳动合同", dry_run=True)
             self.assertEqual(preview.operation_count, 2)
             self.assertTrue((root / "张三").exists())
 
-            result = rename_person_folders(root, mode=MODE_APPEND, text="劳动合同")
+            result = rename_person_folders(root, mode=MODE_APPEND, text="-劳动合同")
 
             self.assertEqual(result.operation_count, 2)
             self.assertTrue((root / "张三-劳动合同").exists())
             self.assertTrue((root / "李四-劳动合同").exists())
             self.assertTrue((root / "说明.txt").exists())
+
+    def test_append_text_passed_through_unchanged(self) -> None:
+        """bug4 修复:用户输入什么就追加什么，不自动加分隔符"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "张三").mkdir()
+
+            result = rename_person_folders(root, mode=MODE_APPEND, text="劳动合同")
+
+            self.assertEqual(result.operation_count, 1)
+            self.assertTrue((root / "张三劳动合同").exists())
+            self.assertFalse((root / "张三-劳动合同").exists())
 
     def test_append_suffix_to_one_person(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -37,7 +50,7 @@ class FolderRenameTest(unittest.TestCase):
             (root / "张三").mkdir()
             (root / "李四").mkdir()
 
-            result = rename_person_folders(root, mode=MODE_APPEND, text="身份证", target_name="张三")
+            result = rename_person_folders(root, mode=MODE_APPEND, text="-身份证", target_name="张三")
 
             self.assertEqual(result.operation_count, 1)
             self.assertTrue((root / "张三-身份证").exists())
@@ -95,7 +108,7 @@ class FolderRenameTest(unittest.TestCase):
             (root / "张三").mkdir()
             (root / "张三-劳动合同").mkdir()
 
-            result = rename_person_folders(root, mode=MODE_APPEND, text="劳动合同")
+            result = rename_person_folders(root, mode=MODE_APPEND, text="-劳动合同")
 
             self.assertEqual(result.operation_count, 0)
             self.assertTrue(any("已存在" in warning or "已包含后缀" in warning for warning in result.warnings))

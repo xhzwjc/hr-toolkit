@@ -348,6 +348,14 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
     return attendance_rows, weekly_records, monthly_records
 
 
+# 汇总格式考勤表的识别标记：有"姓名"+应出勤字段(强);有"姓名"+请假字段(弱,需配合其他标志)
+_SUMMARY_ATTENDANCE_KEY_FIELDS = ("应出勤天数", "应出勤小时数")
+_SUMMARY_ATTENDANCE_LEAVE_FIELDS = (
+    "事假", "事假（天）", "事假\n(天)", "事假\n(小时)",
+    "病假", "病假（天）", "病假\n(天)",
+)
+
+
 def _find_header_row(ws: Worksheet) -> int | None:
     max_col = min(ws.max_column or 0, 80)
     for row_index in range(1, min(ws.max_row or 0, 20) + 1):
@@ -356,12 +364,10 @@ def _find_header_row(ws: Worksheet) -> int | None:
             return row_index
         if "汇报编号" in values and "汇报人" in values:
             return row_index
-        # 汇总格式考勤表：有姓名和应出勤天数/应出勤小时数，但没有日期列
-        if "姓名" in values and ("应出勤天数" in values or "应出勤小时数" in values) and "日期" not in values:
-            return row_index
-        # 汇总格式考勤表（几维等）：有姓名和事假/病假等字段，但没有日期列
-        if "姓名" in values and ("事假" in values or "事假（天）" in values or "病假" in values or "病假（天）" in values) and "日期" not in values:
-            return row_index
+        # 汇总格式考勤表：有姓名 + 应出勤/应出勤小时数(强信号,优先识别)
+        if "姓名" in values and "日期" not in values:
+            if any(field in values for field in _SUMMARY_ATTENDANCE_KEY_FIELDS):
+                return row_index
     return None
 
 
@@ -380,15 +386,16 @@ def _is_attendance_sheet(headers: dict[str, int]) -> bool:
 
 
 def _is_summary_attendance_sheet(headers: dict[str, int]) -> bool:
-    """判断是否为汇总格式的考勤表（没有日期列，直接按人汇总）"""
+    """判断是否为汇总格式的考勤表(没有日期列,按人汇总)。
+
+    要求:有"姓名"、无"日期",且必须有应出勤天数/应出勤小时数任一。
+    这样可以避免把"姓名+事假"等请假明细误识别为考勤表。
+    """
     if "姓名" not in headers:
         return False
     if "日期" in headers:
         return False
-    # 必须有应出勤天数/应出勤小时数，或者有事假/病假等字段
-    has_attendance = "应出勤天数" in headers or "应出勤小时数" in headers
-    has_leave = any(h in headers for h in ("事假", "事假（天）", "事假\n(天)", "事假\n(小时)", "病假", "病假（天）", "病假\n(天)"))
-    return has_attendance or has_leave
+    return any(field in headers for field in _SUMMARY_ATTENDANCE_KEY_FIELDS)
 
 
 def _is_report_sheet(headers: dict[str, int]) -> bool:

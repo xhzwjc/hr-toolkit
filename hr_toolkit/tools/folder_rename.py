@@ -294,7 +294,7 @@ def _plan_operations(
 
     if mode == MODE_APPEND:
         if not text:
-            raise ValueError("请填写要追加的内容，例如：劳动合同 或 -劳动合同")
+            raise ValueError("请填写要追加的文字，建议以 - 或 _ 开头，例如：-劳动合同")
         suffix = _normalize_append_text(text)
         candidates = _iter_target_items(root_dir, target_name, file_type)
         planned = []
@@ -342,19 +342,6 @@ def _plan_operations(
 
     operations = _filter_invalid_operations(planned, warnings)
     return operations, warnings
-
-
-def _iter_target_dirs(root_dir: Path, target_name: str) -> list[Path]:
-    if target_name:
-        target = root_dir / target_name
-        if target.exists() and target.is_dir():
-            return [target]
-        return [
-            path
-            for path in sorted(root_dir.iterdir())
-            if path.is_dir() and path.name.startswith(target_name)
-        ]
-    return sorted(path for path in root_dir.iterdir() if path.is_dir())
 
 
 def _iter_target_items(root_dir: Path, target_name: str, file_type: str) -> list[Path]:

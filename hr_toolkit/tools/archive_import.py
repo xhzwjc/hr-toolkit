@@ -1125,10 +1125,16 @@ def _group_by_company(records: list[ArchiveTransferRecord]) -> dict[str, list[Ar
     return grouped
 
 
+# 规范化公司名称时,移除空白、常见分隔符
+_COMPANY_NAME_STRIP_CHARS = str.maketrans("", "", " 　·.。、，,（）()-—_")
+
 def _normalize_company_name(name: str) -> str:
-    """规范化公司名称：移除空格和标点，字符排序，用于模糊匹配"""
-    # 移除空格、标点符号
-    cleaned = re.sub(r"[\s　·.。、，,（）()\-—_]", "", name)
+    """规范化公司名称：移除空白和常见分隔符，然后字符排序，用于模糊匹配。
+
+    注：只剔除空白和分隔符，不做语义处理；字符排序会让"北京春苗"和"春苗北京"
+    这类字符组成相同的名称产生相同的 key，由调用方决定是否进一步去歧义。
+    """
+    cleaned = name.translate(_COMPANY_NAME_STRIP_CHARS)
     # 字符排序，使"北京春苗"和"春苗北京"得到相同的规范化结果
     return "".join(sorted(cleaned))
 
