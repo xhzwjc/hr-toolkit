@@ -61,3 +61,4 @@ hr_toolkit/*.zip
 ~$*
 .~*
 *.tmp
+.claude/
