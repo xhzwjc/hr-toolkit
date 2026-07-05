@@ -355,6 +355,15 @@ _SUMMARY_ATTENDANCE_LEAVE_FIELDS = (
     "病假", "病假（天）", "病假\n(天)",
 )
 
+# 预编译正则:避免每行调用时重复解析
+_FILENAME_MONTH_PATTERN = re.compile(r"(\d{1,2})\s*月")
+_FILE_PERIOD_RANGE_PATTERN = re.compile(
+    r"([01]?\d)[.月/-]([0-3]?\d)\s*[-—~至]+\s*([01]?\d)[.月/-]([0-3]?\d)"
+)
+_PROJECT_BRACKET_SPLIT_PATTERN = re.compile(r"[/／]")
+_WHITESPACE_PATTERN = re.compile(r"\s+")
+_TIME_HHMM_PATTERN = re.compile(r"([0-2]?\d):([0-5]\d)")
+
 
 def _find_header_row(ws: Worksheet) -> int | None:
     max_col = min(ws.max_column or 0, 80)
@@ -403,13 +412,43 @@ def _is_report_sheet(headers: dict[str, int]) -> bool:
 
 
 def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
+    # 列号外提:循环外一次性解析,循环内只做 ws.cell 访问
+    cols = {name: headers.get(_normalize_header(name)) for name in (
+        "姓名", "日期", "部门名称",
+        "事假", "病假天数", "年假天数",
+        "调休", "加班计调休时长", "旷工天数",
+        "迟到次数", "早退次数", "漏打卡次数",
+        "应出勤小时数", "实出勤小时数",
+        "计划上下班时间", "当日刷卡记录", "缺卡记录",
+    )}
+    name_col = cols["姓名"]
+    day_col = cols["日期"]
+    dept_col = cols["部门名称"]
+    personal_col = cols["事假"]
+    sick_col = cols["病假天数"]
+    paid_col = cols["年假天数"]
+    rest_col = cols["调休"]
+    overtime_col = cols["加班计调休时长"]
+    absence_col = cols["旷工天数"]
+    late_col = cols["迟到次数"]
+    early_col = cols["早退次数"]
+    missing_col = cols["漏打卡次数"]
+    expected_col = cols["应出勤小时数"]
+    actual_col = cols["实出勤小时数"]
+    plan_col = cols["计划上下班时间"]
+    punch_col = cols["当日刷卡记录"]
+    missing_record_col = cols["缺卡记录"]
+
+    def _val(row_index: int, col: int | None):
+        return ws.cell(row_index, col).value if col else None
+
     rows: list[AttendanceSourceRow] = []
     for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
-        name = _cell_text(_header_value(ws, row_index, headers, "姓名"))
-        day = _date_from_value(_header_value(ws, row_index, headers, "日期"))
+        name = _cell_text(_val(row_index, name_col))
+        day = _date_from_value(_val(row_index, day_col))
         if not name or day is None:
             continue
-        department_text = _cell_text(_header_value(ws, row_index, headers, "部门名称"))
+        department_text = _cell_text(_val(row_index, dept_col))
         company, department = _company_department_from_text(department_text)
         rows.append(
             AttendanceSourceRow(
@@ -419,20 +458,20 @@ def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: i
                 company=company,
                 department=department,
                 day=day,
-                personal_leave_days=_to_days(_number(_header_value(ws, row_index, headers, "事假"))),
-                sick_leave_days=_to_days(_number(_header_value(ws, row_index, headers, "病假天数"))),
-                paid_leave_days=_to_days(_number(_header_value(ws, row_index, headers, "年假天数"))),
-                rest_days=_to_days(_number(_header_value(ws, row_index, headers, "调休"))),
-                overtime_days=_to_days(_number(_header_value(ws, row_index, headers, "加班计调休时长"))),
-                absence_days=_number(_header_value(ws, row_index, headers, "旷工天数")),
-                late_count=int(_number(_header_value(ws, row_index, headers, "迟到次数"))),
-                early_count=int(_number(_header_value(ws, row_index, headers, "早退次数"))),
-                missing_punch_count=int(_number(_header_value(ws, row_index, headers, "漏打卡次数"))),
-                expected_hours=_number(_header_value(ws, row_index, headers, "应出勤小时数")),
-                actual_hours=_number(_header_value(ws, row_index, headers, "实出勤小时数")),
-                plan_time=_cell_text(_header_value(ws, row_index, headers, "计划上下班时间")),
-                punch_record=_cell_text(_header_value(ws, row_index, headers, "当日刷卡记录")),
-                missing_record=_cell_text(_header_value(ws, row_index, headers, "缺卡记录")),
+                personal_leave_days=_to_days(_number(_val(row_index, personal_col))),
+                sick_leave_days=_to_days(_number(_val(row_index, sick_col))),
+                paid_leave_days=_to_days(_number(_val(row_index, paid_col))),
+                rest_days=_to_days(_number(_val(row_index, rest_col))),
+                overtime_days=_to_days(_number(_val(row_index, overtime_col))),
+                absence_days=_number(_val(row_index, absence_col)),
+                late_count=int(_number(_val(row_index, late_col))),
+                early_count=int(_number(_val(row_index, early_col))),
+                missing_punch_count=int(_number(_val(row_index, missing_col))),
+                expected_hours=_number(_val(row_index, expected_col)),
+                actual_hours=_number(_val(row_index, actual_col)),
+                plan_time=_cell_text(_val(row_index, plan_col)),
+                punch_record=_cell_text(_val(row_index, punch_col)),
+                missing_record=_cell_text(_val(row_index, missing_record_col)),
             )
         )
     return rows
@@ -440,40 +479,59 @@ def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: i
 
 def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
     """读取汇总格式的考勤表（没有日期列，直接按人汇总）"""
+    # 列号外提:把每组 fallback 候选的列号一次性解析,循环内按 fallback 顺序查第一个非 None
+    def _cols(*names: str) -> tuple[int | None, ...]:
+        return tuple(headers.get(_normalize_header(n)) for n in names)
+
+    name_col = _cols("姓名")[0]
+    company_col = _cols("公司")[0]
+    dept1_col, dept2_col, dept3_col = _cols("部门（片区）", "部门名称", "部门")
+
+    personal_cols = _cols("事假", "事假（天）", "事假\n(天)", "事假\n(小时)")
+    sick_cols = _cols("病假天数", "病假", "病假（天）", "病假\n(天)")
+    paid_cols = _cols("年假天数", "年假", "年假\n（天）", "年假\n(天)", "带薪休假", "带薪休假（天）")
+    rest_cols = _cols("调休", "调休（小时）", "总调休", "总调休\n(小时)", "总调休（小时）")
+    overtime_cols = _cols("加班计调休时长", "当月加班时长", "当月加班（小时）")
+    absence_cols = _cols("旷工天数", "旷工", "旷工（天）")
+    late_cols = _cols("迟到次数", "迟到", "迟到（次）")
+    early_cols = _cols("早退次数", "早退", "早退（次）")
+    missing_cols = _cols("漏打卡次数", "漏打卡", "漏打卡（次）")
+    expected_cols = _cols("应出勤小时数", "应出勤天数")
+    actual_cols = _cols("实出勤小时数", "实际出勤天数")
+
+    def _val(row_index: int, col: int | None):
+        return ws.cell(row_index, col).value if col else None
+
+    def _first_not_none(row_index: int, cols: tuple[int | None, ...]):
+        for col in cols:
+            if col is None:
+                continue
+            v = ws.cell(row_index, col).value
+            if v is not None:
+                return v
+        return None
+
     rows: list[AttendanceSourceRow] = []
     # 从文件名或标题行推断月份
     month = _infer_month_from_filename(file_name)
     default_date = date(date.today().year, month, 1) if month else date.today()
     for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
-        name = _cell_text(_header_value(ws, row_index, headers, "姓名"))
+        name = _cell_text(_val(row_index, name_col))
         if not name:
             continue
         # 跳过表头行（姓名列值为"姓名"等）
         if name in ("姓名", "员工姓名", "人员姓名"):
             continue
         # 获取公司和部门
-        company_text = _cell_text(_header_value(ws, row_index, headers, "公司"))
-        department_text = _cell_text(_header_value(ws, row_index, headers, "部门（片区）"))
+        company_text = _cell_text(_val(row_index, company_col))
+        department_text = _cell_text(_val(row_index, dept1_col))
         if not department_text:
-            department_text = _cell_text(_header_value(ws, row_index, headers, "部门名称"))
+            department_text = _cell_text(_val(row_index, dept2_col))
         if not department_text:
-            department_text = _cell_text(_header_value(ws, row_index, headers, "部门"))
+            department_text = _cell_text(_val(row_index, dept3_col))
         company, department = _company_department_from_text(department_text)
         if company_text:
             company = company_text
-        # 读取各项数据，支持不同的字段名
-        personal_leave = _number(_header_value_any(ws, row_index, headers, ("事假", "事假（天）", "事假\n(天)", "事假\n(小时)")))
-        sick_leave = _number(_header_value_any(ws, row_index, headers, ("病假天数", "病假", "病假（天）", "病假\n(天)")))
-        paid_leave = _number(_header_value_any(ws, row_index, headers, ("年假天数", "年假", "年假\n（天）", "年假\n(天)", "带薪休假", "带薪休假（天）")))
-        rest_days = _number(_header_value_any(ws, row_index, headers, ("调休", "调休（小时）", "总调休", "总调休\n(小时)", "总调休（小时）")))
-        overtime_days = _number(_header_value_any(ws, row_index, headers, ("加班计调休时长", "当月加班时长", "当月加班（小时）")))
-        absence_days = _number(_header_value_any(ws, row_index, headers, ("旷工天数", "旷工", "旷工（天）")))
-        late_count = int(_number(_header_value_any(ws, row_index, headers, ("迟到次数", "迟到", "迟到（次）"))))
-        early_count = int(_number(_header_value_any(ws, row_index, headers, ("早退次数", "早退", "早退（次）"))))
-        missing_punch = int(_number(_header_value_any(ws, row_index, headers, ("漏打卡次数", "漏打卡", "漏打卡（次）"))))
-        # 应出勤和实出勤
-        expected_hours = _number(_header_value_any(ws, row_index, headers, ("应出勤小时数", "应出勤天数")))
-        actual_hours = _number(_header_value_any(ws, row_index, headers, ("实出勤小时数", "实际出勤天数")))
         rows.append(
             AttendanceSourceRow(
                 source_file=file_name,
@@ -482,17 +540,17 @@ def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], heade
                 company=company,
                 department=department,
                 day=default_date,
-                personal_leave_days=_to_days(personal_leave),
-                sick_leave_days=_to_days(sick_leave),
-                paid_leave_days=_to_days(paid_leave),
-                rest_days=_to_days(rest_days),
-                overtime_days=_to_days(overtime_days),
-                absence_days=absence_days,
-                late_count=late_count,
-                early_count=early_count,
-                missing_punch_count=missing_punch,
-                expected_hours=expected_hours,
-                actual_hours=actual_hours,
+                personal_leave_days=_to_days(_number(_first_not_none(row_index, personal_cols))),
+                sick_leave_days=_to_days(_number(_first_not_none(row_index, sick_cols))),
+                paid_leave_days=_to_days(_number(_first_not_none(row_index, paid_cols))),
+                rest_days=_to_days(_number(_first_not_none(row_index, rest_cols))),
+                overtime_days=_to_days(_number(_first_not_none(row_index, overtime_cols))),
+                absence_days=_number(_first_not_none(row_index, absence_cols)),
+                late_count=int(_number(_first_not_none(row_index, late_cols))),
+                early_count=int(_number(_first_not_none(row_index, early_cols))),
+                missing_punch_count=int(_number(_first_not_none(row_index, missing_cols))),
+                expected_hours=_number(_first_not_none(row_index, expected_cols)),
+                actual_hours=_number(_first_not_none(row_index, actual_cols)),
             )
         )
     return rows
@@ -500,7 +558,7 @@ def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], heade
 
 def _infer_month_from_filename(file_name: str) -> int | None:
     """从文件名推断月份"""
-    match = re.search(r"(\d{1,2})\s*月", file_name)
+    match = _FILENAME_MONTH_PATTERN.search(file_name)
     if match:
         month = int(match.group(1))
         if 1 <= month <= 12:
@@ -824,7 +882,7 @@ def _report_range_from_records(records: list[ReportRecord]) -> tuple[date, date]
 
 
 def _range_from_filename(file_name: str, year: int) -> tuple[date, date] | None:
-    match = re.search(r"([01]?\d)[.月/-]([0-3]?\d)\s*[-—~至]+\s*([01]?\d)[.月/-]([0-3]?\d)", file_name)
+    match = _FILE_PERIOD_RANGE_PATTERN.search(file_name)
     if not match:
         return None
     start_month, start_day, end_month, end_day = (int(part) for part in match.groups())
@@ -1268,7 +1326,7 @@ def _report_type_from_name(file_name: str, sheet_name: str) -> str | None:
 def _company_department_from_text(text: str) -> tuple[str, str]:
     if not text:
         return DEFAULT_COMPANY, "未填写"
-    parts = [part.strip() for part in re.split(r"[/／]", text) if part and part.strip()]
+    parts = [part.strip() for part in _PROJECT_BRACKET_SPLIT_PATTERN.split(text) if part and part.strip()]
     department = parts[-1] if parts else text
     return DEFAULT_COMPANY, department
 
@@ -1289,7 +1347,7 @@ def _header_value_any(ws: Worksheet, row_index: int, headers: dict[str, int], ca
 
 
 def _normalize_header(value: Any) -> str:
-    return re.sub(r"\s+", "", _cell_text(value))
+    return _WHITESPACE_PATTERN.sub("", _cell_text(value))
 
 
 def _cell_text(value: Any) -> str:
@@ -1366,7 +1424,7 @@ def _datetime_from_value(value: Any) -> datetime | None:
 
 
 def _first_time_in_text(text: str) -> time | None:
-    match = re.search(r"([0-2]?\d):([0-5]\d)", text)
+    match = _TIME_HHMM_PATTERN.search(text)
     if not match:
         return None
     hour, minute = (int(part) for part in match.groups())

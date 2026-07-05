@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 import re
+
+
+# 预编译正则
+_PERIOD_FROM_FILENAME = re.compile(r"(20\d{2})[-年._ ]?([01]?\d)")
+_PERIOD_FROM_TEXT = re.compile(r"(20\d{2})[-年/. ]?([01]?\d)")
+_FILENAME_HAS_PERIOD = re.compile(r"^\d{4}[-年._ ]?[01]?\d")
+_FILENAME_STRIP_PERIOD = re.compile(r"20\d{2}.*")
+_BRACKET_CONTENT = re.compile(r"[（(]([^（）()]+)[）)]")
+_SHEET_TITLE_INVALID = re.compile(r"[:\\/?*\[\]]")
+_FILENAME_INVALID = re.compile(r"[\\/:*?\"<>|]")
+_HEADER_WHITESPACE = re.compile(r"\s+")
 import shutil
 import tempfile
 import zipfile
@@ -1217,7 +1228,7 @@ def _source_name_candidates(file_path: Path) -> list[str]:
 
 
 def _period_from_filename(file_name: str) -> str | None:
-    match = re.search(r"(20\d{2})[-年._ ]?([01]?\d)", file_name)
+    match = _PERIOD_FROM_FILENAME.search(file_name)
     if not match:
         return None
     year = int(match.group(1))
@@ -1238,7 +1249,7 @@ def _period_from_value(value: Any) -> str | None:
     text = _cell_text(value)
     if not text:
         return None
-    match = re.search(r"(20\d{2})[-年/. ]?([01]?\d)", text)
+    match = _PERIOD_FROM_TEXT.search(text)
     if match:
         year = int(match.group(1))
         month = int(match.group(2))
@@ -1251,11 +1262,11 @@ def _account_hint_from_filename(file_name: str) -> str:
     known = _known_account_hint(file_name)
     if known:
         return known
-    if re.search(r"^\d{4}[-年._ ]?[01]?\d", file_name):
+    if _FILENAME_HAS_PERIOD.search(file_name):
         return ""
     if any(keyword in file_name for keyword in SOCIAL_CATEGORIES):
         return ""
-    cleaned = re.sub(r"20\d{2}.*", "", file_name).strip(" -_")
+    cleaned = _FILENAME_STRIP_PERIOD.sub("", file_name).strip(" -_")
     return cleaned
 
 
@@ -1302,7 +1313,7 @@ def _insured_place(account: str) -> str:
 
 def _project_display(project: str, cost_center: str, department: str) -> str:
     if project:
-        bracket_match = re.search(r"[（(]([^（）()]+)[）)]", project)
+        bracket_match = _BRACKET_CONTENT.search(project)
         if bracket_match:
             return bracket_match.group(1).strip()
         return project
@@ -1393,7 +1404,7 @@ def _cell_ref(col_index: int, row_index: int) -> str:
 
 
 def _safe_sheet_title(title: str, existing_titles: list[str]) -> str:
-    cleaned = re.sub(r"[:\\/?*\[\]]", "_", title).strip()[:31] or "未命名"
+    cleaned = _SHEET_TITLE_INVALID.sub("_", title).strip()[:31] or "未命名"
     if cleaned not in existing_titles:
         return cleaned
     base = cleaned[:28]
@@ -1412,12 +1423,12 @@ def _detail_group_name(record: DetailRecord) -> str:
 
 
 def _safe_file_stem(name: str) -> str:
-    cleaned = re.sub(r"[\\/:*?\"<>|]", "_", name).strip()
+    cleaned = _FILENAME_INVALID.sub("_", name).strip()
     return cleaned or "未命名"
 
 
 def _normalize_header(value: Any) -> str:
-    return re.sub(r"\s+", "", _cell_text(value))
+    return _HEADER_WHITESPACE.sub("", _cell_text(value))
 
 
 def _normalize_id_card(value: Any) -> str:
@@ -1425,7 +1436,7 @@ def _normalize_id_card(value: Any) -> str:
 
 
 def _normalize_name(value: Any) -> str:
-    return re.sub(r"\s+", "", _cell_text(value))
+    return _HEADER_WHITESPACE.sub("", _cell_text(value))
 
 
 def _cell_text(value: Any) -> str:

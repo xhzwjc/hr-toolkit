@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import re
+
+
+# 预编译正则
+_PERIOD_FROM_TEXT_YEAR_MONTH = re.compile(r"(20\d{2})[年/\-. ]+([01]?\d)月?")
+_PERIOD_FROM_TEXT_MONTH_ONLY = re.compile(r"([01]?\d)月")
+_PERIOD_FROM_TEXT_YEAR_ONLY = re.compile(r"(20\d{2})年")
+_PERIOD_FROM_CELL_PATTERN = re.compile(r"(20\d{2})年?([01]?\d)月")
+_HEADER_WHITESPACE = re.compile(r"\s+")
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
@@ -998,13 +1006,13 @@ def _period_from_value(value: Any, fallback_period: str | None = None) -> str | 
         except Exception:
             return None
     text = _cell_text(value)
-    match = re.search(r"(20\d{2})[年/\-. ]+([01]?\d)月?", text)
+    match = _PERIOD_FROM_TEXT_YEAR_MONTH.search(text)
     if match:
         year, month = match.groups()
         return f"{year}年{int(month)}月"
-    match = re.search(r"([01]?\d)月", text)
+    match = _PERIOD_FROM_TEXT_MONTH_ONLY.search(text)
     if match and fallback_period:
-        year_match = re.search(r"(20\d{2})年", fallback_period)
+        year_match = _PERIOD_FROM_TEXT_YEAR_ONLY.search(fallback_period)
         if year_match:
             return f"{year_match.group(1)}年{int(match.group(1))}月"
     return None
@@ -1067,7 +1075,7 @@ def _detect_summary_period(path: Path) -> str | None:
                 for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row or 1, 3), values_only=True):
                     for value in row:
                         if isinstance(value, str):
-                            match = re.search(r"(20\d{2})年?([01]?\d)月", value)
+                            match = _PERIOD_FROM_CELL_PATTERN.search(value)
                             if match:
                                 year, month = match.groups()
                                 return f"{year}年{int(month)}月"
@@ -1093,8 +1101,8 @@ def _update_period_titles(workbook, period: str | None) -> None:
         ws = workbook[sheet_name]
         value = ws.cell(1, 1).value
         if isinstance(value, str):
-            if re.search(r"20\d{2}年[01]?\d月", value):
-                ws.cell(1, 1).value = re.sub(r"20\d{2}年[01]?\d月", period, value, count=1)
+            if _PERIOD_FROM_CELL_PATTERN.search(value):
+                ws.cell(1, 1).value = _PERIOD_FROM_CELL_PATTERN.sub(period, value, count=1)
             elif value:
                 ws.cell(1, 1).value = f"{period}{value}"
 
@@ -1315,7 +1323,7 @@ def _header_by_column(headers: dict[str, int], col_index: int) -> str | None:
 
 
 def _normalize_header(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "").strip())
+    return _HEADER_WHITESPACE.sub("", str(value or "").strip())
 
 
 def _normalize_id_card(value: Any) -> str:

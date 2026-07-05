@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import re
+
+
+# 预编译正则
+_POLICY_NO_PATTERN = re.compile(r"(?:保单号码|保险单号)\s*[:：]?\s*([A-Z0-9]{10,})")
+_FILENAME_POLICY_PATTERN = re.compile(r"([A-Z]{3,}[A-Z0-9]{8,})")
+_HEADER_WHITESPACE = re.compile(r"\s+")
+_ID_CARD_STRIP_PATTERN = re.compile(r"[^0-9.\-]")
 import shutil
 import tempfile
 import zipfile
@@ -419,10 +426,10 @@ def _find_policy_no(ws: Worksheet, file_path: Path) -> str:
     for row_index in range(1, min(ws.max_row or 0, 15) + 1):
         for col_index in range(1, min(ws.max_column or 0, 30) + 1):
             text = _cell_text(ws.cell(row_index, col_index).value)
-            match = re.search(r"(?:保单号码|保险单号)\s*[:：]?\s*([A-Z0-9]{10,})", text.replace("\xa0", " "))
+            match = _POLICY_NO_PATTERN.search(text.replace("\xa0", " "))
             if match:
                 return match.group(1)
-    match = re.search(r"([A-Z]{3,}[A-Z0-9]{8,})", file_path.stem.upper())
+    match = _FILENAME_POLICY_PATTERN.search(file_path.stem.upper())
     return match.group(1) if match else file_path.stem
 
 
@@ -716,7 +723,7 @@ def _first_header_col(headers: dict[str, int], candidates: tuple[str, ...]) -> i
 
 
 def _normalize_header(value: Any) -> str:
-    return re.sub(r"\s+", "", _cell_text(value).replace("\xa0", ""))
+    return _HEADER_WHITESPACE.sub("", _cell_text(value).replace("\xa0", ""))
 
 
 def _cell_text(value: Any) -> str:
@@ -729,7 +736,7 @@ def _cell_text(value: Any) -> str:
 
 def _normalize_id_card(value: Any) -> str:
     text = _cell_text(value)
-    text = re.sub(r"\s+", "", text).replace("'", "").upper()
+    text = _HEADER_WHITESPACE.sub("", text).replace("'", "").upper()
     if text.endswith(".0"):
         text = text[:-2]
     return text
@@ -742,7 +749,7 @@ def _to_number(value: Any) -> float:
         return float(value)
     text = _cell_text(value)
     text = text.replace(",", "").replace("，", "")
-    text = re.sub(r"[^0-9.\-]", "", text)
+    text = _ID_CARD_STRIP_PATTERN.sub("", text)
     try:
         return float(text)
     except ValueError:

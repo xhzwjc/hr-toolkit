@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import re
+
+
+# 预编译正则
+_PERIOD_COMPACT = re.compile(r"(20\d{2})\D{0,3}([01]?\d)")
+_PERIOD_PLAIN = re.compile(r"(20\d{2})([01]\d)")
 import tempfile
 import zipfile
 from collections import OrderedDict
@@ -349,14 +354,14 @@ def _detect_month(file_path: Path) -> str:
 
 
 def _month_from_text(text: str) -> str | None:
-    compact = re.search(r"(20\d{2})\D{0,3}([01]?\d)", text)
+    compact = _PERIOD_COMPACT.search(text)
     if compact:
         year = int(compact.group(1))
         month = int(compact.group(2))
         if 1 <= month <= 12:
             return f"{year}{month:02d}"
 
-    plain = re.search(r"(20\d{2})([01]\d)", text)
+    plain = _PERIOD_PLAIN.search(text)
     if plain:
         year = int(plain.group(1))
         month = int(plain.group(2))

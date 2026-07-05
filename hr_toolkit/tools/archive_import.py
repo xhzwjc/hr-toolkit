@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import re
+
+
+# 预编译正则
+_SHEET_TITLE_INVALID = re.compile(r"[:\\/?*\[\]]")
+_COMPANY_FILE_INVALID = re.compile(r'[<>:"/\\|?*\r\n]+')
+_HEADER_WHITESPACE = re.compile(r"\s+")
+
 import shutil
 import tempfile
 import zipfile
@@ -1091,7 +1098,7 @@ def _is_placeholder_sheet_title(title: str) -> bool:
 
 
 def _safe_filename(name: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\r\n]+', "_", name).strip()
+    cleaned = _COMPANY_FILE_INVALID.sub("_", name).strip()
     return cleaned or "未命名公司"
 
 
@@ -1140,7 +1147,7 @@ def _normalize_company_name(name: str) -> str:
 
 
 def _normalize_header(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "").strip())
+    return _HEADER_WHITESPACE.sub("", str(value or "").strip())
 
 
 def _is_instruction_row(ws: Worksheet, row_index: int) -> bool:
