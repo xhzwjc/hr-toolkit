@@ -93,6 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选周报统计结束日期（如 2026-06-30）；需与 --week-start 同时使用",
     )
     data_statistics.add_argument(
+        "--remark-unit",
+        choices=["day", "hour"],
+        default="day",
+        help="考勤统计表备注中加班/调休的单位：day 按天（默认），hour 按小时",
+    )
+    data_statistics.add_argument(
         "--dry-run",
         action="store_true",
         help="只识别记录，不生成 Excel 文件",
@@ -436,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             report_staff_path=args.staff,
             week_start=args.week_start,
             week_end=args.week_end,
+            remark_unit=args.remark_unit,
             dry_run=args.dry_run,
         )
         payload = result.to_dict()

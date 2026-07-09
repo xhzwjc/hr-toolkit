@@ -434,6 +434,8 @@ class HRToolkitApp:
         self.summary_path = StringVar()
         self.stats_week_start = StringVar()
         self.stats_week_end = StringVar()
+        # 考勤统计表备注中加班/调休的展示单位：day 按天（默认）/ hour 按小时
+        self.stats_remark_unit = StringVar(value="day")
         self.output_dir = StringVar(value=str(default_output_parent_dir(self.current_tool)))
         self.output_dir_user_selected = False
         self.change_input_paths: list[Path] | None = None
@@ -623,6 +625,8 @@ class HRToolkitApp:
         style.configure("Rename.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
         style.configure("Rename.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("App.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
+        style.configure("App.TRadiobutton", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
+        style.map("App.TRadiobutton", background=[("active", COLOR_SURFACE)])
         style.configure(
             "App.TEntry",
             fieldbackground=COLOR_SURFACE,
@@ -1330,6 +1334,28 @@ class HRToolkitApp:
                 height=28,
             )
             button.pack(side=LEFT, padx=self._pad(0, 8))
+        stats_remark_unit_row = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        stats_remark_unit_row.pack(side="top", fill="x", pady=self._pad(8, 0))
+        ttk.Label(stats_remark_unit_row, text="备注加班/调休单位", style="App.TLabel").pack(side=LEFT)
+        ttk.Radiobutton(
+            stats_remark_unit_row,
+            text="按天",
+            value="day",
+            variable=self.stats_remark_unit,
+            style="App.TRadiobutton",
+        ).pack(side=LEFT, padx=self._pad(12, 0))
+        ttk.Radiobutton(
+            stats_remark_unit_row,
+            text="按小时",
+            value="hour",
+            variable=self.stats_remark_unit,
+            style="App.TRadiobutton",
+        ).pack(side=LEFT, padx=self._pad(8, 0))
+        ttk.Label(
+            stats_remark_unit_row,
+            text="仅影响考勤统计表备注中加班/调休的显示",
+            style="App.TLabel",
+        ).pack(side=LEFT, padx=self._pad(10, 0))
 
         def _refresh_picker_button_bar(button_bar) -> None:
             visible_buttons = [child for child in button_bar.winfo_children() if getattr(child, "_hr_picker_visible", False)]
@@ -3080,6 +3106,7 @@ class HRToolkitApp:
             report_staff_path=staff_path,
             week_start=None if week_range is None else week_range[0],
             week_end=None if week_range is None else week_range[1],
+            remark_unit=self.stats_remark_unit.get() or "day",
         )
 
     def _run_insurance_ledger(self) -> None:

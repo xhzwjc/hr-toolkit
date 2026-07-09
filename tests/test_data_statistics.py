@@ -288,6 +288,65 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertEqual(result.attendance_source_count, 2000)
             self.assertLess(elapsed, 20, f"2000 行考勤耗时 {elapsed:.1f}s，疑似退化为逐格重复解析")
 
+    def test_remark_unit_hour_only_changes_overtime_and_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_attendance_file(input_dir / "考勤结果.xlsx")
+
+            day_result = generate_data_statistics_reports(input_dir, root / "out_day", remark_unit="day")
+            hour_result = generate_data_statistics_reports(input_dir, root / "out_hour", remark_unit="hour")
+
+            day_wb = load_workbook(day_result.output_file)
+            hour_wb = load_workbook(hour_result.output_file)
+            day_ws = day_wb["考勤统计"]
+            hour_ws = hour_wb["考勤统计"]
+            day_remark = day_ws.cell(3, 17).value
+            hour_remark = hour_ws.cell(3, 17).value
+
+            # 源表 4.15 加班计调休时长=3.5、4.18 调休=3.5（小时）
+            self.assertIn("4.15晚上加班0.5天", day_remark)
+            self.assertIn("4.18上午调休0.5天", day_remark)
+            self.assertIn("4.15晚上加班3.5小时", hour_remark)
+            self.assertIn("4.18上午调休3.5小时", hour_remark)
+            # 除加班/调休两处外，备注其余内容与按天完全一致
+            self.assertEqual(
+                hour_remark.replace("晚上加班3.5小时", "晚上加班0.5天").replace("上午调休3.5小时", "上午调休0.5天"),
+                day_remark,
+            )
+            # 备注之外的所有列不受单位影响
+            for row in range(3, 4):
+                for col in range(1, 17):
+                    self.assertEqual(day_ws.cell(row, col).value, hour_ws.cell(row, col).value)
+            day_wb.close()
+            hour_wb.close()
+
+    def test_remark_unit_defaults_to_day(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_attendance_file(input_dir / "考勤结果.xlsx")
+
+            default_result = generate_data_statistics_reports(input_dir, root / "out_default")
+            self.assertEqual(default_result.remark_unit, "day")
+
+            wb = load_workbook(default_result.output_file)
+            remark = wb["考勤统计"].cell(3, 17).value
+            self.assertIn("4.15晚上加班0.5天", remark)
+            self.assertIn("4.18上午调休0.5天", remark)
+            wb.close()
+
+    def test_remark_unit_rejects_unknown_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_attendance_file(input_dir / "考勤结果.xlsx")
+            with self.assertRaises(ValueError):
+                generate_data_statistics_reports(input_dir, root / "out", remark_unit="week")
+
     def test_generate_from_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -27,6 +27,11 @@ OUTPUT_FILENAME = "考勤周月报汇总表.xlsx"
 STANDARD_HOURS_PER_DAY = 7
 DEFAULT_COMPANY = "总部"
 
+# 考勤统计表备注中加班/调休的展示单位
+REMARK_UNIT_DAY = "day"
+REMARK_UNIT_HOUR = "hour"
+_VALID_REMARK_UNITS = (REMARK_UNIT_DAY, REMARK_UNIT_HOUR)
+
 
 @dataclass
 class AttendanceSourceRow:
@@ -41,6 +46,10 @@ class AttendanceSourceRow:
     paid_leave_days: float = 0.0
     rest_days: float = 0.0
     overtime_days: float = 0.0
+    # 与 rest_days/overtime_days 来自同一单元格，换算为小时后的数值，
+    # 供"按小时"备注展示使用（避免从天数反算引入舍入误差）
+    rest_hours: float = 0.0
+    overtime_hours: float = 0.0
     absence_days: float = 0.0
     late_count: int = 0
     early_count: int = 0
@@ -144,6 +153,7 @@ class DataStatisticsResult:
     report_staff_path: Path | None = None
     week_range_start: date | None = None
     week_range_end: date | None = None
+    remark_unit: str = REMARK_UNIT_DAY
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -166,6 +176,7 @@ class DataStatisticsResult:
             "report_staff_path": None if self.report_staff_path is None else str(self.report_staff_path),
             "week_range_start": None if self.week_range_start is None else self.week_range_start.isoformat(),
             "week_range_end": None if self.week_range_end is None else self.week_range_end.isoformat(),
+            "remark_unit": self.remark_unit,
             "warnings": self.warnings,
         }
 
@@ -177,8 +188,11 @@ def generate_data_statistics_reports(
     report_staff_path: str | Path | None = None,
     week_start: date | str | None = None,
     week_end: date | str | None = None,
+    remark_unit: str = REMARK_UNIT_DAY,
     dry_run: bool = False,
 ) -> DataStatisticsResult:
+    if remark_unit not in _VALID_REMARK_UNITS:
+        raise ValueError("备注单位只支持 day（按天）或 hour（按小时）。")
     input_paths = _normalize_input_paths(input_path)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     output = Path(output_dir).expanduser().resolve()
@@ -217,7 +231,7 @@ def generate_data_statistics_reports(
         if not attendance_rows and not weekly_records and not monthly_records:
             raise ValueError("未识别到考勤结果、周报记录或月报记录，请确认文件格式。")
 
-        attendance_summaries, attendance_exceptions = _summarize_attendance(attendance_rows)
+        attendance_summaries, attendance_exceptions = _summarize_attendance(attendance_rows, remark_unit)
         report_summaries, report_exceptions, report_warnings = _summarize_reports(
             weekly_records,
             monthly_records,
@@ -242,6 +256,7 @@ def generate_data_statistics_reports(
             report_staff_path=staff_path,
             week_range_start=None if week_range is None else week_range[0],
             week_range_end=None if week_range is None else week_range[1],
+            remark_unit=remark_unit,
             warnings=warnings,
         )
         if dry_run:
@@ -473,6 +488,8 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
             continue
         department_text = _cell_text(_val(row_index, dept_col))
         company, department = _company_department_from_text(department_text)
+        rest_raw = _number(_val(row_index, rest_col))
+        overtime_raw = _number(_val(row_index, overtime_col))
         rows.append(
             AttendanceSourceRow(
                 source_file=file_name,
@@ -484,8 +501,10 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
                 personal_leave_days=_to_days(_number(_val(row_index, personal_col))),
                 sick_leave_days=_to_days(_number(_val(row_index, sick_col))),
                 paid_leave_days=_to_days(_number(_val(row_index, paid_col))),
-                rest_days=_to_days(_number(_val(row_index, rest_col))),
-                overtime_days=_to_days(_number(_val(row_index, overtime_col))),
+                rest_days=_to_days(rest_raw),
+                overtime_days=_to_days(overtime_raw),
+                rest_hours=_to_hours(rest_raw),
+                overtime_hours=_to_hours(overtime_raw),
                 absence_days=_number(_val(row_index, absence_col)),
                 late_count=int(_number(_val(row_index, late_col))),
                 early_count=int(_number(_val(row_index, early_col))),
@@ -555,6 +574,8 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
         company, department = _company_department_from_text(department_text)
         if company_text:
             company = company_text
+        rest_raw = _number(_first_not_none(row_index, rest_cols))
+        overtime_raw = _number(_first_not_none(row_index, overtime_cols))
         rows.append(
             AttendanceSourceRow(
                 source_file=file_name,
@@ -566,8 +587,10 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
                 personal_leave_days=_to_days(_number(_first_not_none(row_index, personal_cols))),
                 sick_leave_days=_to_days(_number(_first_not_none(row_index, sick_cols))),
                 paid_leave_days=_to_days(_number(_first_not_none(row_index, paid_cols))),
-                rest_days=_to_days(_number(_first_not_none(row_index, rest_cols))),
-                overtime_days=_to_days(_number(_first_not_none(row_index, overtime_cols))),
+                rest_days=_to_days(rest_raw),
+                overtime_days=_to_days(overtime_raw),
+                rest_hours=_to_hours(rest_raw),
+                overtime_hours=_to_hours(overtime_raw),
                 absence_days=_number(_first_not_none(row_index, absence_cols)),
                 late_count=int(_number(_first_not_none(row_index, late_cols))),
                 early_count=int(_number(_first_not_none(row_index, early_cols))),
@@ -663,7 +686,10 @@ def _find_expected_reporter_header_row(grid: SheetGrid) -> int | None:
     return None
 
 
-def _summarize_attendance(rows: list[AttendanceSourceRow]) -> tuple[list[AttendancePersonSummary], list[AttendanceException]]:
+def _summarize_attendance(
+    rows: list[AttendanceSourceRow],
+    remark_unit: str = REMARK_UNIT_DAY,
+) -> tuple[list[AttendancePersonSummary], list[AttendanceException]]:
     summaries: OrderedDict[tuple[str, str, str], AttendancePersonSummary] = OrderedDict()
     exceptions: list[AttendanceException] = []
     for row in rows:
@@ -678,7 +704,7 @@ def _summarize_attendance(rows: list[AttendanceSourceRow]) -> tuple[list[Attenda
         summary.late_early_count += row.late_count + row.early_count
         summary.missing_punch_count += row.missing_punch_count
 
-        remarks = _attendance_row_remarks(row)
+        remarks = _attendance_row_remarks(row, remark_unit)
         if remarks:
             summary.remarks.append(f"{row.day.month}.{row.day.day}" + "、".join(remarks))
         for exception_type, value, remark in _attendance_row_exceptions(row):
@@ -697,13 +723,21 @@ def _summarize_attendance(rows: list[AttendanceSourceRow]) -> tuple[list[Attenda
     return list(summaries.values()), exceptions
 
 
-def _attendance_row_remarks(row: AttendanceSourceRow) -> list[str]:
+def _attendance_row_remarks(row: AttendanceSourceRow, remark_unit: str = REMARK_UNIT_DAY) -> list[str]:
+    # 只有加班和调休支持按小时展示，其余备注内容不受单位影响
+    by_hour = remark_unit == REMARK_UNIT_HOUR
     remarks: list[str] = []
     if row.overtime_days:
-        remarks.append(f"晚上加班{_format_number(row.overtime_days)}天")
+        if by_hour:
+            remarks.append(f"晚上加班{_format_number(row.overtime_hours)}小时")
+        else:
+            remarks.append(f"晚上加班{_format_number(row.overtime_days)}天")
     if row.rest_days:
         prefix = "上午" if row.expected_hours and row.expected_hours <= 3.5 and row.actual_hours == 0 else ""
-        remarks.append(f"{prefix}调休{_format_number(row.rest_days)}天")
+        if by_hour:
+            remarks.append(f"{prefix}调休{_format_number(row.rest_hours)}小时")
+        else:
+            remarks.append(f"{prefix}调休{_format_number(row.rest_days)}天")
     if row.personal_leave_days:
         remarks.append(f"事假{_format_number(row.personal_leave_days)}天")
     if row.sick_leave_days:
@@ -1434,6 +1468,15 @@ def _to_days(value: float) -> float:
     if abs(value) <= 1:
         return round(value, 2)
     return round(value / STANDARD_HOURS_PER_DAY, 2)
+
+
+def _to_hours(value: float) -> float:
+    """与 _to_days 相同的启发式：不超过 1 的按天记录换算为小时，其余视为小时原样保留。"""
+    if not value:
+        return 0.0
+    if abs(value) <= 1:
+        return round(value * STANDARD_HOURS_PER_DAY, 2)
+    return round(value, 2)
 
 
 def _date_from_value(value: Any) -> date | None:
