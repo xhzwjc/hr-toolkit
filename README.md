@@ -484,6 +484,12 @@ http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 
 更新失败时，程序会在 `HRToolkit` 文件夹同级目录写入 `HRToolkit_update.log`。这个日志会记录下载包路径、解压目录、备份目录、替换步骤和具体错误，方便直接定位是哪一步失败。
 
+## 运行日志
+
+程序在 `HRToolkit_update.log` 同一位置写入 `HRToolkit_app.log`（开发环境写到当前目录，可用环境变量 `HR_TOOLKIT_APP_LOG` 指定路径）。远程排查问题时，让使用者把这两个日志文件发过来即可。
+
+记录内容：程序启动（版本号）、每次工具运行的开始（工具名、输入文件名和大小、参数）、完成（耗时、提醒条数）、失败（耗时和完整错误堆栈）、用户手动停止，以及界面和后台线程的未捕获异常。**只记录文件名和统计数字，不记录任何表格内容**（身份证、工资等敏感数据不会进日志），日志文件可以放心外发。日志超过 1MB 时自动截断，只保留最近的内容。
+
 发布步骤推荐使用一键脚本。脚本会自动递增版本号、打包、计算 SHA256，并生成服务器静态目录，不需要手动改 `latest.json`。默认发布为强制更新；追加 `--optional` 参数可发布为可选更新（客户端出现“稍后再说”按钮）。
 
 应用图标（窗口/任务栏/exe）由 `scripts/generate_app_icons.py` 生成：品牌绿圆角方块加白色 “HR” 字标，与侧栏标识一致。调整图标改脚本后运行 `python scripts/generate_app_icons.py` 重新生成 `hr_toolkit/_icon_data.py` 与 `packaging/windows/HRToolkit.ico`。

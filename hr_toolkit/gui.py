@@ -14,7 +14,7 @@ from tkinter import Tk, StringVar, Text
 from tkinter import font as tkfont
 from tkinter import ttk
 
-from hr_toolkit import __version__
+from hr_toolkit import __version__, runlog
 from hr_toolkit.app_update import (
     UpdateInfo,
     check_for_update,
@@ -68,6 +68,7 @@ TOOL_NAV_ITEMS = (
     ("archive_import", "07  档案入库"),
     ("folder_rename", "08  文件夹改名"),
 )
+TOOL_LOG_LABELS = {tool_id: label.split("  ", 1)[-1] for tool_id, label in TOOL_NAV_ITEMS}
 
 # Clean HR operations workspace palette. It mirrors the reference mockup:
 # white sidebar, soft gray workspace, green action color, and low-contrast
@@ -455,6 +456,10 @@ class HRToolkitApp:
         self._tool_running = False
         self._idle_run_button_text = ""
 
+        runlog.log_line(f"{APP_DISPLAY_NAME} v{__version__} 启动（{sys.platform}）")
+        # 界面回调里的异常默认只打到不存在的控制台，改为写入运行日志
+        self.root.report_callback_exception = self._on_tk_callback_exception
+
         self._apply_app_icon()
         self._configure_style()
         self._set_tool_texts()
@@ -464,6 +469,12 @@ class HRToolkitApp:
         self.root.after(600, self._check_updates_on_startup)
         # 清理历史更新遗留的临时文件（下载包、解压目录），后台低优先执行
         threading.Thread(target=cleanup_stale_update_files, daemon=True).start()
+
+    def _on_tk_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
+        runlog.log_exception("界面异常", exc_value, exc_tb)
+        import traceback as traceback_module
+
+        traceback_module.print_exception(exc_type, exc_value, exc_tb)
 
     def _apply_app_icon(self) -> None:
         # 替换标题栏/任务栏默认的 Tk 羽毛图标；iconphoto(True, ...) 会同时
@@ -3321,16 +3332,32 @@ class HRToolkitApp:
         self._tool_run_token += 1
         self._finish_tool_run()
         self._write_log("已停止本次生成。")
+        runlog.log_line(f"用户停止了 {self._tool_log_label()}。")
+
+    def _tool_log_label(self) -> str:
+        if self.current_tool == "personnel_change_merge" and self.change_mode == "roster":
+            return "花名册更新"
+        if self.current_tool == "archive_import" and self.archive_mode == "export":
+            return "档案表生成"
+        return TOOL_LOG_LABELS.get(self.current_tool, self.current_tool)
 
     def _start_tool_worker(self, tool_func, /, *args, **kwargs) -> None:
         token = self._tool_run_token
+        label = self._tool_log_label()
+        details = runlog.describe_call(args, kwargs)
+        runlog.log_line(f"开始 {label}：{details}" if details else f"开始 {label}")
 
         def worker() -> None:
+            start = time.monotonic()
             try:
                 result = tool_func(*args, **kwargs)
             except Exception as exc:
+                runlog.log_exception(f"{label} 失败，耗时 {time.monotonic() - start:.1f} 秒", exc)
                 self.status_queue.put(("error", token, exc))
                 return
+            warnings = getattr(result, "warnings", None)
+            warn_text = f"，提醒 {len(warnings)} 条" if warnings else ""
+            runlog.log_line(f"完成 {label}，耗时 {time.monotonic() - start:.1f} 秒{warn_text}")
             self.status_queue.put(("success", token, result))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -3682,7 +3709,31 @@ def _enable_high_dpi_rendering() -> None:
 
 
 def main() -> None:
+    _install_crash_logging()
     _enable_high_dpi_rendering()
     root = Tk()
     HRToolkitApp(root)
     root.mainloop()
+
+
+def _install_crash_logging() -> None:
+    """把没被捕获的异常写进运行日志。
+
+    打包后的 --windowed 程序没有控制台，未捕获异常会无声消失，
+    这是 HR 电脑上"程序突然不见了"却查无线索的根源。"""
+    default_excepthook = sys.excepthook
+
+    def log_and_delegate(exc_type, exc_value, exc_tb):
+        runlog.log_exception("程序异常退出", exc_value, exc_tb)
+        default_excepthook(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = log_and_delegate
+
+    default_thread_hook = threading.excepthook
+
+    def log_thread_exception(args) -> None:
+        if args.exc_value is not None:
+            runlog.log_exception(f"后台线程异常（{args.thread.name if args.thread else '未知'}）", args.exc_value, args.exc_traceback)
+        default_thread_hook(args)
+
+    threading.excepthook = log_thread_exception
