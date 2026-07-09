@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import calendar
 import os
 import queue
 import subprocess
 import sys
 import threading
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, DoubleVar, Frame, Label, Toplevel, filedialog, messagebox
 from tkinter import Tk, StringVar, Text
@@ -31,7 +32,7 @@ from hr_toolkit.tools.folder_rename import (
     FILE_TYPE_DOCUMENT,
 )
 from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
-from hr_toolkit.tools.data_statistics import generate_data_statistics_reports
+from hr_toolkit.tools.data_statistics import generate_data_statistics_reports, resolve_week_range
 from hr_toolkit.tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from hr_toolkit.tools.insurance_ledger import generate_insurance_ledger
 from hr_toolkit.tools.salary_merge import merge_monthly_salary
@@ -425,6 +426,8 @@ class HRToolkitApp:
         self.rename_file_type = StringVar(value="文件夹")
         self.input_path = StringVar()
         self.summary_path = StringVar()
+        self.stats_week_start = StringVar()
+        self.stats_week_end = StringVar()
         self.output_dir = StringVar(value=str(default_output_parent_dir(self.current_tool)))
         self.output_dir_user_selected = False
         self.change_input_paths: list[Path] | None = None
@@ -1149,6 +1152,7 @@ class HRToolkitApp:
         self._summary_row_visible = True
         self._output_row_visible = True
         self._rename_row_visible = True
+        self._stats_range_row_visible = True
         self._form_rows = {}
 
         def make_input_row(row_key: str, row_index: int, label_text, value_var: StringVar, command) -> tuple[ttk.Label, ttk.Frame, CodexButton]:
@@ -1264,6 +1268,29 @@ class HRToolkitApp:
 
         self.rename_options_frame.columnconfigure(1, weight=1)
 
+        self.stats_range_label = ttk.Label(form, text="周报统计日期（可选）", style="App.TLabel")
+        self.stats_range_frame = ttk.Frame(form, style="InputWrap.TFrame")
+        stats_range_inputs = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        stats_range_inputs.pack(side="top", fill="x")
+        self.stats_week_start_entry = ttk.Entry(stats_range_inputs, textvariable=self.stats_week_start, width=12, style="App.TEntry")
+        self.stats_week_start_entry.pack(side=LEFT)
+        ttk.Label(stats_range_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
+        self.stats_week_end_entry = ttk.Entry(stats_range_inputs, textvariable=self.stats_week_end, width=12, style="App.TEntry")
+        self.stats_week_end_entry.pack(side=LEFT)
+        ttk.Label(stats_range_inputs, text="如 2026-06-02，留空按整月统计", style="App.TLabel").pack(side=LEFT, padx=self._pad(10, 0))
+        stats_range_presets = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        stats_range_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        for preset_text, preset_key in (("本月", "this_month"), ("上月", "last_month"), ("本周", "this_week"), ("上周", "last_week"), ("清空", "clear")):
+            button = CodexButton(
+                stats_range_presets,
+                text=preset_text,
+                command=lambda key=preset_key: self._fill_stats_week_range(key),
+                width=56,
+                min_width=56,
+                height=28,
+            )
+            button.pack(side=LEFT, padx=self._pad(0, 8))
+
         def _refresh_picker_button_bar(button_bar) -> None:
             visible_buttons = [child for child in button_bar.winfo_children() if getattr(child, "_hr_picker_visible", False)]
             for child in button_bar.winfo_children():
@@ -1344,6 +1371,18 @@ class HRToolkitApp:
             else:
                 self.rename_options_frame.grid_remove()
 
+            if self._stats_range_row_visible:
+                if self._form_compact_layout:
+                    base_row = len(visible_keys) * 2
+                    self.stats_range_label.grid(row=base_row, column=0, columnspan=2, sticky="w", padx=0, pady=self._pad(4, 2))
+                    self.stats_range_frame.grid(row=base_row + 1, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8))
+                else:
+                    self.stats_range_label.grid(row=4, column=0, sticky="w", padx=0, pady=self._px(7))
+                    self.stats_range_frame.grid(row=4, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7))
+            else:
+                self.stats_range_label.grid_remove()
+                self.stats_range_frame.grid_remove()
+
             if hasattr(self, "_sync_right_canvas_window"):
                 self.root.after_idle(self._sync_right_canvas_window)
 
@@ -1375,6 +1414,7 @@ class HRToolkitApp:
         self._update_summary_controls()
         self._update_output_controls()
         self._update_rename_controls()
+        self._update_stats_range_controls()
 
         self.tutorial_expanded = False
 
@@ -2162,6 +2202,7 @@ class HRToolkitApp:
             self._update_summary_controls()
             self._update_output_controls()
             self._update_rename_controls()
+            self._update_stats_range_controls()
         if hasattr(self, "tutorial_text"):
             self._set_tutorial_text()
         if hasattr(self, "_sync_right_canvas_window"):
@@ -2191,8 +2232,11 @@ class HRToolkitApp:
                 ("适用：把 HR 系统导出的考勤结果、周报记录、月报记录自动整理成统计表。", "strong"),
                 ("步骤：选择单个文件、多个文件、zip压缩包，或包含这些文件的文件夹。", None),
                 ("如需统计未写周报/月报，请选择“应汇报人员名单”；不选时只能按文件中出现过的人推断。", None),
+                ("周报统计日期（可选）：填写如 2026-06-02 至 2026-06-30，只统计范围内周一截止的周报；留空按整月统计。适合 1 号正好是周一的月份，避免把上月最后一周重复统计。", None),
                 ("结果：生成“考勤周月报汇总表.xlsx”，包含考勤统计、周月报统计、考勤异常明细、周月报异常明细。", None),
-                ("当前规则：考勤公司默认“总部”；周报按自然周，下周一17:01及以后算超时；月报按次月2日17:01及以后算超时。", None),
+                ("当前规则：考勤公司默认“总部”；周报截止次周一17:00，周二至周四补交算上一期超时（备注写明提交时间），周五起交的算下一期；月报按次月2日17:01及以后算超时。", None),
+                ("容易疑惑1：如果某人上一期已经交过周报，周二到周四又交了一份，这份算他提前交的下一期，不记超时，下一期也不会记未写。", None),
+                ("容易疑惑2：选了统计日期时，归属期超出范围的周报本次不统计、留给下一次。比如范围选到6.24，6.26（周五）交的属于6.29截止那期，本次不会出现。", None),
                 ("注意：周月报异常只统计次数和明细，不计算扣款金额。", "warning"),
             ]
         if self.current_tool == "insurance_ledger":
@@ -2376,6 +2420,33 @@ class HRToolkitApp:
             self._apply_form_layout()
         if self._rename_row_visible:
             self._update_rename_mode_controls()
+
+    def _update_stats_range_controls(self) -> None:
+        self._stats_range_row_visible = self.current_tool == "data_statistics"
+        if hasattr(self, "_apply_form_layout"):
+            self._apply_form_layout()
+
+    def _fill_stats_week_range(self, preset: str) -> None:
+        if preset == "clear":
+            self.stats_week_start.set("")
+            self.stats_week_end.set("")
+            return
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        if preset == "this_month":
+            start = today.replace(day=1)
+            end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+        elif preset == "last_month":
+            end = today.replace(day=1) - timedelta(days=1)
+            start = end.replace(day=1)
+        elif preset == "this_week":
+            start = monday
+            end = monday + timedelta(days=6)
+        else:  # last_week
+            start = monday - timedelta(days=7)
+            end = monday - timedelta(days=1)
+        self.stats_week_start.set(start.isoformat())
+        self.stats_week_end.set(end.isoformat())
 
     def _on_rename_mode_changed(self, _event=None) -> None:
         self._update_rename_mode_controls()
@@ -2848,6 +2919,14 @@ class HRToolkitApp:
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
+        try:
+            week_range = resolve_week_range(
+                self.stats_week_start.get().strip() or None,
+                self.stats_week_end.get().strip() or None,
+            )
+        except ValueError as exc:
+            messagebox.showwarning("日期填写有误", str(exc))
+            return
 
         output_dir = make_result_output_dir(Path(output_text))
         self.run_button.config(state="disabled")
@@ -2856,7 +2935,7 @@ class HRToolkitApp:
 
         worker = threading.Thread(
             target=self._data_statistics_worker,
-            args=(input_paths, output_dir, staff_path),
+            args=(input_paths, output_dir, staff_path, week_range),
             daemon=True,
         )
         worker.start()
@@ -3139,9 +3218,21 @@ class HRToolkitApp:
             return
         self.status_queue.put(("success", result))
 
-    def _data_statistics_worker(self, input_path: Path | list[Path], output_dir: Path, staff_path: Path | None) -> None:
+    def _data_statistics_worker(
+        self,
+        input_path: Path | list[Path],
+        output_dir: Path,
+        staff_path: Path | None,
+        week_range: tuple[date, date] | None = None,
+    ) -> None:
         try:
-            result = generate_data_statistics_reports(input_path, output_dir, report_staff_path=staff_path)
+            result = generate_data_statistics_reports(
+                input_path,
+                output_dir,
+                report_staff_path=staff_path,
+                week_start=None if week_range is None else week_range[0],
+                week_end=None if week_range is None else week_range[1],
+            )
         except Exception as exc:
             self.status_queue.put(("error", exc))
             return

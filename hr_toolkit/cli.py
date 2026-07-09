@@ -85,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选应汇报人员名单 .xlsx/.xls；传入后可统计未写周报/月报人员",
     )
     data_statistics.add_argument(
+        "--week-start",
+        help="可选周报统计开始日期（如 2026-06-02）；只统计该范围内周一截止的周报，需与 --week-end 同时使用",
+    )
+    data_statistics.add_argument(
+        "--week-end",
+        help="可选周报统计结束日期（如 2026-06-30）；需与 --week-start 同时使用",
+    )
+    data_statistics.add_argument(
         "--dry-run",
         action="store_true",
         help="只识别记录，不生成 Excel 文件",
@@ -426,6 +434,8 @@ def main(argv: list[str] | None = None) -> int:
             input_path=args.input,
             output_dir=args.output,
             report_staff_path=args.staff,
+            week_start=args.week_start,
+            week_end=args.week_end,
             dry_run=args.dry_run,
         )
         payload = result.to_dict()
