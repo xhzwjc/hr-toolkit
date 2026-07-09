@@ -7,7 +7,6 @@ import re
 _PERIOD_COMPACT = re.compile(r"(20\d{2})\D{0,3}([01]?\d)")
 _PERIOD_PLAIN = re.compile(r"(20\d{2})([01]\d)")
 import tempfile
-import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -21,6 +20,7 @@ from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
+from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
 
 TOOL_NAME = "需求5-多月工资合并个人薪资汇总"
@@ -181,11 +181,7 @@ def merge_monthly_salary(
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
-    raw_paths = input_path if isinstance(input_path, list) else [input_path]
-    paths = [Path(path).expanduser().resolve() for path in raw_paths]
-    if not paths:
-        raise ValueError("请选择工资表文件、压缩包或文件夹。")
-    return paths
+    return normalize_input_paths(input_path, "请选择工资表文件、压缩包或文件夹。")
 
 
 def _find_salary_files(input_paths: list[Path], temp_dir: Path, existing_summary_path: Path | None = None, warnings: list[str] | None = None) -> list[Path]:
@@ -214,7 +210,7 @@ def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) ->
         if is_supported_excel_file(input_path):
             return [input_path]
         if suffix == ".zip":
-            return _extract_zip_salary_files(input_path, temp_dir, warnings)
+            return extract_zip_excel_files(input_path, temp_dir, warnings)
         return []
     if not input_path.is_dir():
         return []
@@ -225,25 +221,8 @@ def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) ->
         if is_supported_excel_file(child):
             files.append(child)
         elif child.suffix.lower() == ".zip":
-            files.extend(_extract_zip_salary_files(child, temp_dir, warnings))
+            files.extend(extract_zip_excel_files(child, temp_dir, warnings))
     return files
-
-
-def _extract_zip_salary_files(zip_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
-    extract_dir = temp_dir / f"zip_{len(list(temp_dir.glob('zip_*'))) + 1}"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        with zipfile.ZipFile(zip_path) as archive:
-            for member in archive.infolist():
-                target = extract_dir / member.filename
-                if not target.resolve().is_relative_to(extract_dir.resolve()):
-                    warnings.append(f"{zip_path.name} 中存在不安全路径，已跳过：{member.filename}")
-                    continue
-                archive.extract(member, extract_dir)
-    except Exception as exc:
-        warnings.append(f"{zip_path.name} 解压失败，已跳过：{exc}")
-        return []
-    return sorted(path for path in extract_dir.rglob("*") if path.is_file() and is_supported_excel_file(path))
 
 
 def _read_salary_file(file_path: Path, month: str) -> tuple[list[SalaryRecord], list[str]]:

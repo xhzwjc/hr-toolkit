@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hr-toolkit"
+description = "人事 Excel 自动化工具箱"
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+dependencies = [
+    "openpyxl>=3.1,<4",
+    "xlrd>=2.0,<3",
+    'pywin32>=306; platform_system == "Windows"',
+]
+
+[project.scripts]
+hr-toolkit = "hr_toolkit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hr_toolkit*"]
+
+[tool.setuptools.package-data]
+"hr_toolkit.templates" = ["*.xlsx"]
+
+[tool.setuptools.dynamic]
+version = { attr = "hr_toolkit.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

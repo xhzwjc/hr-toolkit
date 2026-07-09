@@ -10,7 +10,6 @@ _PERIOD_FROM_TEXT_YEAR_ONLY = re.compile(r"(20\d{2})年")
 _PERIOD_FROM_CELL_PATTERN = re.compile(r"(20\d{2})年?([01]?\d)月")
 _HEADER_WHITESPACE = re.compile(r"\s+")
 import tempfile
-import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -24,7 +23,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
-from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
+from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
 
 TOOL_NAME = "需求6-异动表汇总"
@@ -368,11 +368,7 @@ def update_roster_from_change_summaries(
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
-    raw_paths = input_path if isinstance(input_path, list) else [input_path]
-    paths = [Path(path).expanduser().resolve() for path in raw_paths]
-    if not paths:
-        raise ValueError("请选择异动表文件、压缩包或文件夹。")
-    return paths
+    return normalize_input_paths(input_path, "请选择异动表文件、压缩包或文件夹。")
 
 
 def _empty_sheet_map() -> dict[str, list[ChangeRow]]:
@@ -411,7 +407,7 @@ def _iter_input_files(path: Path, temp_dir: Path, warnings: list[str]) -> list[P
         if is_supported_excel_file(path):
             return [path]
         if suffix == ".zip":
-            return _extract_zip_change_files(path, temp_dir, warnings)
+            return extract_zip_excel_files(path, temp_dir, warnings)
         return []
     if path.is_dir():
         files: list[Path] = []
@@ -421,26 +417,9 @@ def _iter_input_files(path: Path, temp_dir: Path, warnings: list[str]) -> list[P
             if is_supported_excel_file(child):
                 files.append(child)
             elif child.suffix.lower() == ".zip":
-                files.extend(_extract_zip_change_files(child, temp_dir, warnings))
+                files.extend(extract_zip_excel_files(child, temp_dir, warnings))
         return files
     return []
-
-
-def _extract_zip_change_files(zip_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
-    extract_dir = temp_dir / f"zip_{len(list(temp_dir.glob('zip_*'))) + 1}"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        with zipfile.ZipFile(zip_path) as archive:
-            for member in archive.infolist():
-                target = extract_dir / member.filename
-                if not target.resolve().is_relative_to(extract_dir.resolve()):
-                    warnings.append(f"{zip_path.name} 中存在不安全路径，已跳过：{member.filename}")
-                    continue
-                archive.extract(member, extract_dir)
-    except Exception as exc:
-        warnings.append(f"{zip_path.name} 解压失败，已跳过：{exc}")
-        return []
-    return sorted(path for path in extract_dir.rglob("*") if path.is_file() and is_supported_excel_file(path))
 
 
 def _find_summary_files(input_paths: list[Path], warnings: list[str], temp_dir: Path) -> list[Path]:
@@ -1329,10 +1308,3 @@ def _normalize_header(value: Any) -> str:
 def _normalize_id_card(value: Any) -> str:
     return _cell_text(value).upper()
 
-
-def _cell_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()

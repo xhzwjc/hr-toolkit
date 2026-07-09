@@ -78,6 +78,14 @@ def apply_row_snapshot(
         cell.value = value
 
 
+def cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 def clone_style(source_cell, target_cell) -> None:
     target_cell.font = copy(source_cell.font)
     target_cell.fill = copy(source_cell.fill)
