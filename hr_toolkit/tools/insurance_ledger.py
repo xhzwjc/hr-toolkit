@@ -21,7 +21,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel import apply_row_snapshot, snapshot_row
+from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -351,7 +351,9 @@ def _read_policy_file(file_path: Path, warnings: list[str]) -> list[PolicyEntry]
     entries: list[PolicyEntry] = []
     seen: set[tuple[str, str]] = set()
     try:
-        for ws in workbook.worksheets:
+        for worksheet in workbook.worksheets:
+            # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
+            ws = SheetGrid(worksheet)
             header_row = _find_policy_header_row(ws)
             if header_row is None:
                 continue
@@ -390,7 +392,7 @@ def _read_policy_file(file_path: Path, warnings: list[str]) -> list[PolicyEntry]
     return entries
 
 
-def _find_policy_header_row(ws: Worksheet) -> int | None:
+def _find_policy_header_row(ws: SheetGrid) -> int | None:
     max_col = min(ws.max_column or 0, 80)
     id_headers = {"身份证号码", "证件号", "证件号码", "身份证号"}
     name_headers = {"雇员姓名", "姓名", "被保险人姓名"}
@@ -401,7 +403,7 @@ def _find_policy_header_row(ws: Worksheet) -> int | None:
     return None
 
 
-def _find_policy_no(ws: Worksheet, file_path: Path) -> str:
+def _find_policy_no(ws: SheetGrid, file_path: Path) -> str:
     for row_index in range(1, min(ws.max_row or 0, 15) + 1):
         for col_index in range(1, min(ws.max_column or 0, 30) + 1):
             text = _cell_text(ws.cell(row_index, col_index).value)
@@ -413,7 +415,7 @@ def _find_policy_no(ws: Worksheet, file_path: Path) -> str:
 
 
 def _policy_amount(
-    ws: Worksheet,
+    ws: SheetGrid,
     row_index: int,
     amount_col: int | None,
     policy_no: str,
@@ -676,7 +678,7 @@ def _format_table(ws: Worksheet, min_row: int, max_row: int, max_col: int) -> No
     ws.column_dimensions["D"].width = 18
 
 
-def _read_headers_first(ws: Worksheet, header_row: int) -> dict[str, int]:
+def _read_headers_first(ws: Worksheet | SheetGrid, header_row: int) -> dict[str, int]:
     headers: dict[str, int] = {}
     max_col = min(ws.max_column or 0, 160)
     for col_index in range(1, max_col + 1):
@@ -686,7 +688,7 @@ def _read_headers_first(ws: Worksheet, header_row: int) -> dict[str, int]:
     return headers
 
 
-def _header_value_any(ws: Worksheet, row_index: int, headers: dict[str, int], candidates: tuple[str, ...]) -> Any:
+def _header_value_any(ws: Worksheet | SheetGrid, row_index: int, headers: dict[str, int], candidates: tuple[str, ...]) -> Any:
     col_index = _first_header_col(headers, candidates)
     if col_index is None:
         return None

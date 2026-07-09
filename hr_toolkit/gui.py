@@ -436,7 +436,8 @@ class HRToolkitApp:
         self.output_dir = StringVar(value=str(default_output_parent_dir(self.current_tool)))
         self.output_dir_user_selected = False
         self.change_input_paths: list[Path] | None = None
-        self.status_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
+        # (状态, 运行编号, 载荷)；运行编号用于丢弃已停止任务的结果
+        self.status_queue: queue.Queue[tuple[str, int, object | None]] = queue.Queue()
         self.update_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.last_output_dir: Path | None = None
         self.pending_update: UpdateInfo | None = None
@@ -450,6 +451,9 @@ class HRToolkitApp:
         self.manual_update_check_active = False
         self.update_check_dismissed = False
         self._download_speed_anchor: tuple[float, int] | None = None
+        self._tool_run_token = 0
+        self._tool_running = False
+        self._idle_run_button_text = ""
 
         self._apply_app_icon()
         self._configure_style()
@@ -2099,6 +2103,8 @@ class HRToolkitApp:
     def _select_tool(self, tool_id: str) -> None:
         if tool_id == self.current_tool:
             return
+        if self._tool_running:
+            self._stop_tool_run()
         if self.current_tool == "personnel_change_merge":
             self._save_change_form_state(self.change_mode)
         if self.current_tool == "archive_import":
@@ -2884,6 +2890,9 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _run_current_tool(self) -> None:
+        if self._tool_running:
+            self._stop_tool_run()
+            return
         if self.current_tool == "folder_rename":
             self._run_folder_rename()
             return
@@ -2932,16 +2941,11 @@ class HRToolkitApp:
         output_parent_dir = Path(output_text)
 
         output_dir = make_result_output_dir(output_parent_dir)
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始拆分，请稍候...")
 
-        worker = threading.Thread(
-            target=self._salary_split_worker,
-            args=(input_path, output_dir),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(split_salary_by_company, input_path, output_dir)
 
     def _run_salary_merge(self) -> None:
         input_text = self.input_path.get().strip()
@@ -2973,16 +2977,11 @@ class HRToolkitApp:
         output_parent_dir = Path(output_text)
 
         output_dir = make_result_output_dir(output_parent_dir)
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始合并，请稍候...")
 
-        worker = threading.Thread(
-            target=self._salary_merge_worker,
-            args=(input_paths, output_dir, summary_path),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(merge_monthly_salary, input_paths, output_dir, existing_summary_path=summary_path)
 
     def _run_social_security(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3016,16 +3015,11 @@ class HRToolkitApp:
             return
 
         output_dir = make_result_output_dir(Path(output_text))
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成社保报表，请稍候...")
 
-        worker = threading.Thread(
-            target=self._social_security_worker,
-            args=(input_paths, roster_path, output_dir),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(generate_social_security_reports, input_paths, roster_path, output_dir)
 
     def _run_data_statistics(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3064,16 +3058,18 @@ class HRToolkitApp:
             return
 
         output_dir = make_result_output_dir(Path(output_text))
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成统计表，请稍候...")
 
-        worker = threading.Thread(
-            target=self._data_statistics_worker,
-            args=(input_paths, output_dir, staff_path, week_range),
-            daemon=True,
+        self._start_tool_worker(
+            generate_data_statistics_reports,
+            input_paths,
+            output_dir,
+            report_staff_path=staff_path,
+            week_start=None if week_range is None else week_range[0],
+            week_end=None if week_range is None else week_range[1],
         )
-        worker.start()
 
     def _run_insurance_ledger(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3107,16 +3103,11 @@ class HRToolkitApp:
             return
 
         output_dir = make_result_output_dir(Path(output_text))
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成保险台账，请稍候...")
 
-        worker = threading.Thread(
-            target=self._insurance_ledger_worker,
-            args=(input_paths, roster_path, output_dir),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(generate_insurance_ledger, input_paths, roster_path, output_dir)
 
     def _run_personnel_change_merge(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3148,16 +3139,11 @@ class HRToolkitApp:
         output_parent_dir = Path(output_text)
 
         output_dir = make_result_output_dir(output_parent_dir)
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始汇总，请稍候...")
 
-        worker = threading.Thread(
-            target=self._personnel_change_merge_worker,
-            args=(input_paths, output_dir, summary_path),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(merge_personnel_changes, input_paths, output_dir, template_path=summary_path)
 
     def _run_roster_update(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3190,16 +3176,11 @@ class HRToolkitApp:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
         output_dir = make_result_output_dir(Path(output_text))
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始更新花名册，请稍候...")
 
-        worker = threading.Thread(
-            target=self._roster_update_worker,
-            args=(input_paths, roster_path, output_dir),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(update_roster_from_change_summaries, input_paths, roster_path, output_dir)
 
     def _run_archive_import(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3229,16 +3210,11 @@ class HRToolkitApp:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
         output_dir = make_result_output_dir(Path(output_text))
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始入库，请稍候...")
 
-        worker = threading.Thread(
-            target=self._archive_import_worker,
-            args=(input_paths, target_path, output_dir),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(import_archive_transfers, input_paths, target_path, output_dir)
 
     def _run_archive_export(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3268,16 +3244,11 @@ class HRToolkitApp:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
         output_dir = make_result_output_dir(Path(output_text))
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成档案表，请稍候...")
 
-        worker = threading.Thread(
-            target=self._archive_export_worker,
-            args=(input_paths, output_dir, existing_path),
-            daemon=True,
-        )
-        worker.start()
+        self._start_tool_worker(export_company_archive_tables, input_paths, output_dir, existing_archive_path=existing_path)
 
     def _run_folder_rename(self) -> None:
         input_text = self.input_path.get().strip()
@@ -3320,126 +3291,58 @@ class HRToolkitApp:
             self._write_log("已取消执行。")
             return
 
-        self.run_button.config(state="disabled")
+        self._begin_tool_run()
         self._write_log("开始执行改名...")
-        worker = threading.Thread(
-            target=self._folder_rename_worker,
-            args=(root_dir, mode, self.rename_text.get(), self.rename_target_name.get(), self.rename_replacement_name.get(), file_type),
-            daemon=True,
+        self._start_tool_worker(
+            rename_person_folders,
+            root_dir=root_dir,
+            mode=mode,
+            text=self.rename_text.get(),
+            target_name=self.rename_target_name.get(),
+            replacement_name=self.rename_replacement_name.get(),
+            file_type=file_type,
         )
-        worker.start()
 
-    def _salary_split_worker(self, input_path: Path, output_dir: Path) -> None:
-        try:
-            result = split_salary_by_company(input_path, output_dir)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
+    def _begin_tool_run(self) -> None:
+        """进入运行状态：主按钮变为“停止”，并为本次运行分配编号。"""
+        self._tool_run_token += 1
+        self._tool_running = True
+        self._idle_run_button_text = self.run_button_text.get()
+        self.run_button_text.set("停止")
 
-    def _salary_merge_worker(self, input_dir: Path | list[Path], output_dir: Path, summary_path: Path | None) -> None:
-        try:
-            result = merge_monthly_salary(input_dir, output_dir, existing_summary_path=summary_path)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
+    def _finish_tool_run(self) -> None:
+        self._tool_running = False
+        if self._idle_run_button_text:
+            self.run_button_text.set(self._idle_run_button_text)
 
-    def _social_security_worker(self, input_path: Path | list[Path], roster_path: Path, output_dir: Path) -> None:
-        try:
-            result = generate_social_security_reports(input_path, roster_path, output_dir)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
+    def _stop_tool_run(self) -> None:
+        # 工具函数本身不可中断：递增运行编号让后台任务的结果在返回时被丢弃，
+        # 界面立即恢复可用。被停止的任务如已写出文件，直接忽略即可。
+        self._tool_run_token += 1
+        self._finish_tool_run()
+        self._write_log("已停止本次生成。")
 
-    def _data_statistics_worker(
-        self,
-        input_path: Path | list[Path],
-        output_dir: Path,
-        staff_path: Path | None,
-        week_range: tuple[date, date] | None = None,
-    ) -> None:
-        try:
-            result = generate_data_statistics_reports(
-                input_path,
-                output_dir,
-                report_staff_path=staff_path,
-                week_start=None if week_range is None else week_range[0],
-                week_end=None if week_range is None else week_range[1],
-            )
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
+    def _start_tool_worker(self, tool_func, /, *args, **kwargs) -> None:
+        token = self._tool_run_token
 
-    def _insurance_ledger_worker(self, input_path: Path | list[Path], roster_path: Path, output_dir: Path) -> None:
-        try:
-            result = generate_insurance_ledger(input_path, roster_path, output_dir)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
+        def worker() -> None:
+            try:
+                result = tool_func(*args, **kwargs)
+            except Exception as exc:
+                self.status_queue.put(("error", token, exc))
+                return
+            self.status_queue.put(("success", token, result))
 
-    def _personnel_change_merge_worker(self, input_dir: Path | list[Path], output_dir: Path, summary_path: Path | None) -> None:
-        try:
-            result = merge_personnel_changes(input_dir, output_dir, template_path=summary_path)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
-
-    def _roster_update_worker(self, summary_input: Path | list[Path], roster_path: Path, output_dir: Path) -> None:
-        try:
-            result = update_roster_from_change_summaries(summary_input, roster_path, output_dir)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
-
-    def _archive_import_worker(self, input_path: Path | list[Path], target_path: Path | None, output_dir: Path) -> None:
-        try:
-            result = import_archive_transfers(input_path, target_path, output_dir)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
-
-    def _archive_export_worker(self, summary_path: Path | list[Path], output_dir: Path, existing_archive_path: Path | None) -> None:
-        try:
-            result = export_company_archive_tables(summary_path, output_dir, existing_archive_path=existing_archive_path)
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
-
-    def _folder_rename_worker(
-        self,
-        root_dir: Path,
-        mode: str,
-        text: str,
-        target_name: str,
-        replacement_name: str,
-        file_type: str = FILE_TYPE_FOLDER,
-    ) -> None:
-        try:
-            result = rename_person_folders(
-                root_dir=root_dir,
-                mode=mode,
-                text=text,
-                target_name=target_name,
-                replacement_name=replacement_name,
-                file_type=file_type,
-            )
-        except Exception as exc:
-            self.status_queue.put(("error", exc))
-            return
-        self.status_queue.put(("success", result))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _poll_status_queue(self) -> None:
         try:
             while True:
-                status, payload = self.status_queue.get_nowait()
+                status, token, payload = self.status_queue.get_nowait()
+                if token != self._tool_run_token:
+                    self._write_log("（已停止的任务在后台结束，结果已忽略。）")
+                    continue
+                self._finish_tool_run()
                 if status == "success":
                     self._handle_success(payload)
                 elif status == "error":
@@ -3600,7 +3503,6 @@ class HRToolkitApp:
                 message = "工资表已拆分完成，可以打开结果文件夹查看。"
             else:
                 message = "处理完成。"
-        self.run_button.config(state="normal")
         self._show_success_after_log("处理完成", message)
 
     def _handle_error(self, exc: object | None) -> None:
@@ -3628,7 +3530,6 @@ class HRToolkitApp:
         )
         self._write_log(f"{action}失败。")
         self._write_log(str(exc))
-        self.run_button.config(state="normal")
         self._show_error_after_log(f"{action}失败", str(exc))
 
     def _show_success_after_log(self, title: str, message: str) -> None:

@@ -16,7 +16,7 @@ from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cell_text as _cell_text, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -346,20 +346,22 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
     workbook = load_workbook(file_path, data_only=True, read_only=True)
     try:
         for ws in workbook.worksheets:
-            header_row = _find_header_row(ws)
+            # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
+            grid = SheetGrid(ws)
+            header_row = _find_header_row(grid)
             if header_row is None:
                 continue
-            headers = _read_headers(ws, header_row)
+            headers = _read_headers(grid, header_row)
             if _is_attendance_sheet(headers):
-                attendance_rows.extend(_read_attendance_sheet(ws, headers, header_row, file_path.name))
+                attendance_rows.extend(_read_attendance_sheet(grid, headers, header_row, file_path.name))
             elif _is_summary_attendance_sheet(headers):
-                attendance_rows.extend(_read_summary_attendance_sheet(ws, headers, header_row, file_path.name))
+                attendance_rows.extend(_read_summary_attendance_sheet(grid, headers, header_row, file_path.name))
             elif _is_report_sheet(headers):
-                report_type = _report_type_from_name(file_path.name, ws.title)
+                report_type = _report_type_from_name(file_path.name, grid.title)
                 if report_type is None:
                     warnings.append(f"{file_path.name} 未能判断是周报还是月报，已跳过。")
                     continue
-                records = _read_report_sheet(ws, headers, header_row, file_path.name, report_type)
+                records = _read_report_sheet(grid, headers, header_row, file_path.name, report_type)
                 if report_type == "weekly":
                     weekly_records.extend(records)
                 else:
@@ -386,10 +388,10 @@ _WHITESPACE_PATTERN = re.compile(r"\s+")
 _TIME_HHMM_PATTERN = re.compile(r"([0-2]?\d):([0-5]\d)")
 
 
-def _find_header_row(ws: Worksheet) -> int | None:
-    max_col = min(ws.max_column or 0, 80)
-    for row_index in range(1, min(ws.max_row or 0, 20) + 1):
-        values = {_normalize_header(ws.cell(row_index, col_index).value) for col_index in range(1, max_col + 1)}
+def _find_header_row(grid: SheetGrid) -> int | None:
+    max_col = min(grid.max_column or 0, 80)
+    for row_index in range(1, min(grid.max_row or 0, 20) + 1):
+        values = {_normalize_header(grid.value(row_index, col_index)) for col_index in range(1, max_col + 1)}
         if "姓名" in values and ("日期" in values or "汇报时间" in values):
             return row_index
         if "汇报编号" in values and "汇报人" in values:
@@ -401,11 +403,11 @@ def _find_header_row(ws: Worksheet) -> int | None:
     return None
 
 
-def _read_headers(ws: Worksheet, header_row: int) -> dict[str, int]:
+def _read_headers(grid: SheetGrid, header_row: int) -> dict[str, int]:
     headers: dict[str, int] = {}
-    max_col = min(ws.max_column or 0, 120)
+    max_col = min(grid.max_column or 0, 120)
     for col_index in range(1, max_col + 1):
-        header = _normalize_header(ws.cell(header_row, col_index).value)
+        header = _normalize_header(grid.value(header_row, col_index))
         if header:
             headers[header] = col_index
     return headers
@@ -432,8 +434,8 @@ def _is_report_sheet(headers: dict[str, int]) -> bool:
     return {"汇报编号", "汇报时间", "汇报人"}.issubset(headers)
 
 
-def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
-    # 列号外提:循环外一次性解析,循环内只做 ws.cell 访问
+def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
+    # 列号外提:循环外一次性解析,循环内只做 grid.cell 访问
     cols = {name: headers.get(_normalize_header(name)) for name in (
         "姓名", "日期", "部门名称",
         "事假", "病假天数", "年假天数",
@@ -461,10 +463,10 @@ def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: i
     missing_record_col = cols["缺卡记录"]
 
     def _val(row_index: int, col: int | None):
-        return ws.cell(row_index, col).value if col else None
+        return grid.value(row_index, col) if col else None
 
     rows: list[AttendanceSourceRow] = []
-    for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
+    for row_index in range(header_row + 1, (grid.max_row or 0) + 1):
         name = _cell_text(_val(row_index, name_col))
         day = _date_from_value(_val(row_index, day_col))
         if not name or day is None:
@@ -498,7 +500,7 @@ def _read_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: i
     return rows
 
 
-def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
+def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row: int, file_name: str) -> list[AttendanceSourceRow]:
     """读取汇总格式的考勤表（没有日期列，直接按人汇总）"""
     # 列号外提:把每组 fallback 候选的列号一次性解析,循环内按 fallback 顺序查第一个非 None
     def _cols(*names: str) -> tuple[int | None, ...]:
@@ -521,13 +523,13 @@ def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], heade
     actual_cols = _cols("实出勤小时数", "实际出勤天数")
 
     def _val(row_index: int, col: int | None):
-        return ws.cell(row_index, col).value if col else None
+        return grid.value(row_index, col) if col else None
 
     def _first_not_none(row_index: int, cols: tuple[int | None, ...]):
         for col in cols:
             if col is None:
                 continue
-            v = ws.cell(row_index, col).value
+            v = grid.value(row_index, col)
             if v is not None:
                 return v
         return None
@@ -536,7 +538,7 @@ def _read_summary_attendance_sheet(ws: Worksheet, headers: dict[str, int], heade
     # 从文件名或标题行推断月份
     month = _infer_month_from_filename(file_name)
     default_date = date(date.today().year, month, 1) if month else date.today()
-    for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
+    for row_index in range(header_row + 1, (grid.max_row or 0) + 1):
         name = _cell_text(_val(row_index, name_col))
         if not name:
             continue
@@ -587,27 +589,18 @@ def _infer_month_from_filename(file_name: str) -> int | None:
     return None
 
 
-def _header_value_any(ws: Worksheet, row_index: int, headers: dict[str, int], candidates: tuple[str, ...]) -> Any:
-    """尝试多个表头名，返回第一个匹配的值"""
-    for candidate in candidates:
-        col_index = headers.get(_normalize_header(candidate))
-        if col_index is not None:
-            return ws.cell(row_index, col_index).value
-    return None
-
-
-def _read_report_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, file_name: str, report_type: str) -> list[ReportRecord]:
+def _read_report_sheet(grid: SheetGrid, headers: dict[str, int], header_row: int, file_name: str, report_type: str) -> list[ReportRecord]:
     records: list[ReportRecord] = []
-    for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
-        name = _cell_text(_header_value(ws, row_index, headers, "汇报人"))
-        report_time = _datetime_from_value(_header_value(ws, row_index, headers, "汇报时间"))
+    for row_index in range(header_row + 1, (grid.max_row or 0) + 1):
+        name = _cell_text(_header_value(grid, row_index, headers, "汇报人"))
+        report_time = _datetime_from_value(_header_value(grid, row_index, headers, "汇报时间"))
         if not name or report_time is None:
             continue
-        company, department = _company_department_from_text(_cell_text(_header_value(ws, row_index, headers, "汇报人部门")))
+        company, department = _company_department_from_text(_cell_text(_header_value(grid, row_index, headers, "汇报人部门")))
         records.append(
             ReportRecord(
                 report_type=report_type,
-                report_no=_cell_text(_header_value(ws, row_index, headers, "汇报编号")),
+                report_no=_cell_text(_header_value(grid, row_index, headers, "汇报编号")),
                 report_time=report_time,
                 name=name,
                 company=company,
@@ -625,18 +618,19 @@ def _read_expected_reporters(staff_path: Path, temp_dir: Path, warnings: list[st
     reporters: OrderedDict[str, ExpectedReporter] = OrderedDict()
     try:
         for ws in workbook.worksheets:
-            header_row = _find_expected_reporter_header_row(ws)
+            grid = SheetGrid(ws)
+            header_row = _find_expected_reporter_header_row(grid)
             if header_row is None:
                 continue
-            headers = _read_headers(ws, header_row)
-            for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
-                name = _cell_text(_header_value_any(ws, row_index, headers, ("姓名", "汇报人", "员工姓名", "人员姓名")))
+            headers = _read_headers(grid, header_row)
+            for row_index in range(header_row + 1, grid.max_row + 1):
+                name = _cell_text(_header_value_any(grid, row_index, headers, ("姓名", "汇报人", "员工姓名", "人员姓名")))
                 if not name:
                     continue
-                company = _cell_text(_header_value_any(ws, row_index, headers, ("公司", "所属公司", "单位")))
+                company = _cell_text(_header_value_any(grid, row_index, headers, ("公司", "所属公司", "单位")))
                 department_text = _cell_text(
                     _header_value_any(
-                        ws,
+                        grid,
                         row_index,
                         headers,
                         ("部门（片区）", "部门片区", "部门", "部门名称", "汇报人部门", "所属部门"),
@@ -659,11 +653,11 @@ def _read_expected_reporters(staff_path: Path, temp_dir: Path, warnings: list[st
     return list(reporters.values())
 
 
-def _find_expected_reporter_header_row(ws: Worksheet) -> int | None:
-    max_col = min(ws.max_column or 0, 80)
+def _find_expected_reporter_header_row(grid: SheetGrid) -> int | None:
+    max_col = min(grid.max_column or 0, 80)
     name_headers = {"姓名", "汇报人", "员工姓名", "人员姓名"}
-    for row_index in range(1, min(ws.max_row or 0, 20) + 1):
-        values = {_normalize_header(ws.cell(row_index, col_index).value) for col_index in range(1, max_col + 1)}
+    for row_index in range(1, min(grid.max_row or 0, 20) + 1):
+        values = {_normalize_header(grid.value(row_index, col_index)) for col_index in range(1, max_col + 1)}
         if values & name_headers:
             return row_index
     return None
@@ -1402,16 +1396,16 @@ def _company_department_from_text(text: str) -> tuple[str, str]:
     return DEFAULT_COMPANY, department
 
 
-def _header_value(ws: Worksheet, row_index: int, headers: dict[str, int], header: str) -> Any:
+def _header_value(grid: SheetGrid, row_index: int, headers: dict[str, int], header: str) -> Any:
     col_index = headers.get(_normalize_header(header))
     if col_index is None:
         return None
-    return ws.cell(row_index, col_index).value
+    return grid.value(row_index, col_index)
 
 
-def _header_value_any(ws: Worksheet, row_index: int, headers: dict[str, int], candidates: tuple[str, ...]) -> Any:
+def _header_value_any(grid: SheetGrid, row_index: int, headers: dict[str, int], candidates: tuple[str, ...]) -> Any:
     for header in candidates:
-        value = _header_value(ws, row_index, headers, header)
+        value = _header_value(grid, row_index, headers, header)
         if value is not None:
             return value
     return None

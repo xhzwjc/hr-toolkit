@@ -270,6 +270,24 @@ class DataStatisticsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_report_date("2026-13-01")
 
+    def test_large_attendance_file_completes_quickly(self) -> None:
+        # 回归防线：read_only 工作表随机访问是 O(行数²)，2000 行曾需要 20 分钟以上。
+        # 单遍读取后应在数秒内完成；上限放宽到 20 秒以避免慢机器误报。
+        import time as time_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_large_attendance_file(input_dir / "考勤结果.xlsx", people=100, days=20)
+
+            start = time_module.monotonic()
+            result = generate_data_statistics_reports(input_dir, root / "out", dry_run=True)
+            elapsed = time_module.monotonic() - start
+
+            self.assertEqual(result.attendance_source_count, 2000)
+            self.assertLess(elapsed, 20, f"2000 行考勤耗时 {elapsed:.1f}s，疑似退化为逐格重复解析")
+
     def test_generate_from_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -377,6 +395,27 @@ def _write_monthly_file(path: Path) -> None:
     for row_index, row in enumerate(rows, start=2):
         for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index).value = value
+    wb.save(path)
+    wb.close()
+
+
+def _write_large_attendance_file(path: Path, people: int, days: int) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "日结果"
+    headers = ["姓名", "部门名称", "日期", "漏打卡次数", "应出勤小时数", "实出勤小时数", "事假", "病假天数", "年假天数", "调休", "加班计调休时长", "旷工天数", "迟到次数", "早退次数", "计划上下班时间", "当日刷卡记录", "缺卡记录"]
+    for col, header in enumerate(headers, start=1):
+        ws.cell(1, col).value = header
+    row_index = 2
+    for person in range(people):
+        for day in range(1, days + 1):
+            ws.cell(row_index, 1).value = f"员工{person:03d}"
+            ws.cell(row_index, 2).value = "运营部"
+            ws.cell(row_index, 3).value = datetime(2026, 6, day)
+            ws.cell(row_index, 4).value = 0
+            ws.cell(row_index, 5).value = 7
+            ws.cell(row_index, 6).value = 7
+            row_index += 1
     wb.save(path)
     wb.close()
 

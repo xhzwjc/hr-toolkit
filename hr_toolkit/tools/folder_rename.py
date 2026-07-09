@@ -7,6 +7,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from hr_toolkit.common.excel import SheetGrid
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 
 
@@ -190,7 +191,8 @@ def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) 
         working_path = ensure_xlsx_workbook(excel_path, Path(temp_dir))
         wb = load_workbook(working_path, data_only=True, read_only=True)
         try:
-            ws = wb.active
+            # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
+            ws = SheetGrid(wb.active)
             # 查找名字列
             name_col = None
             max_col = min(ws.max_column or 0, 50)

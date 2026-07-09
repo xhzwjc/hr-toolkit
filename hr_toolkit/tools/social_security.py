@@ -26,7 +26,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cell_text as _cell_text, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -359,7 +359,8 @@ def _read_roster(roster_path: Path, temp_dir: Path) -> dict[str, RosterPerson]:
     working_path = ensure_xlsx_workbook(roster_path, temp_dir)
     workbook = load_workbook(working_path, data_only=True, read_only=True)
     try:
-        ws = workbook[workbook.sheetnames[0]]
+        # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
+        ws = SheetGrid(workbook[workbook.sheetnames[0]])
         header_row = _find_header_row(ws, (ROSTER_NAME, ROSTER_ID))
         headers = _read_headers(ws, header_row)
         people: dict[str, RosterPerson] = {}
@@ -454,7 +455,8 @@ def _read_payment_file(file_path: Path) -> list[SocialPaymentLine]:
         return _read_xls_payment_file(file_path, context)
     workbook = load_workbook(file_path, data_only=True, read_only=True)
     try:
-        ws = workbook[workbook.sheetnames[0]]
+        # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
+        ws = SheetGrid(workbook[workbook.sheetnames[0]])
         header_row = _find_payment_header_row(ws)
         headers = _read_headers(ws, header_row)
         if "参保费种" in headers and ("征收品目" in headers or "险种" in headers):
