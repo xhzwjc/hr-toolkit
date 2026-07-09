@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--platform", choices=["windows", "macos"], default=_default_platform())
     parser.add_argument("--version", default=read_project_version(), help="发布版本号，默认读取 hr_toolkit.__version__")
     parser.add_argument("--notes", nargs="*", default=["更新 HR工具箱"], help="更新说明，可写多条")
+    parser.add_argument("--optional", action="store_true", help="发布为可选更新，客户端可选择“稍后再说”；默认为强制更新")
     parser.add_argument("--app-dir", type=Path, default=REPO_ROOT / "dist" / "HRToolkit", help="PyInstaller 输出目录")
     parser.add_argument("--updater", type=Path, help="HRToolkitUpdater 文件路径；默认从 dist 中查找")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_RELEASE_DIR, help="zip 输出目录")
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = _load_manifest(manifest_path)
     manifest["version"] = args.version
-    manifest["mandatory"] = True
+    manifest["mandatory"] = not args.optional
     manifest["notes"] = args.notes
     platforms = manifest.setdefault("platforms", {})
     platforms[args.platform] = {

@@ -3,18 +3,25 @@ from __future__ import annotations
 import argparse
 import ctypes
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 
 UPDATE_LOG_FILE = "HRToolkit_update.log"
+LOG_MAX_BYTES = 1024 * 1024
+LOG_KEEP_BYTES = 256 * 1024
+
+StatusCallback = Callable[[str], None]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,23 +32,143 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wait-pid", type=int, help="需要等待退出的主程序 PID")
     parser.add_argument("--log-file", type=Path, help="更新详细日志路径")
     parser.add_argument("--relaunch", action="store_true", help="更新完成后重新打开主程序")
+    parser.add_argument("--ui", action="store_true", help="显示安装进度窗口")
     args = parser.parse_args(argv)
 
     log_file = _resolve_log_file(args)
+    ui = _create_ui(log_file) if args.ui else None
+    if ui is None:
+        return _execute_update(args, log_file, status=None)
+
+    exit_code = {"value": 1}
+
+    def worker() -> None:
+        try:
+            exit_code["value"] = _execute_update(args, log_file, status=ui.set_status)
+        finally:
+            ui.request_close()
+
+    threading.Thread(target=worker, daemon=True).start()
+    ui.run()
+    return exit_code["value"]
+
+
+def _execute_update(args: argparse.Namespace, log_file: Path, status: StatusCallback | None) -> int:
     _append_log(log_file, "")
     _append_log(log_file, f"===== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 更新开始 =====")
     try:
-        _run_update(args, log_file)
+        _run_update(args, log_file, status)
     except Exception as exc:
         _append_log(log_file, f"更新失败：{exc}")
         _append_log(log_file, traceback.format_exc().rstrip())
+        _notify(status, f"更新失败：{exc}")
         return 1
     _append_log(log_file, "更新完成。")
     _append_log(log_file, f"===== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 更新结束 =====")
     return 0
 
 
-def _run_update(args: argparse.Namespace, log_file: Path) -> None:
+def _notify(status: StatusCallback | None, text: str) -> None:
+    if status is not None:
+        status(text)
+
+
+def _create_ui(log_file: Path) -> "_UpdaterUI | None":
+    try:
+        return _UpdaterUI()
+    except Exception as exc:
+        _append_log(log_file, f"无法创建更新进度窗口，改为后台安装：{exc}")
+        return None
+
+
+class _UpdaterUI:
+    """主程序退出后展示的安装进度窗口。
+
+    安装工作在后台线程执行，通过队列把状态文本交给主线程刷新，
+    避免用户在文件替换的几十秒里以为程序消失了。
+    """
+
+    _POLL_MS = 100
+
+    def __init__(self) -> None:
+        import tkinter
+        from tkinter import ttk
+
+        self._events: queue.Queue[str | None] = queue.Queue()
+        self._root = tkinter.Tk()
+        self._root.title("HR工具箱 更新")
+        self._root.resizable(False, False)
+        try:
+            from hr_toolkit._icon_data import APP_ICON_PNGS_BASE64
+
+            # 从大到小传入，macOS Dock 只取第一张
+            self._icons = [
+                tkinter.PhotoImage(data=APP_ICON_PNGS_BASE64[size])
+                for size in sorted(APP_ICON_PNGS_BASE64, reverse=True)
+            ]
+            self._root.iconphoto(True, *self._icons)
+        except Exception:
+            pass
+        # 安装中途关闭窗口可能留下半成品目录，禁用关闭按钮
+        self._root.protocol("WM_DELETE_WINDOW", lambda: None)
+        body = tkinter.Frame(self._root, bg="#ffffff", padx=30, pady=24)
+        body.pack(fill="both", expand=True)
+        tkinter.Label(
+            body,
+            text="正在安装更新",
+            bg="#ffffff",
+            fg="#17202c",
+            font=("", 14, "bold"),
+        ).pack(anchor="w")
+        self._status_label = tkinter.Label(
+            body,
+            text="请稍候，安装完成后程序会自动打开。",
+            bg="#ffffff",
+            fg="#4f5b68",
+            wraplength=320,
+            justify="left",
+        )
+        self._status_label.pack(anchor="w", pady=(6, 14))
+        bar = ttk.Progressbar(body, mode="indeterminate", length=320)
+        bar.pack(fill="x")
+        bar.start(14)
+        self._center()
+        self._root.lift()
+        self._root.attributes("-topmost", True)
+
+    def _center(self) -> None:
+        self._root.update_idletasks()
+        width = self._root.winfo_reqwidth()
+        height = self._root.winfo_reqheight()
+        x = max((self._root.winfo_screenwidth() - width) // 2, 0)
+        y = max((self._root.winfo_screenheight() - height) // 2, 0)
+        self._root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def set_status(self, text: str) -> None:
+        self._events.put(text)
+
+    def request_close(self) -> None:
+        self._events.put(None)
+
+    def run(self) -> None:
+        self._poll()
+        self._root.mainloop()
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                event = self._events.get_nowait()
+                if event is None:
+                    # 留给用户看清最后一条状态
+                    self._root.after(600, self._root.destroy)
+                    return
+                self._status_label.configure(text=event)
+        except queue.Empty:
+            pass
+        self._root.after(self._POLL_MS, self._poll)
+
+
+def _run_update(args: argparse.Namespace, log_file: Path, status: StatusCallback | None = None) -> None:
     package_path = args.zip.resolve()
     app_dir = args.app_dir.resolve()
     _append_log(log_file, f"系统平台：{sys.platform}")
@@ -51,6 +178,7 @@ def _run_update(args: argparse.Namespace, log_file: Path) -> None:
     _append_log(log_file, f"主程序文件：{args.launcher}")
     _switch_working_dir(app_dir.parent, log_file)
     if args.wait_pid:
+        _notify(status, "正在等待原程序退出…")
         _append_log(log_file, f"等待主程序退出，PID：{args.wait_pid}")
         _wait_for_process(args.wait_pid, timeout_seconds=120)
         if sys.platform.startswith("win"):
@@ -61,6 +189,7 @@ def _run_update(args: argparse.Namespace, log_file: Path) -> None:
     if not app_dir.exists():
         raise RuntimeError(f"程序目录不存在：{app_dir}")
 
+    _notify(status, "正在解压更新包…")
     extract_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_extract_"))
     _append_log(log_file, f"解压目录：{extract_dir}")
     _safe_extract_zip(package_path, extract_dir, log_file)
@@ -68,15 +197,30 @@ def _run_update(args: argparse.Namespace, log_file: Path) -> None:
     _append_log(log_file, f"更新包根目录：{payload_root}")
     _validate_payload_root(payload_root, args.launcher)
     _append_log(log_file, "更新包校验通过。")
+    _notify(status, "正在替换程序文件，可能需要几十秒…")
     _replace_app_dir(payload_root, app_dir, log_file)
+
+    _notify(status, "正在清理临时文件…")
+    _cleanup_after_success(package_path, extract_dir, log_file)
 
     if args.relaunch:
         launcher = app_dir / args.launcher
         if launcher.exists():
+            _notify(status, "安装完成，正在打开新版本…")
             _append_log(log_file, f"重新打开主程序：{launcher}")
             subprocess.Popen([str(launcher)], cwd=str(app_dir.parent), close_fds=True)
         else:
             _append_log(log_file, f"跳过重新打开，未找到主程序：{launcher}")
+
+
+def _cleanup_after_success(package_path: Path, extract_dir: Path, log_file: Path) -> None:
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    _append_log(log_file, f"已清理解压目录：{extract_dir}")
+    try:
+        package_path.unlink(missing_ok=True)
+        _append_log(log_file, f"已删除更新包：{package_path}")
+    except OSError as exc:
+        _append_log(log_file, f"删除更新包失败（忽略）：{exc}")
 
 
 def _safe_extract_zip(package_path: Path, extract_dir: Path, log_file: Path) -> None:
@@ -266,6 +410,7 @@ def _resolve_log_file(args: argparse.Namespace) -> Path:
 def _append_log(log_file: Path, text: str) -> None:
     try:
         log_file.parent.mkdir(parents=True, exist_ok=True)
+        _trim_log(log_file)
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(text + "\n")
     except OSError:
@@ -273,6 +418,19 @@ def _append_log(log_file: Path, text: str) -> None:
         if log_file != fallback:
             with fallback.open("a", encoding="utf-8") as handle:
                 handle.write(text + "\n")
+
+
+def _trim_log(log_file: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KEEP_BYTES) -> None:
+    try:
+        if not log_file.exists() or log_file.stat().st_size <= max_bytes:
+            return
+        data = log_file.read_bytes()[-keep_bytes:]
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+        log_file.write_bytes(b"(...earlier log trimmed...)\n" + data)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

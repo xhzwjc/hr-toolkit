@@ -13,6 +13,7 @@ from versioning import REPO_ROOT, bump_project_version
 
 
 WINDOWS_DPI_MANIFEST = REPO_ROOT / "packaging" / "windows" / "HRToolkit.manifest"
+WINDOWS_APP_ICON = REPO_ROOT / "packaging" / "windows" / "HRToolkit.ico"
 WINDOWS_BUILD_MODULES = {
     "PyInstaller": "pyinstaller",
     "openpyxl": "openpyxl",
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Windows 一键发布 HR工具箱")
     parser.add_argument("--bump", choices=["patch", "minor", "major"], default="patch")
     parser.add_argument("--notes", nargs="*", default=["更新 HR工具箱"], help="更新说明，可写多条")
+    parser.add_argument("--optional", action="store_true", help="发布为可选更新，客户端可选择“稍后再说”")
     parser.add_argument("--publish-dir", type=Path, help="可选：直接复制到 ScriptHub 的 fastApiProject/static/hr-toolkit 目录")
     args = parser.parse_args(argv)
 
@@ -44,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
         "--onedir",
         "--windowed",
         "--clean",
+        "--icon",
+        str(WINDOWS_APP_ICON),
         "--manifest",
         str(WINDOWS_DPI_MANIFEST),
         "--add-data",
@@ -71,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         "--onefile",
         "--windowed",
         "--clean",
+        "--icon",
+        str(WINDOWS_APP_ICON),
         "hr_toolkit_updater.py",
     ])
     prepare_gitee_release([
@@ -80,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         new_version,
         "--notes",
         *args.notes,
+        *(["--optional"] if args.optional else []),
         *([] if args.publish_dir is None else ["--publish-dir", str(args.publish_dir)]),
     ])
     print("Windows 发布文件已生成。提交并推送后，旧版客户端即可检查到更新。")

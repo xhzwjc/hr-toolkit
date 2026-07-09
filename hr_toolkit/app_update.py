@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -24,6 +25,11 @@ UPDATER_PATH_ENV = "HR_TOOLKIT_UPDATER_PATH"
 UPDATE_URL_FILE = "update_url.txt"
 UPDATE_LOG_FILE = "HRToolkit_update.log"
 USER_AGENT = "HRToolkit-Updater/1.0"
+UPDATE_TEMP_PREFIXES = ("hr_toolkit_update_", "hr_toolkit_updater_", "hr_toolkit_extract_")
+# 解压 + 新旧两份目录，预留下载包体积的数倍空间
+DISK_SPACE_FACTOR = 4
+UPDATE_LOG_MAX_BYTES = 1024 * 1024
+UPDATE_LOG_KEEP_BYTES = 256 * 1024
 
 
 class UpdateError(RuntimeError):
@@ -139,6 +145,7 @@ def download_update_package(
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             total = int(response.headers.get("Content-Length") or 0)
+            _ensure_disk_space(dest_dir, total)
             downloaded = 0
             with temp_path.open("wb") as output:
                 while True:
@@ -201,6 +208,7 @@ def launch_update_replacement(
         "--log-file",
         str(log_file),
         "--relaunch",
+        "--ui",
     ]
     _append_update_log(log_file, "更新程序参数：" + " ".join(args[1:]))
     subprocess.Popen(args, cwd=str(app_dir.parent), close_fds=True)
@@ -245,10 +253,69 @@ def _extract_package_updater(package_path: Path, temp_dir: Path) -> Path | None:
 def _append_update_log(log_file: Path, text: str) -> None:
     try:
         log_file.parent.mkdir(parents=True, exist_ok=True)
+        trim_log_file(log_file)
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(text + "\n")
     except OSError:
         pass
+
+
+def trim_log_file(log_file: Path, max_bytes: int = UPDATE_LOG_MAX_BYTES, keep_bytes: int = UPDATE_LOG_KEEP_BYTES) -> None:
+    """日志超限时只保留末尾内容，避免更新日志无限增长。"""
+    try:
+        if not log_file.exists() or log_file.stat().st_size <= max_bytes:
+            return
+        data = log_file.read_bytes()[-keep_bytes:]
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+        log_file.write_bytes(b"(...earlier log trimmed...)\n" + data)
+    except OSError:
+        pass
+
+
+def cleanup_stale_update_files(max_age_days: float = 3, temp_dir: Path | None = None) -> int:
+    """清理历史更新遗留的临时目录（下载包、解压目录、更新程序副本）。
+
+    只清理超过 max_age_days 的条目，避免碰到正在进行的更新。返回清理数量。
+    """
+    root = Path(temp_dir) if temp_dir is not None else Path(tempfile.gettempdir())
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.startswith(UPDATE_TEMP_PREFIXES):
+            continue
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+        if not entry.exists():
+            removed += 1
+    return removed
+
+
+def _ensure_disk_space(dest_dir: Path, download_size: int) -> None:
+    if download_size <= 0:
+        return
+    try:
+        free = shutil.disk_usage(dest_dir).free
+    except OSError:
+        return
+    required = download_size * DISK_SPACE_FACTOR
+    if free < required:
+        raise UpdateError(
+            f"磁盘空间不足：安装更新约需 {required / 1024 / 1024:.0f} MB 可用空间，"
+            f"当前仅剩 {free / 1024 / 1024:.0f} MB。请清理磁盘后重试。"
+        )
 
 
 def current_app_dir() -> Path:

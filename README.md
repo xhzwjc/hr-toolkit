@@ -478,11 +478,15 @@ http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
 ```
 
-如果发现新版本，用户必须点击更新；取消会直接退出程序。下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 `HRToolkit` 目录，再自动重新打开。更新过程不会弹出黑色命令窗口。主界面右上角也有“检查更新”，可手动检查。
+启动时的检查在后台静默进行，只有发现新版本才会弹窗提示；主界面右上角也有“检查更新”，可手动检查。更新提示遵循 `latest.json` 中的 `mandatory` 字段：强制更新（默认）只能“立即更新”或退出程序；非强制更新（`"mandatory": false`）可选择“稍后再说”，下次启动时再次提醒。下载失败不再直接退出，可以点击“重试”重新下载。
+
+下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，弹出“正在安装更新”进度窗口（替换文件可能需要几十秒，期间请勿手动打开程序），替换整个 `HRToolkit` 目录后自动重新打开新版本。安装成功后会自动清理下载的更新包和解压的临时文件。更新过程不会弹出黑色命令窗口。
 
 更新失败时，程序会在 `HRToolkit` 文件夹同级目录写入 `HRToolkit_update.log`。这个日志会记录下载包路径、解压目录、备份目录、替换步骤和具体错误，方便直接定位是哪一步失败。
 
-发布步骤推荐使用一键脚本。脚本会自动递增版本号、打包、计算 SHA256，并生成服务器静态目录，不需要手动改 `latest.json`。
+发布步骤推荐使用一键脚本。脚本会自动递增版本号、打包、计算 SHA256，并生成服务器静态目录，不需要手动改 `latest.json`。默认发布为强制更新；追加 `--optional` 参数可发布为可选更新（客户端出现“稍后再说”按钮）。
+
+应用图标（窗口/任务栏/exe）由 `scripts/generate_app_icons.py` 生成：品牌绿圆角方块加白色 “HR” 字标，与侧栏标识一致。调整图标改脚本后运行 `python scripts/generate_app_icons.py` 重新生成 `hr_toolkit/_icon_data.py` 与 `packaging/windows/HRToolkit.ico`。
 
 ### 通过 Gitee 中转发布
 

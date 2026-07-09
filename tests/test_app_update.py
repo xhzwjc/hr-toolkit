@@ -11,11 +11,13 @@ from pathlib import Path
 from hr_toolkit.app_update import (
     UpdateError,
     check_for_update,
+    cleanup_stale_update_files,
     download_update_package,
     is_newer_version,
     launch_update_replacement,
     parse_update_manifest,
     sha256_file,
+    trim_log_file,
     update_manifest_url,
 )
 from hr_toolkit import update_runner
@@ -152,6 +154,8 @@ class AppUpdateTests(unittest.TestCase):
             updater_path = Path(args[0])
             self.assertEqual(updater_path.read_text(encoding="utf-8"), "new updater")
             self.assertIn("--log-file", args)
+            # 主程序启动更新器时开启进度窗口；直接调用 update_runner 的场景（测试、脚本）默认无界面
+            self.assertIn("--ui", args)
             self.assertEqual(captured["kwargs"].get("cwd"), str(tmp_dir))
             self.assertTrue((tmp_dir / "HRToolkit_update.log").exists())
 
@@ -190,6 +194,8 @@ class AppUpdateTests(unittest.TestCase):
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "new")
             self.assertTrue((app_dir / "_internal" / "data.txt").exists())
             self.assertIn("工作目录已切换到：", log_file.read_text(encoding="utf-8"))
+            # 更新成功后应清理下载的更新包
+            self.assertFalse(package.exists())
 
     def test_update_runner_handles_empty_target_reappearing_during_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +278,38 @@ class AppUpdateTests(unittest.TestCase):
             self.assertTrue((app_dir / "_internal").exists())
             self.assertIn("更新失败", log_file.read_text(encoding="utf-8"))
 
+    def test_cleanup_stale_update_files_removes_only_old_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            stale_dir = tmp_dir / "hr_toolkit_update_abc"
+            stale_dir.mkdir()
+            (stale_dir / "HRToolkit-old.zip").write_bytes(b"zip")
+            fresh_dir = tmp_dir / "hr_toolkit_extract_new"
+            fresh_dir.mkdir()
+            unrelated_dir = tmp_dir / "other_app_temp"
+            unrelated_dir.mkdir()
+            week_ago = __import__("time").time() - 7 * 86400
+            os.utime(stale_dir, (week_ago, week_ago))
+            os.utime(unrelated_dir, (week_ago, week_ago))
+
+            removed = cleanup_stale_update_files(max_age_days=3, temp_dir=tmp_dir)
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(stale_dir.exists())
+            self.assertTrue(fresh_dir.exists())
+            self.assertTrue(unrelated_dir.exists())
+
+    def test_trim_log_file_keeps_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / "update.log"
+            log_file.write_bytes(b"line\n" * 400_000)  # ~2 MB
+
+            trim_log_file(log_file, max_bytes=1024 * 1024, keep_bytes=64 * 1024)
+
+            data = log_file.read_bytes()
+            self.assertLess(len(data), 128 * 1024)
+            self.assertTrue(data.startswith(b"(...earlier log trimmed...)\n"))
+            self.assertTrue(data.endswith(b"line\n"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,16 +6,19 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, DoubleVar, Frame, Label, Toplevel, filedialog, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, PhotoImage, Toplevel, filedialog, messagebox
 from tkinter import Tk, StringVar, Text
+from tkinter import font as tkfont
 from tkinter import ttk
 
 from hr_toolkit import __version__
 from hr_toolkit.app_update import (
     UpdateInfo,
     check_for_update,
+    cleanup_stale_update_files,
     download_update_package,
     launch_update_replacement,
     update_check_enabled,
@@ -101,6 +104,8 @@ UPDATE_DIALOG_PRIMARY = COLOR_PRIMARY
 UPDATE_DIALOG_PRIMARY_ACTIVE = COLOR_PRIMARY_ACTIVE
 UPDATE_DIALOG_SECONDARY = "#f1f5f4"
 UPDATE_DIALOG_SECONDARY_ACTIVE = "#e7eeec"
+UPDATE_DIALOG_ICON_BG = "#e6f2ed"
+UPDATE_DIALOG_NOTES_BG = "#f6faf8"
 BASE_WINDOWS_DPI = 96
 TK_POINTS_PER_INCH = 72
 FORCE_UI_SCALE_ENV = "HR_TOOLKIT_FORCE_UI_SCALE"
@@ -436,21 +441,39 @@ class HRToolkitApp:
         self.last_output_dir: Path | None = None
         self.pending_update: UpdateInfo | None = None
         self.update_window: Toplevel | None = None
-        self.update_progress_var: DoubleVar | None = None
-        self.update_progress_label: ttk.Label | None = None
+        self.update_progress_label: Label | None = None
         self.update_progress_canvas: Canvas | None = None
         self.update_progress_width = self._px(248)
         self.update_progress_job: str | None = None
         self.update_progress_phase = 0
         self.update_check_in_progress = False
         self.manual_update_check_active = False
+        self.update_check_dismissed = False
+        self._download_speed_anchor: tuple[float, int] | None = None
 
+        self._apply_app_icon()
         self._configure_style()
         self._set_tool_texts()
         self._build_layout()
         self._poll_status_queue()
         self._poll_update_queue()
         self.root.after(600, self._check_updates_on_startup)
+        # 清理历史更新遗留的临时文件（下载包、解压目录），后台低优先执行
+        threading.Thread(target=cleanup_stale_update_files, daemon=True).start()
+
+    def _apply_app_icon(self) -> None:
+        # 替换标题栏/任务栏默认的 Tk 羽毛图标；iconphoto(True, ...) 会同时
+        # 应用到之后创建的所有 Toplevel（更新对话框等）
+        try:
+            from hr_toolkit._icon_data import APP_ICON_PNGS_BASE64
+
+            # 必须从大到小传入：macOS 的 Dock 只用第一张，给小图会被放大成马赛克
+            self._app_icon_images = [
+                PhotoImage(data=APP_ICON_PNGS_BASE64[size]) for size in sorted(APP_ICON_PNGS_BASE64, reverse=True)
+            ]
+            self.root.iconphoto(True, *self._app_icon_images)
+        except Exception:
+            pass
 
     def _px(self, value: int | float) -> int:
         return _scale_px(value, self.ui_scale)
@@ -766,8 +789,8 @@ class HRToolkitApp:
         brand_row.pack(fill="x")
         brand_mark = Canvas(brand_row, width=self._px(48), height=self._px(48), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
         brand_mark.pack(side=LEFT)
-        self._draw_round_rect(brand_mark, self._pxf(2), self._pxf(2), self._pxf(46), self._pxf(46), self._pxf(11), fill="#e8f6ee", outline="")
-        brand_mark.create_text(self._pxf(24), self._pxf(24), text="HR", fill=COLOR_PRIMARY, font=(self.base_font[0], 12, "bold"))
+        self._draw_round_rect(brand_mark, self._pxf(2), self._pxf(2), self._pxf(46), self._pxf(46), self._pxf(11), fill=COLOR_PRIMARY, outline="")
+        brand_mark.create_text(self._pxf(24), self._pxf(24), text="HR", fill="#ffffff", font=(self.base_font[0], 12, "bold"))
         brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
         brand_text.pack(side=LEFT, fill="x", expand=True, padx=self._pad(14, 0))
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
@@ -1540,14 +1563,23 @@ class HRToolkitApp:
     def _start_update_check(self, manual: bool) -> None:
         if self.update_check_in_progress:
             if manual:
-                self._focus_update_window()
+                # 静默检查进行中时用户点了“检查更新”：升级为手动检查并给出可见反馈
+                self.manual_update_check_active = True
+                self.update_check_dismissed = False
+                if self.update_window is not None and self.update_window.winfo_exists():
+                    self._focus_update_window()
+                else:
+                    self._show_update_checking_window()
             return
         self.update_check_in_progress = True
         self.manual_update_check_active = manual
+        self.update_check_dismissed = False
         if hasattr(self, "check_update_button"):
             self.check_update_button.config(state="disabled")
         self._write_log("正在检查更新...")
-        self._show_update_checking_window()
+        # 启动时的自动检查静默进行，只有确实存在新版本才打扰用户
+        if manual:
+            self._show_update_checking_window()
         worker = threading.Thread(target=self._update_check_worker, daemon=True)
         worker.start()
 
@@ -1567,25 +1599,24 @@ class HRToolkitApp:
             while True:
                 status, payload = self.update_queue.get_nowait()
                 if status == "no_update":
-                    manual = self.manual_update_check_active
+                    interactive = self.manual_update_check_active and not self.update_check_dismissed
                     self._finish_update_check()
                     self._write_log("已是最新版本。")
-                    if manual:
+                    if interactive:
                         self._show_update_done_window()
                     else:
                         self._close_update_window()
                 elif status == "check_error":
-                    manual = self.manual_update_check_active
+                    interactive = self.manual_update_check_active and not self.update_check_dismissed
                     self._finish_update_check()
                     self._write_log(f"更新检查失败，可继续使用：{payload}")
-                    if manual:
+                    if interactive:
                         self._show_update_failure_window("检查更新失败", str(payload), exit_after=False)
                     else:
                         self._close_update_window()
                 elif status == "available":
                     self._finish_update_check()
-                    self._close_update_window()
-                    self._show_required_update(payload)
+                    self._show_update_prompt(payload)
                 elif status == "download_progress":
                     downloaded, total = payload
                     self._update_download_progress(downloaded, total)
@@ -1605,11 +1636,17 @@ class HRToolkitApp:
 
     def _show_update_checking_window(self) -> None:
         self._show_update_progress_window(
-            title="正在检查更新...",
+            title="正在检查更新",
             detail="请稍候，正在确认是否有新版本。",
             indeterminate=True,
-            close_command=lambda: None,
+            close_command=self._dismiss_update_check,
         )
+
+    def _dismiss_update_check(self) -> None:
+        # 用户关闭“正在检查”窗口：检查在后台继续，结果只写日志，
+        # 除非发现了新版本（那仍需要提示）
+        self.update_check_dismissed = True
+        self._close_update_window()
 
     def _close_update_window(self) -> None:
         if self.update_progress_job is not None:
@@ -1622,42 +1659,54 @@ class HRToolkitApp:
             self.update_window.grab_release()
             self.update_window.destroy()
         self.update_window = None
-        self.update_progress_var = None
         self.update_progress_label = None
         self.update_progress_canvas = None
         self.update_progress_phase = 0
 
-    def _show_required_update(self, update: object | None) -> None:
+    def _show_update_prompt(self, update: object | None) -> None:
         if not isinstance(update, UpdateInfo):
             return
         self.pending_update = update
         self._write_log(f"发现新版本：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
-        notes = "\n".join(f"- {line}" for line in update.notes[:4]) or "本次发布未填写更新说明。"
-        detail = (
-            f"发现新版本 v{update.version}，必须更新后才能继续使用。\n\n"
-            f"更新内容：\n{notes}"
-        )
-        self._show_update_message_window(
-            title="发现新版本",
-            detail=detail,
-            primary_text="立即更新",
-            primary_command=lambda: self._start_update_download(update),
-            secondary_text="退出",
-            secondary_command=self.root.destroy,
-            width=360,
-            height=330,
-            close_command=self.root.destroy,
-        )
+        notes = list(update.notes) or ["本次发布未填写更新说明。"]
+        if update.mandatory:
+            self._show_update_message_window(
+                title=f"发现新版本 v{update.version}",
+                detail="这是必须安装的更新，更新完成后程序会自动重新打开。",
+                notes=notes,
+                primary_text="立即更新",
+                primary_command=lambda: self._start_update_download(update),
+                secondary_text="退出程序",
+                secondary_command=self.root.destroy,
+                close_command=self.root.destroy,
+                escape_closes=False,
+            )
+        else:
+            self._show_update_message_window(
+                title=f"发现新版本 v{update.version}",
+                detail="建议尽快更新。选择“稍后再说”可以继续使用当前版本，下次启动时会再次提醒。",
+                notes=notes,
+                primary_text="立即更新",
+                primary_command=lambda: self._start_update_download(update),
+                secondary_text="稍后再说",
+                secondary_command=self._defer_update,
+                close_command=self._defer_update,
+            )
+
+    def _defer_update(self) -> None:
+        self._write_log("已选择稍后更新，下次启动时会再次提醒。")
+        self._close_update_window()
 
     def _start_update_download(self, update: UpdateInfo) -> None:
         self._write_log(f"开始下载更新包：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
+        self._download_speed_anchor = None
         self._show_update_progress_window(
-            title="正在下载更新...",
-            detail="请不要关闭程序，下载完成后会自动准备安装。",
+            title=f"正在下载 v{update.version}",
+            detail="请不要关闭程序，下载完成后会自动开始安装。",
             indeterminate=False,
-            close_command=lambda: None,
+            close_command=None,
         )
 
         worker = threading.Thread(target=self._download_update_worker, args=(update,), daemon=True)
@@ -1675,16 +1724,24 @@ class HRToolkitApp:
         self.update_queue.put(("download_ready", package_path))
 
     def _update_download_progress(self, downloaded: int, total: int) -> None:
+        now = time.monotonic()
+        if self._download_speed_anchor is None:
+            self._download_speed_anchor = (now, downloaded)
+        anchor_time, anchor_bytes = self._download_speed_anchor
+        elapsed = now - anchor_time
+        speed_text = ""
+        if elapsed > 0.8 and downloaded > anchor_bytes:
+            speed_mb = (downloaded - anchor_bytes) / elapsed / 1024 / 1024
+            speed_text = f"，{speed_mb:.1f} MB/s"
+
         downloaded_mb = downloaded / 1024 / 1024
         if total > 0:
             percent = min(downloaded / total * 100, 100)
             total_mb = total / 1024 / 1024
-            text = f"已下载 {downloaded_mb:.1f} MB / {total_mb:.1f} MB"
+            text = f"已下载 {percent:.0f}%（{downloaded_mb:.1f}/{total_mb:.1f} MB{speed_text}）"
         else:
             percent = 0
-            text = f"已下载 {downloaded_mb:.1f} MB"
-        if self.update_progress_var is not None:
-            self.update_progress_var.set(percent)
+            text = f"已下载 {downloaded_mb:.1f} MB{speed_text}"
         if self.update_progress_label is not None:
             self.update_progress_label.configure(text=text)
         self._set_update_progress(percent)
@@ -1692,10 +1749,8 @@ class HRToolkitApp:
     def _finish_update_download(self, package_path: object | None) -> None:
         if not isinstance(package_path, Path):
             return
-        if self.update_progress_var is not None:
-            self.update_progress_var.set(100)
         if self.update_progress_label is not None:
-            self.update_progress_label.configure(text="下载完成，正在准备安装...")
+            self.update_progress_label.configure(text="下载完成，正在启动安装程序...")
         self._set_update_progress(100)
         self._write_log("更新包下载完成，正在启动更新程序...")
         try:
@@ -1704,25 +1759,50 @@ class HRToolkitApp:
             self._handle_update_failure(exc)
             return
         if self.update_progress_label is not None:
-            self.update_progress_label.configure(text="更新程序已启动，当前程序即将退出。")
+            self.update_progress_label.configure(text="安装程序已启动，本窗口即将关闭。")
         self.root.after(700, self.root.destroy)
 
     def _handle_update_failure(self, exc: object | None) -> None:
         self._write_log(f"更新失败：{exc}")
-        self._show_update_failure_window(
-            "更新失败",
-            f"更新没有完成，程序将退出。\n\n原因：{exc}\n\n请联系开发重新处理安装包。",
-            exit_after=True,
-        )
+        update = self.pending_update
+        if not isinstance(update, UpdateInfo):
+            self._show_update_failure_window(
+                "更新失败",
+                f"更新没有完成，程序将退出。\n\n原因：{exc}",
+                exit_after=True,
+            )
+            return
+        detail = f"更新没有完成，可以点击“重试”重新下载。\n\n原因：{exc}\n\n如果多次失败，请联系管理员。"
+        retry = lambda: self._start_update_download(update)  # noqa: E731
+        if update.mandatory:
+            self._show_update_message_window(
+                title="更新失败",
+                detail=detail,
+                primary_text="重试",
+                primary_command=retry,
+                secondary_text="退出程序",
+                secondary_command=self.root.destroy,
+                close_command=self.root.destroy,
+                escape_closes=False,
+            )
+        else:
+            self._show_update_message_window(
+                title="更新失败",
+                detail=detail,
+                primary_text="重试",
+                primary_command=retry,
+                secondary_text="稍后再说",
+                secondary_command=self._defer_update,
+                close_command=self._defer_update,
+            )
 
     def _show_update_done_window(self) -> None:
         self._show_update_message_window(
             title="已经是最新版本",
-            detail=f"{APP_DISPLAY_NAME} {__version__} 当前已经是最新版本。",
+            detail=f"{APP_DISPLAY_NAME} v{__version__} 已经是最新版本，无需更新。",
             primary_text="确定",
             primary_command=self._close_update_window,
-            width=260,
-            height=224,
+            width=380,
             close_command=self._close_update_window,
         )
 
@@ -1733,9 +1813,8 @@ class HRToolkitApp:
             detail=detail,
             primary_text="退出程序" if exit_after else "知道了",
             primary_command=close_command,
-            width=380,
-            height=300,
             close_command=close_command,
+            escape_closes=not exit_after,
         )
 
     def _show_update_progress_window(
@@ -1746,36 +1825,27 @@ class HRToolkitApp:
         indeterminate: bool,
         close_command,
     ) -> None:
-        _window, body, dialog_width, _dialog_height = self._build_update_window(width=400, height=146, close_command=close_command)
-        body.grid_columnconfigure(1, weight=1)
-        progress_width = min(self._px(248), max(1, dialog_width - self._px(116)))
+        window, body, dialog_width = self._build_update_window(width=420, close_command=close_command)
+        pad = self._px(24)
+        content_width = dialog_width - pad * 2
 
-        icon = Canvas(body, width=self._px(58), height=self._px(58), bg=UPDATE_DIALOG_BG, highlightthickness=0)
-        icon.grid(row=0, column=0, rowspan=3, sticky="nw", padx=self._pad(24, 14), pady=self._pad(25, 0))
-        self._draw_update_icon(icon)
-
-        Label(
-            body,
-            text=title,
-            bg=UPDATE_DIALOG_BG,
-            fg=UPDATE_DIALOG_TEXT,
-            font=(self.base_font[0], 10, "bold"),
-            wraplength=progress_width,
-        ).grid(row=0, column=1, sticky="w", padx=self._pad(0, 20), pady=self._pad(30, 0))
-        self._create_update_progress_bar(body, row=1, column=1, padx=self._pad(0, 20), pady=self._pad(10, 0), width=progress_width)
+        self._build_update_header(body, title=title, pad=pad)
+        self._create_update_progress_bar(body, width=content_width, padx=pad, pady=self._pad(18, 0))
         self.update_progress_label = Label(
             body,
             text=detail,
             bg=UPDATE_DIALOG_BG,
             fg=UPDATE_DIALOG_MUTED,
             font=self.small_font,
-            wraplength=progress_width,
+            justify="left",
+            wraplength=content_width,
         )
-        self.update_progress_label.grid(row=2, column=1, sticky="w", padx=self._pad(0, 20), pady=self._pad(8, 0))
+        self.update_progress_label.pack(anchor="w", padx=pad, pady=self._pad(10, 24))
         if indeterminate:
             self._start_indeterminate_update_progress()
         else:
             self._set_update_progress(0)
+        self._finalize_update_window(window, dialog_width, close_command=close_command)
 
     def _show_update_message_window(
         self,
@@ -1786,84 +1856,142 @@ class HRToolkitApp:
         primary_command,
         secondary_text: str | None = None,
         secondary_command=None,
-        width: int = 340,
-        height: int = 260,
+        notes: list[str] | None = None,
+        width: int = 420,
         close_command=None,
+        escape_closes: bool = True,
     ) -> None:
         close_command = close_command or self._close_update_window
-        _window, body, dialog_width, _dialog_height = self._build_update_window(width=width, height=height, close_command=close_command)
-        content_pad_x = self._px(22)
-        button_pad_x = self._px(16)
-        text_wrap_width = max(1, dialog_width - content_pad_x * 2)
-        button_width = max(1, dialog_width - button_pad_x * 2)
+        window, body, dialog_width = self._build_update_window(width=width, close_command=close_command)
+        pad = self._px(24)
+        text_wrap_width = dialog_width - pad * 2
 
-        icon = Canvas(body, width=self._px(58), height=self._px(58), bg=UPDATE_DIALOG_BG, highlightthickness=0)
-        icon.pack(anchor="w", padx=content_pad_x, pady=self._pad(22, 0))
-        self._draw_update_icon(icon)
-
-        Label(
-            body,
-            text=title,
-            bg=UPDATE_DIALOG_BG,
-            fg=UPDATE_DIALOG_TEXT,
-            font=(self.base_font[0], 10, "bold"),
-            wraplength=text_wrap_width,
-        ).pack(anchor="w", padx=content_pad_x, pady=self._pad(14, 6))
+        self._build_update_header(body, title=title, pad=pad)
         Label(
             body,
             text=detail,
             bg=UPDATE_DIALOG_BG,
-            fg=UPDATE_DIALOG_TEXT,
+            fg=UPDATE_DIALOG_MUTED,
             font=self.base_font,
             justify="left",
             wraplength=text_wrap_width,
-        ).pack(anchor="w", padx=content_pad_x)
+        ).pack(anchor="w", padx=pad, pady=self._pad(12, 0))
+        if notes:
+            self._build_update_notes(body, notes, pad=pad)
 
-        button_frame = Frame(body, bg=UPDATE_DIALOG_BG)
-        button_frame.pack(side="bottom", fill="x", padx=button_pad_x, pady=self._pad(8, 16))
+        button_row = Frame(body, bg=UPDATE_DIALOG_BG)
+        button_row.pack(fill="x", padx=pad, pady=self._pad(22, 20))
         self._create_update_button(
-            button_frame,
+            button_row,
             text=primary_text,
             command=primary_command,
-            width=button_width,
-            fill=UPDATE_DIALOG_PRIMARY,
-            active_fill=UPDATE_DIALOG_PRIMARY_ACTIVE,
-            foreground="#ffffff",
-        ).pack(fill="x")
+            primary=True,
+        ).pack(side=RIGHT)
         if secondary_text and secondary_command:
             self._create_update_button(
-                button_frame,
+                button_row,
                 text=secondary_text,
                 command=secondary_command,
-                width=button_width,
-                fill=UPDATE_DIALOG_SECONDARY,
-                active_fill=UPDATE_DIALOG_SECONDARY_ACTIVE,
-                foreground=UPDATE_DIALOG_TEXT,
-            ).pack(fill="x", pady=self._pad(8, 0))
+                primary=False,
+            ).pack(side=RIGHT, padx=self._pad(0, 10))
 
-    def _build_update_window(self, *, width: int, height: int, close_command) -> tuple[Toplevel, Frame, int, int]:
+        self._finalize_update_window(
+            window,
+            dialog_width,
+            primary_command=primary_command,
+            close_command=close_command if escape_closes else None,
+        )
+
+    def _build_update_header(self, body: Frame, *, title: str, pad: int) -> None:
+        header = Frame(body, bg=UPDATE_DIALOG_BG)
+        header.pack(fill="x", padx=pad, pady=self._pad(22, 0))
+        icon = Canvas(header, width=self._px(44), height=self._px(44), bg=UPDATE_DIALOG_BG, highlightthickness=0)
+        icon.pack(side=LEFT)
+        self._draw_update_icon(icon)
+        Label(
+            header,
+            text=title,
+            bg=UPDATE_DIALOG_BG,
+            fg=UPDATE_DIALOG_TEXT,
+            font=(self.base_font[0], 13, "bold"),
+        ).pack(side=LEFT, padx=self._pad(14, 0))
+
+    def _build_update_notes(self, body: Frame, notes: list[str], *, pad: int) -> None:
+        Label(
+            body,
+            text="更新内容",
+            bg=UPDATE_DIALOG_BG,
+            fg=UPDATE_DIALOG_MUTED,
+            font=self.small_font,
+        ).pack(anchor="w", padx=pad, pady=self._pad(14, 4))
+        notes_frame = Frame(body, bg=UPDATE_DIALOG_NOTES_BG)
+        notes_frame.pack(fill="x", padx=pad)
+        text = Text(
+            notes_frame,
+            height=min(max(len(notes), 2), 6),
+            wrap="word",
+            bg=UPDATE_DIALOG_NOTES_BG,
+            fg=UPDATE_DIALOG_TEXT,
+            relief="flat",
+            bd=0,
+            padx=self._px(12),
+            pady=self._px(10),
+            font=self.base_font,
+            highlightthickness=0,
+        )
+        if len(notes) > 6:
+            scrollbar = ttk.Scrollbar(notes_frame, orient=VERTICAL, command=text.yview)
+            scrollbar.pack(side=RIGHT, fill=Y)
+            text.configure(yscrollcommand=scrollbar.set)
+        text.pack(side=LEFT, fill=BOTH, expand=True)
+        text.insert("1.0", "\n".join(f"· {line}" for line in notes))
+        text.config(state="disabled")
+
+    def _build_update_window(self, *, width: int, close_command) -> tuple[Toplevel, Frame, int]:
         self._close_update_window()
-        scaled_width, scaled_height = self._update_dialog_size(width, height)
-        self.update_window = Toplevel(self.root)
-        self.update_window.title("软件更新")
-        self._center_window(self.update_window, scaled_width, scaled_height)
-        self.update_window.resizable(False, False)
-        self.update_window.configure(bg=UPDATE_DIALOG_BG)
-        self.update_window.transient(self.root)
-        self.update_window.grab_set()
-        self.update_window.protocol("WM_DELETE_WINDOW", close_command)
-        body = Frame(self.update_window, bg=UPDATE_DIALOG_BG, width=scaled_width, height=scaled_height)
+        scaled_width, _ = self._update_dialog_size(width, 0)
+        window = Toplevel(self.root)
+        self.update_window = window
+        window.withdraw()
+        window.title("软件更新")
+        window.resizable(False, False)
+        window.configure(bg=UPDATE_DIALOG_BG)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", close_command or (lambda: None))
+        body = Frame(window, bg=UPDATE_DIALOG_BG, width=scaled_width)
         body.pack(fill=BOTH, expand=True)
-        body.pack_propagate(False)
-        return self.update_window, body, scaled_width, scaled_height
+        return window, body, scaled_width
+
+    def _finalize_update_window(
+        self,
+        window: Toplevel,
+        width: int,
+        *,
+        primary_command=None,
+        close_command=None,
+    ) -> None:
+        # 高度由内容决定，避免固定尺寸裁掉换行后的中文文本
+        window.update_idletasks()
+        height = min(window.winfo_reqheight(), max(1, self.root.winfo_screenheight() - self._px(72)))
+        self._center_window(window, width, height)
+        window.deiconify()
+        try:
+            window.grab_set()
+        except Exception:
+            pass
+        window.focus_set()
+        if primary_command is not None:
+            window.bind("<Return>", lambda _event: primary_command())
+        if close_command is not None:
+            window.bind("<Escape>", lambda _event: close_command())
 
     def _focus_update_window(self) -> None:
         if self.update_window is not None and self.update_window.winfo_exists():
             self.update_window.lift()
             self.update_window.focus_force()
 
-    def _create_update_progress_bar(self, parent: Frame, *, row: int, column: int, padx, pady, width: int | None = None) -> None:
-        self.update_progress_width = width if width is not None else self._px(248)
+    def _create_update_progress_bar(self, parent: Frame, *, width: int, padx, pady) -> None:
+        self.update_progress_width = width
         self.update_progress_canvas = Canvas(
             parent,
             width=self.update_progress_width,
@@ -1871,7 +1999,7 @@ class HRToolkitApp:
             bg=UPDATE_DIALOG_BG,
             highlightthickness=0,
         )
-        self.update_progress_canvas.grid(row=row, column=column, sticky="w", padx=padx, pady=pady)
+        self.update_progress_canvas.pack(anchor="w", padx=padx, pady=pady)
         self._draw_round_rect(self.update_progress_canvas, 0, self._pxf(1), self.update_progress_width, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_TRACK)
 
     def _set_update_progress(self, percent: float) -> None:
@@ -1909,43 +2037,36 @@ class HRToolkitApp:
         *,
         text: str,
         command,
-        width: int,
-        fill: str,
-        active_fill: str,
-        foreground: str,
+        primary: bool,
     ) -> Canvas:
-        height = self._px(30)
+        fill = UPDATE_DIALOG_PRIMARY if primary else UPDATE_DIALOG_SECONDARY
+        active_fill = UPDATE_DIALOG_PRIMARY_ACTIVE if primary else UPDATE_DIALOG_SECONDARY_ACTIVE
+        foreground = "#ffffff" if primary else UPDATE_DIALOG_TEXT
+        font_spec = (self.base_font[0], 10, "bold")
+        width = max(self._px(92), tkfont.Font(font=font_spec).measure(text) + self._px(40))
+        height = self._px(32)
         button = Canvas(parent, width=width, height=height, bg=UPDATE_DIALOG_BG, highlightthickness=0, cursor="hand2")
 
         def paint(color: str) -> None:
             button.delete("all")
             self._draw_round_rect(button, 0, 0, width, height, self._pxf(10), fill=color)
-            button.create_text(width / 2, height / 2, text=text, fill=foreground, font=(self.base_font[0], 10, "bold"))
+            button.create_text(width / 2, height / 2, text=text, fill=foreground, font=font_spec)
 
-        def activate(_event=None) -> None:
-            paint(active_fill)
-
-        def deactivate(_event=None) -> None:
-            paint(fill)
-
-        def click(_event=None) -> None:
-            command()
-
+        button.bind("<Enter>", lambda _event: paint(active_fill))
+        button.bind("<Leave>", lambda _event: paint(fill))
+        button.bind("<Button-1>", lambda _event: command())
         paint(fill)
-        button.bind("<Enter>", activate)
-        button.bind("<Leave>", deactivate)
-        button.bind("<Button-1>", click)
         return button
 
     def _draw_update_icon(self, canvas: Canvas) -> None:
+        # 与侧栏导航一致的线性图标风格：淡色圆底 + 下载箭头
         p = self._pxf
-        self._draw_round_rect(canvas, p(5), p(6), p(53), p(54), p(12), fill="#ffffff", outline="#dfe2e8")
-        canvas.create_oval(p(12), p(18), p(37), p(44), fill="#546cff", outline="")
-        canvas.create_oval(p(21), p(11), p(49), p(40), fill="#8e6cff", outline="")
-        canvas.create_oval(p(25), p(22), p(49), p(47), fill="#315cff", outline="")
-        canvas.create_rectangle(p(18), p(25), p(43), p(43), fill="#315cff", outline="")
-        canvas.create_text(p(28), p(32), text="›", fill="#ffffff", font=(self.base_font[0], 18, "bold"))
-        canvas.create_text(p(38), p(35), text="_", fill="#ffffff", font=(self.base_font[0], 14, "bold"))
+        canvas.create_oval(p(2), p(2), p(42), p(42), fill=UPDATE_DIALOG_ICON_BG, outline="")
+        line = {"fill": COLOR_PRIMARY, "width": max(1.0, p(2.4)), "capstyle": "round"}
+        canvas.create_line(p(22), p(12), p(22), p(26), **line)
+        canvas.create_line(p(16), p(20.5), p(22), p(27), **line)
+        canvas.create_line(p(28), p(20.5), p(22), p(27), **line)
+        canvas.create_line(p(14), p(32), p(30), p(32), **line)
 
     def _draw_round_rect(self, canvas: Canvas, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
         radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
