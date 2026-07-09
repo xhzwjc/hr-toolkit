@@ -1143,6 +1143,8 @@ class HRToolkitApp:
         self.tutorial_text.pack(fill="x")
         self.tutorial_text.tag_configure("strong", font=(self.base_font[0], 10, "bold"))
         self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], 10, "bold"))
+        # 高度跟随换行后的实际行数，避免固定高度裁掉后面的内容
+        self.tutorial_text.bind("<Configure>", self._resize_tutorial_text)
         self._set_tutorial_text()
 
         form = ttk.Frame(right_frame, padding=self._responsive_form_padding(), style="Card.TFrame")
@@ -2217,6 +2219,18 @@ class HRToolkitApp:
             else:
                 self.tutorial_text.insert(END, line + "\n")
         self.tutorial_text.config(state="disabled")
+        self._resize_tutorial_text()
+
+    def _resize_tutorial_text(self, _event=None) -> None:
+        try:
+            display_lines = self.tutorial_text.count("1.0", "end-1c", "displaylines")
+        except Exception:
+            return
+        if isinstance(display_lines, (tuple, list)):
+            display_lines = display_lines[0] if display_lines else 0
+        height = max(3, int(display_lines or 0) + 1)
+        if int(self.tutorial_text.cget("height")) != height:
+            self.tutorial_text.configure(height=height)
 
     def _tutorial_lines(self) -> list[tuple[str, str | None]]:
         if self.current_tool == "social_security":
