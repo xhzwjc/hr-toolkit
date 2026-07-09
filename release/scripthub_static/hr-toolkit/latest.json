@@ -1,13 +1,13 @@
 {
-  "version": "0.1.25",
+  "version": "0.1.26",
   "mandatory": true,
   "notes": [
     "修复更新"
   ],
   "platforms": {
     "windows": {
-      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.1.25-win.zip",
-      "sha256": "0912f1a7c316ff23796687a8828f519a75ced561ff44ed69d9145ecd8c93f568"
+      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.1.26-win.zip",
+      "sha256": "357bfe34bbe0e727527dac072dfd6439bf38c8ce26cc1b563a7dce1f4b4495dc"
     },
     "macos": {
       "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.1.0-mac.zip",
