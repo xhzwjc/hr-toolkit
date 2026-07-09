@@ -1,13 +1,13 @@
 {
-  "version": "0.1.28",
+  "version": "0.1.29",
   "mandatory": true,
   "notes": [
-    "考勤统计支持备注中加班/调休按小时显示"
+    "修复更新"
   ],
   "platforms": {
     "windows": {
-      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.1.28-win.zip",
-      "sha256": "f3acda1d679fbf5c7f3b0726fc3016a2512c5570fc66f2d89760f3f049691644"
+      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.1.29-win.zip",
+      "sha256": "c9d56e0dcdfbd0c9fc1be1e54714b4697e0e870f213912be1059ea03d7c181b1"
     },
     "macos": {
       "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/raw/main/release/downloads/HRToolkit-0.1.0-mac.zip",
