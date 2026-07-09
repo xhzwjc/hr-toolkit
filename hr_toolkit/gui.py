@@ -3710,10 +3710,28 @@ def _enable_high_dpi_rendering() -> None:
 
 def main() -> None:
     _install_crash_logging()
+    _set_windows_app_identity()
     _enable_high_dpi_rendering()
     root = Tk()
     HRToolkitApp(root)
     root.mainloop()
+
+
+def _set_windows_app_identity() -> None:
+    """给进程声明独立的应用身份（AppUserModelID）。
+
+    Windows 任务栏按 AppUserModelID 归组图标：用 python.exe 直接运行时，
+    窗口会被归到“Python”名下，任务栏显示 python 的图标而不是 iconphoto
+    设置的应用图标。显式声明后，任务栏改用窗口自己的图标；对打包 exe
+    也顺带让固定到任务栏的身份保持稳定。"""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HRWorkbench.HRToolkit")
+    except Exception:
+        pass
 
 
 def _install_crash_logging() -> None:
