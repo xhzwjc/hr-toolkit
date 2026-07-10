@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, PhotoImage, Toplevel, filedialog, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox
 from tkinter import Tk, StringVar, Text
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -59,54 +59,93 @@ RENAME_FILE_TYPE_LABELS = {
 RENAME_FILE_TYPE_LABELS_REVERSE = {v: k for k, v in RENAME_FILE_TYPE_LABELS.items()}
 
 TOOL_NAV_ITEMS = (
-    ("social_security", "01  社保汇总"),
-    ("data_statistics", "02  数据统计"),
-    ("insurance_ledger", "03  保险台账"),
-    ("salary_split", "04  工资拆分"),
-    ("salary_merge", "05  工资合并"),
-    ("personnel_change_merge", "06  异动汇总"),
-    ("archive_import", "07  档案入库"),
-    ("folder_rename", "08  文件夹改名"),
+    ("social_security", "社保明细与汇总"),
+    ("insurance_ledger", "保险台账与预警"),
+    ("data_statistics", "考勤与周月报"),
+    ("salary_split", "工资表拆分"),
+    ("salary_merge", "多月工资合并"),
+    ("personnel_change_merge", "异动汇总"),
+    ("archive_import", "档案入库"),
+    ("folder_rename", "资料文件夹改名"),
 )
-TOOL_LOG_LABELS = {tool_id: label.split("  ", 1)[-1] for tool_id, label in TOOL_NAV_ITEMS}
+TOOL_NAV_LABELS = dict(TOOL_NAV_ITEMS)
+# 运行日志沿用旧的简短名称，保证历史日志可以按同一关键字检索
+TOOL_LOG_LABELS = {
+    "social_security": "社保汇总",
+    "data_statistics": "数据统计",
+    "insurance_ledger": "保险台账",
+    "salary_split": "工资拆分",
+    "salary_merge": "工资合并",
+    "personnel_change_merge": "异动汇总",
+    "archive_import": "档案入库",
+    "folder_rename": "文件夹改名",
+}
+NAV_GROUPS = (
+    ("社保与保险", ("social_security", "insurance_ledger")),
+    ("考勤与统计", ("data_statistics",)),
+    ("薪酬管理", ("salary_split", "salary_merge")),
+    ("人员与档案", ("personnel_change_merge", "archive_import", "folder_rename")),
+)
+TOOL_GROUP_LABELS = {tool_id: group for group, tools in NAV_GROUPS for tool_id in tools}
+# 支持一次选择多个文件/压缩包/文件夹作为输入的工具
+MULTI_INPUT_TOOLS = {
+    "social_security",
+    "data_statistics",
+    "insurance_ledger",
+    "salary_merge",
+    "personnel_change_merge",
+    "archive_import",
+}
 
-# Clean HR operations workspace palette. It mirrors the reference mockup:
-# white sidebar, soft gray workspace, green action color, and low-contrast
-# cards built for repeated office use.
-COLOR_BG = "#f7f8f6"
-COLOR_SIDEBAR = "#ffffff"
-COLOR_SIDEBAR_ELEVATED = "#f4faf6"
+# “从容舒适 · Notion / macOS 风”暖纸色系：暖纸底色、深青主色、
+# 白色卡片分区、时间线式日志（对应设计稿方案 1b）。
+COLOR_BG = "#F7F5F1"
+COLOR_SIDEBAR = "#F7F5F1"
+COLOR_SIDEBAR_BORDER = "#EBE9E4"
 COLOR_SURFACE = "#ffffff"
-COLOR_SURFACE_ALT = "#f6faf8"
-COLOR_BORDER = "#dfe4e3"
-COLOR_TEXT = "#17202c"
-COLOR_MUTED = "#4f5b68"
-COLOR_PRIMARY = "#007f5f"
-COLOR_PRIMARY_ACTIVE = "#006b50"
-COLOR_ACCENT = "#0f8f68"
-COLOR_NAV_SELECTED = "#edf7f1"
-COLOR_NAV_HOVER = "#f5f8f6"
-COLOR_NAV_TEXT = "#4b5563"
-COLOR_NAV_TEXT_SELECTED = "#17202c"
-COLOR_SUCCESS = "#18a76f"
-COLOR_WARNING = "#d3483f"
-COLOR_TUTORIAL_BG = "#ffffff"
-COLOR_TUTORIAL_BORDER = "#dfe4e3"
+COLOR_SURFACE_ALT = "#FAF9F6"
+COLOR_SURFACE_PRESSED = "#F2F0EA"
+COLOR_BORDER = "#ECEAE4"
+COLOR_BORDER_FAINT = "#F1EFE9"
+COLOR_TEXT = "#292825"
+COLOR_MUTED = "#78766E"
+COLOR_FAINT = "#98958C"
+COLOR_DISABLED = "#B3B0A6"
+COLOR_PRIMARY = "#17715B"
+COLOR_PRIMARY_ACTIVE = "#125E4B"
+COLOR_PRIMARY_SOFT = "#E4EFEA"
+COLOR_NAV_SELECTED = "#EBE8E1"
+COLOR_NAV_HOVER = "#F0EEE8"
+COLOR_NAV_TEXT = "#55534C"
+COLOR_NAV_TEXT_SELECTED = "#17715B"
+COLOR_SUCCESS = "#1F7A52"
+COLOR_SUCCESS_DOT = "#2E9E6B"
+COLOR_WARNING = "#A05E12"
+COLOR_WARNING_DOT = "#D9A441"
+COLOR_DANGER = "#B0352B"
 COLOR_LOG_BG = "#ffffff"
-COLOR_LOG_TEXT = "#24303d"
-COLOR_LOG_MUTED = "#52606d"
+COLOR_LOG_TEXT = "#292825"
+COLOR_LOG_MUTED = "#98958C"
+COLOR_DROP_BORDER = "#D8D5CB"
+COLOR_DROP_BG = "#FBFAF7"
+COLOR_BADGE_ZIP_BG = "#F6E8D4"
+COLOR_BADGE_ZIP_FG = "#A05E12"
+COLOR_BADGE_XLS_BG = "#DFEFE7"
+COLOR_BADGE_XLS_FG = "#1F7A52"
+COLOR_BADGE_DIR_BG = "#EBE8E1"
+COLOR_BADGE_DIR_FG = "#78766E"
 APP_DISPLAY_NAME = "HR Workbench"
-APP_SUBTITLE = "Excel 批处理 · 台账生成"
+APP_SUBTITLE = "人员运营自动化"
 UPDATE_DIALOG_BG = COLOR_SURFACE
 UPDATE_DIALOG_TEXT = COLOR_TEXT
 UPDATE_DIALOG_MUTED = COLOR_MUTED
-UPDATE_DIALOG_TRACK = "#e8edf0"
+UPDATE_DIALOG_TRACK = "#EFEDE7"
 UPDATE_DIALOG_PRIMARY = COLOR_PRIMARY
 UPDATE_DIALOG_PRIMARY_ACTIVE = COLOR_PRIMARY_ACTIVE
-UPDATE_DIALOG_SECONDARY = "#f1f5f4"
-UPDATE_DIALOG_SECONDARY_ACTIVE = "#e7eeec"
-UPDATE_DIALOG_ICON_BG = "#e6f2ed"
-UPDATE_DIALOG_NOTES_BG = "#f6faf8"
+UPDATE_DIALOG_SECONDARY = "#F2F0EA"
+UPDATE_DIALOG_SECONDARY_ACTIVE = "#EBE8E1"
+UPDATE_DIALOG_ICON_BG = COLOR_PRIMARY_SOFT
+UPDATE_DIALOG_NOTES_BG = "#FAF9F6"
 BASE_WINDOWS_DPI = 96
 TK_POINTS_PER_INCH = 72
 FORCE_UI_SCALE_ENV = "HR_TOOLKIT_FORCE_UI_SCALE"
@@ -331,10 +370,12 @@ class CodexButton(Canvas):
 
     def _palette(self) -> tuple[str, str, str, str]:
         if self._state == "disabled":
-            return "#eef1f0", "#eef1f0", "#9aa3ad", COLOR_BORDER
+            return COLOR_SURFACE_PRESSED, COLOR_SURFACE_PRESSED, COLOR_DISABLED, COLOR_BORDER
         if self._variant == "primary":
             return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#ffffff", COLOR_PRIMARY
-        return COLOR_SURFACE, COLOR_SURFACE_ALT, COLOR_TEXT, COLOR_BORDER
+        if self._variant == "tonal":
+            return COLOR_SURFACE_PRESSED, COLOR_NAV_SELECTED, COLOR_NAV_TEXT, COLOR_SURFACE_PRESSED
+        return COLOR_SURFACE, COLOR_SURFACE_ALT, COLOR_NAV_TEXT, COLOR_BORDER
 
     def _on_enter(self, _event=None) -> None:
         self._hover = True
@@ -353,12 +394,23 @@ class CodexButton(Canvas):
         self.delete("all")
         width = max(self.winfo_width(), int(float(self.cget("width"))))
         height = max(self.winfo_height(), self._height)
+        text = self._display_text()
+        family = self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
+        if self._variant == "link":
+            # 文字链接样式：无底色无边框，仅深青文字，悬停加深
+            if self._state == "disabled":
+                foreground = COLOR_DISABLED
+            else:
+                foreground = COLOR_PRIMARY_ACTIVE if self._hover else COLOR_PRIMARY
+            font = (family, _font_size(10))
+            content = f"{self._icon} {text}".strip() if self._icon else text
+            self.create_text(width / 2, height / 2, text=content, fill=foreground, font=font)
+            return
         normal, active, foreground, border = self._palette()
         fill = active if self._hover and self._state != "disabled" else normal
         inset = self._pxf(1)
-        self._draw_round_rect(inset, inset, width - inset, height - inset, self._pxf(8), fill=fill, outline=border, width=self._pxf(1))
-        text = self._display_text()
-        font = (self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family"), _font_size(10))
+        self._draw_round_rect(inset, inset, width - inset, height - inset, self._pxf(9), fill=fill, outline=border, width=self._pxf(1))
+        font = (family, _font_size(10), "bold") if self._variant == "primary" else (family, _font_size(10))
         if self._icon:
             content_width = self._measure_width(text, self._icon, 0) - self._px(28)
             start_x = max((width - content_width) / 2, self._pxf(12))
@@ -400,6 +452,217 @@ class CodexButton(Canvas):
         )
 
 
+def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: float, size: float, line_width: float) -> None:
+    """在 size×size 的方框内绘制工具线性图标（坐标按设计稿 14×14 视图换算）。"""
+
+    def px(value: float) -> float:
+        return x + value * size / 14.0
+
+    def py(value: float) -> float:
+        return y + value * size / 14.0
+
+    line = {"fill": color, "width": line_width, "capstyle": "round", "joinstyle": "round"}
+    if icon_id == "social_security":
+        canvas.create_rectangle(px(2.5), py(1.5), px(11.5), py(12.5), outline=color, width=line_width)
+        canvas.create_line(px(5), py(5), px(9), py(5), **line)
+        canvas.create_line(px(5), py(8), px(9), py(8), **line)
+    elif icon_id == "insurance_ledger":
+        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
+        canvas.create_line(px(4.6), py(7), px(6.3), py(8.7), px(9.6), py(5.4), **line)
+    elif icon_id == "data_statistics":
+        canvas.create_line(px(2.5), py(12), px(2.5), py(7), **line)
+        canvas.create_line(px(7), py(12), px(7), py(2.5), **line)
+        canvas.create_line(px(11.5), py(12), px(11.5), py(5), **line)
+    elif icon_id == "salary_split":
+        canvas.create_line(px(7), py(2), px(7), py(6), **line)
+        canvas.create_line(px(7), py(6), px(3), py(11), **line)
+        canvas.create_line(px(7), py(6), px(11), py(11), **line)
+    elif icon_id == "salary_merge":
+        canvas.create_line(px(3), py(3), px(7), py(8), **line)
+        canvas.create_line(px(11), py(3), px(7), py(8), **line)
+        canvas.create_line(px(7), py(8), px(7), py(12), **line)
+    elif icon_id == "personnel_change_merge":
+        canvas.create_line(px(2), py(4.5), px(10), py(4.5), **line)
+        canvas.create_line(px(8), py(2), px(10.5), py(4.5), px(8), py(7), **line)
+        canvas.create_line(px(12), py(9.5), px(4), py(9.5), **line)
+        canvas.create_line(px(6), py(7), px(3.5), py(9.5), px(6), py(12), **line)
+    elif icon_id == "archive_import":
+        canvas.create_rectangle(px(2), py(4.5), px(12), py(12), outline=color, width=line_width)
+        canvas.create_line(px(2), py(7), px(12), py(7), **line)
+        canvas.create_line(px(7), py(4.5), px(7), py(2.5), **line)
+    elif icon_id == "folder_rename":
+        canvas.create_line(
+            px(2), py(10.5), px(2), py(4), px(3.5), py(2.5), px(6), py(2.5), px(7.2), py(4),
+            px(10.5), py(4), px(12), py(5.5), px(12), py(10.5), px(10.5), py(12), px(3.5), py(12), px(2), py(10.5),
+            **line,
+        )
+    elif icon_id == "tutorial":
+        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
+        canvas.create_line(px(7), py(6.5), px(7), py(10), **line)
+        canvas.create_line(px(7), py(4), px(7), py(4.45), **line)
+    elif icon_id == "clock":
+        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
+        canvas.create_line(px(7), py(4), px(7), py(7.2), px(9), py(8.6), **line)
+    else:
+        canvas.create_oval(px(3), py(3), px(11), py(11), outline=color, width=line_width)
+
+
+class SidebarItem(Canvas):
+    """侧边栏导航条目：圆角底 + 线性图标 + 文字（对应设计稿导航行）。"""
+
+    def __init__(
+        self,
+        master,
+        *,
+        text: str,
+        icon_id: str,
+        command=None,
+        height: int = 32,
+        muted: bool = False,
+    ) -> None:
+        self._scale = _widget_ui_scale(master)
+        self._text = text
+        self._icon_id = icon_id
+        self._command = command
+        self._muted = muted
+        self._selected = False
+        self._hover = False
+        super().__init__(
+            master,
+            height=_scale_px(height, self._scale),
+            bg=COLOR_SIDEBAR,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Configure>", lambda _event: self._redraw())
+        self._redraw()
+
+    def _px(self, value: int | float) -> int:
+        return _scale_px(value, self._scale)
+
+    def _pxf(self, value: int | float) -> float:
+        return _scale_float(value, self._scale)
+
+    def set_selected(self, selected: bool) -> None:
+        if self._selected != selected:
+            self._selected = selected
+            self._redraw()
+
+    def _on_enter(self, _event=None) -> None:
+        self._hover = True
+        self._redraw()
+
+    def _on_leave(self, _event=None) -> None:
+        self._hover = False
+        self._redraw()
+
+    def _on_click(self, _event=None) -> None:
+        if self._command is not None:
+            self._command()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 1)
+        height = max(self.winfo_height(), 1)
+        if self._selected:
+            fill = COLOR_NAV_SELECTED
+        elif self._hover:
+            fill = COLOR_NAV_HOVER
+        else:
+            fill = COLOR_SIDEBAR
+        if fill != COLOR_SIDEBAR:
+            radius = self._pxf(7)
+            CodexButton._draw_round_rect(self, 0, 0, width, height, radius, fill=fill, outline="")
+        if self._selected:
+            foreground = COLOR_NAV_TEXT_SELECTED
+        elif self._muted:
+            foreground = COLOR_MUTED
+        else:
+            foreground = COLOR_NAV_TEXT
+        icon_size = self._pxf(15)
+        icon_x = self._pxf(9)
+        icon_y = (height - icon_size) / 2
+        _paint_tool_icon(self, self._icon_id, foreground, icon_x, icon_y, icon_size, max(1.0, self._pxf(1.4)))
+        family = self.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
+        font = (family, _font_size(10), "bold") if self._selected else (family, _font_size(10))
+        self.create_text(icon_x + icon_size + self._pxf(9), height / 2, text=self._text, fill=foreground, font=font, anchor="w")
+
+
+class RoundedCard(Canvas):
+    """白色圆角卡片容器（设计稿 border-radius:14px 的卡片分区）。
+
+    Canvas 负责画圆角底和淡投影，内容放进 ``inner``（ttk.Frame）；
+    fill_height=False 时卡片高度跟随内容，True 时内容撑满分配到的高度。
+    """
+
+    def __init__(
+        self,
+        master,
+        *,
+        padding: tuple[int, int, int, int] = (20, 16, 20, 18),
+        radius: int = 14,
+        fill_height: bool = False,
+        min_height: int = 0,
+    ) -> None:
+        self._scale = _widget_ui_scale(master)
+        self._radius = _scale_float(radius, self._scale)
+        self._fill_height = fill_height
+        page_bg = CodexButton._resolve_parent_bg(master)
+        super().__init__(
+            master,
+            bg=page_bg,
+            highlightthickness=0,
+            bd=0,
+            height=_scale_px(min_height, self._scale) if min_height else 1,
+        )
+        self.inner = ttk.Frame(self, style="InputWrap.TFrame")
+        self._pads = (0, 0, 0, 0)
+        self._window = self.create_window(0, 0, window=self.inner, anchor="nw")
+        self._last_bg_size = (0, 0)
+        self.set_padding(padding, sync=False)
+        self.inner.bind("<Configure>", self._sync)
+        self.bind("<Configure>", self._sync)
+
+    def set_padding(self, padding: tuple[int, int, int, int], *, sync: bool = True) -> None:
+        # 内容窗口向内缩进，让方角的内容框始终落在圆角轮廓之内
+        self._pads = tuple(_scale_px(value, self._scale) for value in padding)
+        self.coords(self._window, self._pads[0], self._pads[1])
+        if sync:
+            self._sync()
+
+    def _sync(self, _event=None) -> None:
+        left, top, right, bottom = self._pads
+        width = max(self.winfo_width(), 1)
+        inner_width = max(width - left - right, 1)
+        if self._fill_height:
+            height = max(self.winfo_height(), 1)
+            self.itemconfigure(self._window, width=inner_width, height=max(height - top - bottom, 1))
+        else:
+            self.itemconfigure(self._window, width=inner_width)
+            height = self.inner.winfo_reqheight() + top + bottom
+            if int(float(self.cget("height"))) != height:
+                self.configure(height=height)
+        if (width, height) != self._last_bg_size:
+            self._last_bg_size = (width, height)
+            self._redraw_bg(width, height)
+
+    def _redraw_bg(self, width: int, height: int) -> None:
+        self.delete("card_bg")
+        offset = max(1.0, _scale_float(1.5, self._scale))
+        # 无边框卡片：底下垫一层淡色圆角模拟设计稿的轻投影
+        CodexButton._draw_round_rect(
+            self, offset, offset * 1.6, width - offset * 0.4, height, self._radius, fill="#ECE9E2", outline="", tags="card_bg"
+        )
+        CodexButton._draw_round_rect(
+            self, 0, 0, width - offset, height - offset, self._radius, fill=COLOR_SURFACE, outline="", tags="card_bg"
+        )
+        self.tag_lower("card_bg")
+
+
 class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -418,15 +681,26 @@ class HRToolkitApp:
         self.root.configure(bg=COLOR_BG)
 
         self.current_tool = "social_security"
-        self.nav_buttons: dict[str, ttk.Button] = {}
-        self.nav_icons: dict[str, Canvas] = {}
+        self.nav_buttons: dict[str, SidebarItem] = {}
         self.tool_title = StringVar()
         self.tool_description = StringVar()
+        self.tool_group = StringVar()
         self.input_label = StringVar()
+        self.input_hint = StringVar()
         self.choose_input_text = StringVar()
         self.run_button_text = StringVar()
         self.summary_label = StringVar()
         self.summary_button_text = StringVar()
+        self.last_run_text = StringVar()
+        self.last_run_state = StringVar()
+        # 每个工具（含子模式）本次会话内的最近一次运行结果：(时间, 成功/失败)
+        self._last_run_results: dict[str, tuple[str, str]] = {}
+        # 合并后的上传入口：当前工具可用的文件/文件夹选择动作与提示文案
+        self._input_file_cmd = None
+        self._input_folder_cmd = None
+        self._input_drop_title = ""
+        self._input_allow_multi = True
+        self._tutorial_window: Toplevel | None = None
         self.change_mode = "merge"
         self.change_form_state: dict[str, tuple[str, str, list[Path] | None]] = {
             "merge": ("", "", None),
@@ -562,23 +836,23 @@ class HRToolkitApp:
             return self._pad(24, 28, 28, 24)
         return self._pad(42, 34, 58, 28)
 
-    def _responsive_form_padding(self) -> tuple[int, int, int, int]:
+    def _responsive_form_padding_units(self) -> tuple[int, int, int, int]:
         logical_width = self._logical_screen_width()
         if self.ui_scale >= 1.75 and logical_width < 900:
-            return self._pad(12, 16, 12, 16)
+            return (12, 16, 12, 16)
         if logical_width < 1100:
-            return self._pad(16, 18, 16, 18)
-        return self._pad(24, 22, 24, 22)
+            return (16, 18, 16, 18)
+        return (24, 22, 24, 22)
 
     def _responsive_sidebar_width(self) -> int:
         logical_width = self._logical_screen_width()
         if self.ui_scale >= 1.75 and logical_width < 900:
             return self._px(200)
         if self.ui_scale >= 1.5 and logical_width < 900:
-            return self._px(240)
+            return self._px(232)
         if logical_width < 1100:
-            return self._px(260)
-        return self._px(286)
+            return self._px(236)
+        return self._px(248)
 
     def _configure_style(self) -> None:
         if sys.platform == "darwin":
@@ -593,10 +867,9 @@ class HRToolkitApp:
         self.base_font = (family, _font_size(10))
         self.small_font = (family, _font_size(9))
         self.tiny_font = (family, _font_size(8))
-        self.title_font = (family, _font_size(22), "bold")
+        self.title_font = (family, _font_size(18), "bold")
         self.section_font = (family, _font_size(10), "bold")
-        self.nav_font = (family, _font_size(10))
-        self.nav_selected_font = (family, _font_size(10), "bold")
+        self.card_title_font = (family, _font_size(11), "bold")
         self.mono_font = (mono_family, _font_size(10))
         self.root.option_add("*TCombobox*Listbox.font", self.base_font)
 
@@ -607,36 +880,9 @@ class HRToolkitApp:
         style.configure(".", font=self.base_font, background=COLOR_BG, foreground=COLOR_TEXT)
         style.configure("App.TFrame", background=COLOR_BG)
         style.configure("Sidebar.TFrame", background=COLOR_SIDEBAR)
-        style.configure("SidebarElevated.TFrame", background=COLOR_SIDEBAR_ELEVATED)
         style.configure("Content.TFrame", background=COLOR_BG)
-        style.configure("Card.TFrame", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
-        style.configure("InputWrap.TFrame", background=COLOR_SURFACE)
-        style.configure("Separator.TFrame", background=COLOR_BORDER)
         style.configure(
-            "Tutorial.TFrame",
-            background=COLOR_TUTORIAL_BG,
-            bordercolor=COLOR_TUTORIAL_BORDER,
-            lightcolor=COLOR_TUTORIAL_BORDER,
-            darkcolor=COLOR_TUTORIAL_BORDER,
-            borderwidth=self._px(1),
-            relief="solid",
-        )
-        style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=self._px(1), bordercolor=COLOR_BORDER)
-        style.configure("NavRow.TFrame", background=COLOR_SIDEBAR)
-        style.configure("NavIndicator.TFrame", background=COLOR_SIDEBAR)
-        style.configure("NavIndicatorSelected.TFrame", background=COLOR_ACCENT)
-        style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
-        style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
-        style.configure("Eyebrow.TLabel", background=COLOR_BG, foreground=COLOR_PRIMARY, font=(self.base_font[0], _font_size(9), "bold"))
-        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], _font_size(10)))
-        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], _font_size(14), "bold"))
-        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
-        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=(self.base_font[0], _font_size(8), "bold"))
-        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=self.tiny_font)
-        style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
-        style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=self._pad(8, 6))
-        style.configure(
-            "Card.TLabelframe",
+            "Card.TFrame",
             background=COLOR_SURFACE,
             bordercolor=COLOR_BORDER,
             lightcolor=COLOR_BORDER,
@@ -644,8 +890,31 @@ class HRToolkitApp:
             relief="solid",
             borderwidth=self._px(1),
         )
-        style.configure("Card.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
-        style.configure("Rename.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
+        style.configure("InputWrap.TFrame", background=COLOR_SURFACE)
+        style.configure("Separator.TFrame", background=COLOR_SIDEBAR_BORDER)
+        style.configure("CardSeparator.TFrame", background=COLOR_BORDER_FAINT)
+        style.configure("Tooltip.TFrame", background=COLOR_SURFACE, relief="solid", borderwidth=self._px(1), bordercolor=COLOR_BORDER)
+        style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
+        style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
+        style.configure("Eyebrow.TLabel", background=COLOR_BG, foreground=COLOR_PRIMARY, font=(self.base_font[0], _font_size(9), "bold"))
+        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], _font_size(10)))
+        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], _font_size(11), "bold"))
+        style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_FAINT, font=self.small_font)
+        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_DISABLED, font=(self.base_font[0], _font_size(8), "bold"))
+        style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_DISABLED, font=self.tiny_font)
+        style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=self._pad(8, 6))
+        style.configure("CardTitle.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.card_title_font)
+        style.configure("CardHint.TLabel", background=COLOR_SURFACE, foreground=COLOR_FAINT, font=self.small_font)
+        style.configure("CardMuted.TLabel", background=COLOR_SURFACE, foreground=COLOR_MUTED, font=self.small_font)
+        style.configure(
+            "Rename.TLabelframe",
+            background=COLOR_SURFACE,
+            bordercolor=COLOR_BORDER,
+            lightcolor=COLOR_BORDER,
+            darkcolor=COLOR_BORDER,
+            relief="solid",
+            borderwidth=self._px(1),
+        )
         style.configure("Rename.TLabelframe.Label", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("App.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
         style.configure("App.TRadiobutton", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
@@ -675,43 +944,38 @@ class HRToolkitApp:
             arrowcolor=COLOR_MUTED,
             padding=self._pad(12, 7),
         )
-        style.configure("Nav.TButton", anchor="w", padding=self._pad(8, 10), background=COLOR_SIDEBAR, foreground=COLOR_NAV_TEXT, borderwidth=0, font=self.nav_font, relief="flat")
-        style.configure("NavSelected.TButton", anchor="w", padding=self._pad(8, 10), background=COLOR_NAV_SELECTED, foreground=COLOR_NAV_TEXT_SELECTED, borderwidth=0, font=self.nav_selected_font, relief="flat")
-        nav_button_layout = [
-            (
-                "Button.border",
-                {
-                    "sticky": "nswe",
-                    "border": "0",
-                    "children": [
-                        (
-                            "Button.padding",
-                            {
-                                "sticky": "nswe",
-                                "children": [("Button.label", {"sticky": "nswe"})],
-                            },
-                        )
-                    ],
-                },
-            )
-        ]
-        style.layout("Nav.TButton", nav_button_layout)
-        style.layout("NavSelected.TButton", nav_button_layout)
-        style.map("Nav.TButton", background=[("active", COLOR_NAV_HOVER)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
-        style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
-        style.configure("Primary.TButton", padding=self._pad(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], _font_size(10), "bold"), relief="flat")
-        style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
-        style.configure("Secondary.TButton", padding=self._pad(12, 7), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
-        style.map("Secondary.TButton", background=[("active", COLOR_SURFACE_ALT), ("disabled", "#eef1f0")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#cbd5d3")])
-        style.configure("Icon.TButton", padding=self._pad(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=self._px(1), relief="solid", font=(self.base_font[0], _font_size(10), "bold"))
-        style.map("Icon.TButton", background=[("active", COLOR_SURFACE_ALT)], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#cbd5d3")])
         style.configure("Change.TNotebook", background=COLOR_BG, borderwidth=0)
-        style.configure("Change.TNotebook.Tab", padding=self._pad(18, 9), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
-        style.map("Change.TNotebook.Tab", background=[("selected", COLOR_NAV_SELECTED)], foreground=[("selected", COLOR_PRIMARY)])
+        style.configure(
+            "Change.TNotebook.Tab",
+            padding=self._pad(18, 8),
+            background=COLOR_NAV_SELECTED,
+            foreground=COLOR_NAV_TEXT,
+            bordercolor=COLOR_BORDER,
+        )
+        style.map(
+            "Change.TNotebook.Tab",
+            background=[("selected", COLOR_SURFACE)],
+            foreground=[("selected", COLOR_PRIMARY)],
+        )
 
     def _build_layout(self) -> None:
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         root_frame.pack(fill=BOTH, expand=True)
+
+        def _clear_entry_focus(event) -> None:
+            # 点击输入框以外的地方时收起光标（可编辑控件自己会接管焦点）
+            try:
+                widget_class = event.widget.winfo_class()
+            except Exception:
+                return
+            if widget_class in ("TEntry", "Entry", "Text", "TCombobox", "Listbox"):
+                return
+            try:
+                self.root.focus_set()
+            except Exception:
+                pass
+
+        self.root.bind("<Button-1>", _clear_entry_focus, add="+")
 
         left_frame = ttk.Frame(root_frame, width=self._responsive_sidebar_width(), style="Sidebar.TFrame")
         left_frame.pack(side=LEFT, fill=Y)
@@ -727,7 +991,7 @@ class HRToolkitApp:
         left_vscroll.grid_remove()
         left_canvas.configure(yscrollcommand=left_vscroll.set)
 
-        left_content = ttk.Frame(left_canvas, padding=self._pad(24, 28, 26, 18), style="Sidebar.TFrame")
+        left_content = ttk.Frame(left_canvas, padding=self._pad(12, 16, 12, 14), style="Sidebar.TFrame")
         left_canvas_window = left_canvas.create_window((0, 0), window=left_content, anchor="nw")
 
         def _sync_left_canvas(_event=None) -> None:
@@ -828,55 +1092,51 @@ class HRToolkitApp:
                 _apply_left_scroll_tag(child)
 
         brand_row = ttk.Frame(left_content, style="Sidebar.TFrame")
-        brand_row.pack(fill="x")
-        brand_mark = Canvas(brand_row, width=self._px(48), height=self._px(48), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        brand_row.pack(fill="x", padx=self._pad(6), pady=self._pad(2, 16))
+        brand_mark = Canvas(brand_row, width=self._px(26), height=self._px(26), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
         brand_mark.pack(side=LEFT)
-        self._draw_round_rect(brand_mark, self._pxf(2), self._pxf(2), self._pxf(46), self._pxf(46), self._pxf(11), fill=COLOR_PRIMARY, outline="")
-        brand_mark.create_text(self._pxf(24), self._pxf(24), text="HR", fill="#ffffff", font=(self.base_font[0], _font_size(12), "bold"))
+        self._draw_round_rect(brand_mark, self._pxf(0.5), self._pxf(0.5), self._pxf(25.5), self._pxf(25.5), self._pxf(7), fill=COLOR_PRIMARY, outline="")
+        brand_mark.create_text(self._pxf(13), self._pxf(13), text="HR", fill="#ffffff", font=(self.base_font[0], _font_size(8), "bold"))
         brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
-        brand_text.pack(side=LEFT, fill="x", expand=True, padx=self._pad(14, 0))
+        brand_text.pack(side=LEFT, fill="x", expand=True, padx=self._pad(9, 0))
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
-        ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w", pady=self._pad(3, 0))
-
-        ttk.Label(left_content, text="WORKFLOWS", style="SidebarSection.TLabel").pack(anchor="w", pady=self._pad(36, 10))
-        self.nav_indicators = {}
+        ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w")
 
         nav_frame = ttk.Frame(left_content, style="Sidebar.TFrame")
         nav_frame.pack(fill="x")
-        for tool_id, label in TOOL_NAV_ITEMS:
-            selected = tool_id == self.current_tool
-            row = ttk.Frame(nav_frame, style="NavRow.TFrame")
-            row.pack(fill="x", pady=self._px(3))
-            indicator_width = self._px(4)
-            indicator = ttk.Frame(
-                row,
-                width=indicator_width,
-                style="NavIndicatorSelected.TFrame" if selected else "NavIndicator.TFrame",
-            )
-            indicator.pack(side=LEFT, fill=Y)
-            indicator.pack_propagate(False)
-            icon_bg = COLOR_NAV_SELECTED if selected else COLOR_SIDEBAR
-            icon = Canvas(row, width=self._px(28), height=self._px(40), bg=icon_bg, highlightthickness=0, bd=0, cursor="hand2")
-            icon.pack(side=LEFT, fill=Y)
-            icon.bind("<Button-1>", lambda _event, selected_tool=tool_id: self._select_tool(selected_tool))
-            self._draw_nav_icon(icon, tool_id, selected)
-            button = ttk.Button(
-                row,
-                text=label,
-                style="NavSelected.TButton" if selected else "Nav.TButton",
-                takefocus=False,
-                command=lambda selected=tool_id: self._select_tool(selected),
-            )
-            button.pack(side=LEFT, fill="x", expand=True)
-            self.nav_buttons[tool_id] = button
-            self.nav_indicators[tool_id] = indicator
-            self.nav_icons[tool_id] = icon
+        for group_label, group_tools in NAV_GROUPS:
+            ttk.Label(nav_frame, text=group_label, style="SidebarSection.TLabel").pack(anchor="w", padx=self._pad(9), pady=self._pad(12, 5))
+            for tool_id in group_tools:
+                item = SidebarItem(
+                    nav_frame,
+                    text=TOOL_NAV_LABELS[tool_id],
+                    icon_id=tool_id,
+                    command=lambda selected=tool_id: self._select_tool(selected),
+                )
+                item.pack(fill="x", pady=self._px(1))
+                item.set_selected(tool_id == self.current_tool)
+                self.nav_buttons[tool_id] = item
 
         sidebar_footer = ttk.Frame(left_content, style="Sidebar.TFrame")
         sidebar_footer.pack(side="bottom", fill="x")
-        ttk.Frame(sidebar_footer, height=self._px(1), style="Separator.TFrame").pack(fill="x", pady=self._pad(0, 12))
-        ttk.Label(sidebar_footer, text="本地处理 · 不上传数据", style="SidebarMuted.TLabel").pack(anchor="w")
-        ttk.Label(sidebar_footer, text=f"Version {__version__}", style="Version.TLabel").pack(anchor="w", pady=self._pad(5, 0))
+        tutorial_item = SidebarItem(
+            sidebar_footer,
+            text="使用教程",
+            icon_id="tutorial",
+            command=self._open_tutorial_window,
+            muted=True,
+        )
+        tutorial_item.pack(fill="x")
+        version_row = ttk.Frame(sidebar_footer, style="Sidebar.TFrame")
+        version_row.pack(fill="x", pady=self._pad(8, 0))
+        ttk.Frame(version_row, height=self._px(1), style="Separator.TFrame").pack(fill="x", pady=self._pad(0, 9))
+        version_line = ttk.Frame(version_row, style="Sidebar.TFrame")
+        version_line.pack(fill="x", padx=self._pad(9))
+        ttk.Label(version_line, text=f"v{__version__}", style="Version.TLabel").pack(side=LEFT)
+        version_dot = Canvas(version_line, width=self._px(9), height=self._px(9), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        version_dot.pack(side=LEFT, padx=self._pad(6, 0), pady=self._pad(1, 0))
+        version_dot.create_oval(self._pxf(2), self._pxf(2), self._pxf(7), self._pxf(7), fill=COLOR_SUCCESS_DOT, outline="")
+        ttk.Label(version_line, text="本地处理 · 不上传数据", style="SidebarMuted.TLabel").pack(side=RIGHT)
 
         _apply_left_scroll_tag(left_canvas)
         _apply_left_scroll_tag(left_content)
@@ -1114,7 +1374,7 @@ class HRToolkitApp:
         title_row = ttk.Frame(right_frame, style="Content.TFrame")
         title_row.pack(fill="x")
         title_row.columnconfigure(0, weight=1)
-        ttk.Label(title_row, text="人员运营自动化", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(title_row, textvariable=self.tool_group, style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
         self.title_label = ttk.Label(title_row, textvariable=self.tool_title, style="Title.TLabel", justify="left")
         self.title_label.grid(row=1, column=0, sticky="w", pady=self._pad(5, 0))
         title_actions = ttk.Frame(title_row, style="Content.TFrame")
@@ -1127,8 +1387,6 @@ class HRToolkitApp:
             width=118,
         )
         self.check_update_button.pack(side=LEFT)
-        self.tutorial_toggle_button = CodexButton(title_actions, text="使用教程", icon="i", width=118)
-        self.tutorial_toggle_button.pack(side=LEFT, padx=self._pad(8, 0))
         self.subtitle_label = Label(
             right_frame,
             textvariable=self.tool_description,
@@ -1138,40 +1396,19 @@ class HRToolkitApp:
             justify="left",
             anchor="w",
         )
-        self.subtitle_label.pack(anchor="w", fill="x", pady=self._pad(10, 26))
-
-        self._title_actions_vertical = False
-
-        def _pack_title_actions(vertical: bool) -> None:
-            if self._title_actions_vertical == vertical:
-                return
-            self._title_actions_vertical = vertical
-            self.check_update_button.pack_forget()
-            self.tutorial_toggle_button.pack_forget()
-            if vertical:
-                self.check_update_button.pack(anchor="w")
-                self.tutorial_toggle_button.pack(anchor="w", pady=self._pad(8, 0))
-            else:
-                self.check_update_button.pack(side=LEFT)
-                self.tutorial_toggle_button.pack(side=LEFT, padx=self._pad(8, 0))
+        self.subtitle_label.pack(anchor="w", fill="x", pady=self._pad(8, 22))
 
         def _update_text_wraps(_event=None) -> None:
             title_row_width = title_row.winfo_width()
             if title_row_width <= 1:
                 title_row_width = self._px(240)
-            horizontal_actions_width = self._px(118 + 8 + 118)
-            vertical_actions_width = self._px(118)
-            tight_header = title_row_width < self._px(620)
-            vertical_actions = title_row_width < horizontal_actions_width + self._px(32)
-            _pack_title_actions(vertical_actions)
-
+            actions_width = self._px(118)
+            tight_header = title_row_width < self._px(480)
             if tight_header:
                 title_actions.grid_configure(row=2, column=0, columnspan=2, rowspan=1, sticky="w", pady=self._pad(12, 0))
-                actions_width = vertical_actions_width if vertical_actions else horizontal_actions_width
                 title_wrap = title_row_width
             else:
                 title_actions.grid_configure(row=0, column=1, columnspan=1, rowspan=2, sticky="ne", pady=0)
-                actions_width = horizontal_actions_width
                 title_wrap = title_row_width - actions_width - self._px(24)
 
             title_wrap = max(1, title_wrap)
@@ -1188,32 +1425,28 @@ class HRToolkitApp:
         self.change_tabs.add(ttk.Frame(self.change_tabs, style="Content.TFrame"), text="花名册更新")
         self.change_tabs.bind("<<NotebookTabChanged>>", self._on_change_tab_changed)
 
-        self.tutorial_frame = ttk.Frame(right_frame, padding=self._px(14), style="Tutorial.TFrame")
-        ttk.Label(self.tutorial_frame, text="使用教程", style="TutorialTitle.TLabel").pack(anchor="w", pady=self._pad(0, 6))
-        self.tutorial_text = Text(
-            self.tutorial_frame,
-            height=6,
-            wrap="word",
-            padx=self._px(10),
-            pady=self._px(8),
-            bg=COLOR_TUTORIAL_BG,
-            fg=COLOR_TEXT,
-            relief="flat",
-            bd=0,
-            highlightthickness=self._px(1),
-            highlightbackground=COLOR_TUTORIAL_BORDER,
-            highlightcolor=COLOR_TUTORIAL_BORDER,
-            font=self.base_font,
+        # 合并后的上传入口卡片：空态为虚线拖放区样式，选中后显示文件条目
+        self.upload_card = RoundedCard(right_frame, padding=(20, 16, 20, 18))
+        self.upload_card.pack(fill="x")
+        upload_header = ttk.Frame(self.upload_card.inner, style="InputWrap.TFrame")
+        upload_header.pack(fill="x", pady=self._pad(0, 10))
+        ttk.Label(upload_header, textvariable=self.input_label, style="CardTitle.TLabel").pack(side=LEFT)
+        ttk.Label(upload_header, textvariable=self.input_hint, style="CardHint.TLabel").pack(side=LEFT, padx=self._pad(9, 0))
+        self.upload_add_button = CodexButton(
+            upload_header,
+            text="＋ 添加",
+            command=self._show_add_input_menu,
+            variant="link",
+            width=72,
+            min_width=56,
+            height=24,
         )
-        self.tutorial_text.pack(fill="x")
-        self.tutorial_text.tag_configure("strong", font=(self.base_font[0], _font_size(10), "bold"))
-        self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], _font_size(10), "bold"))
-        # 高度跟随换行后的实际行数，避免固定高度裁掉后面的内容
-        self.tutorial_text.bind("<Configure>", self._resize_tutorial_text)
-        self._set_tutorial_text()
+        self.upload_body = ttk.Frame(self.upload_card.inner, style="InputWrap.TFrame")
+        self.upload_body.pack(fill="x")
 
-        form = ttk.Frame(right_frame, padding=self._responsive_form_padding(), style="Card.TFrame")
-        form.pack(fill="x")
+        self.form_card = RoundedCard(right_frame, padding=self._responsive_form_padding_units())
+        self.form_card.pack(fill="x", pady=self._pad(14, 0))
+        form = self.form_card.inner
         self.form = form
         self._form_compact_layout = False
         self._summary_row_visible = True
@@ -1234,7 +1467,7 @@ class HRToolkitApp:
             entry.pack(side=LEFT, fill=BOTH, expand=True)
             button_bar = ttk.Frame(input_frame, style="InputWrap.TFrame")
             button_bar.pack(side=RIGHT)
-            button = CodexButton(button_bar, text="选择", command=command, width=64, min_width=64)
+            button = CodexButton(button_bar, text="选择", command=command, width=64, min_width=56, variant="link")
             setattr(button, "_hr_picker_visible", True)
             button.pack(side=RIGHT, padx=self._pad(10, 0))
             setattr(input_frame, "_hr_entry", entry)
@@ -1248,51 +1481,52 @@ class HRToolkitApp:
             }
             return label, input_frame, button
 
-        self.input_label_widget, self.input_entry_widget, self.input_choose_button = make_input_row(
-            "input",
-            0,
-            self.input_label,
-            self.input_path,
-            self._choose_input,
-        )
         self.summary_label_widget, self.summary_entry_widget, self.summary_choose_button = make_input_row(
             "summary",
-            1,
+            0,
             self.summary_label,
             self.summary_path,
             self._choose_summary,
         )
         self.output_label_widget, self.output_entry_widget, self.output_choose_button = make_input_row(
             "output",
-            2,
+            1,
             "保存位置",
             self.output_dir,
             self._choose_output,
         )
-        self.change_folder_zip_button = CodexButton(
-            getattr(self.input_entry_widget, "_hr_button_bar"),
-            text="文件夹",
-            command=self._choose_change_folder,
-            width=96,
-        )
-        self.change_file_button = CodexButton(
-            getattr(self.input_entry_widget, "_hr_button_bar"),
-            text="文件/压缩包",
-            command=self._choose_change_files_or_zip,
-            width=126,
-        )
+        self.output_choose_button.configure(text="更改")
         self.change_summary_folder_button = CodexButton(
             getattr(self.summary_entry_widget, "_hr_button_bar"),
-            text="文件夹",
+            text="选择文件夹",
             command=self._choose_change_summary_folder,
             width=96,
+            variant="link",
         )
         self.change_summary_file_button = CodexButton(
             getattr(self.summary_entry_widget, "_hr_button_bar"),
-            text="文件",
+            text="选择文件",
             command=self._choose_change_summary_file,
             width=84,
+            variant="link",
         )
+
+        # 花名册/汇总表一行只显示文件名，完整路径悬停查看（对应设计稿第二张卡片的行）
+        summary_entry = self._form_rows["summary"]["entry"]
+        summary_entry.destroy()
+        self.summary_display = Label(
+            self.summary_entry_widget,
+            text="未选择",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.base_font,
+            anchor="w",
+        )
+        self._form_rows["summary"]["entry"] = self.summary_display
+        setattr(self.summary_entry_widget, "_hr_entry", self.summary_display)
+        self.summary_path.trace_add("write", lambda *_args: self._update_summary_display())
+        self._bind_path_tooltip(self.summary_display, lambda: self.summary_path.get().strip())
+        self._update_summary_display()
 
         self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=self._px(12), style="Rename.TLabelframe")
         self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
@@ -1417,7 +1651,7 @@ class HRToolkitApp:
         def _apply_form_layout() -> None:
             form.columnconfigure(0, weight=1 if self._form_compact_layout else 0)
             form.columnconfigure(1, weight=0 if self._form_compact_layout else 1)
-            visible_keys = ["input"]
+            visible_keys = []
             if self._summary_row_visible:
                 visible_keys.append("summary")
             if self._output_row_visible:
@@ -1450,7 +1684,7 @@ class HRToolkitApp:
                         pady=self._pad(0, 8),
                     )
                     continue
-                frame_padx = self._pad(18, 0) if key == "input" else self._pad(12, 0)
+                frame_padx = self._pad(12, 0)
                 label.grid(row=row_data["index"], column=0, sticky="w", padx=0, pady=self._px(7))
                 frame.grid(row=row_data["index"], column=1, sticky="ew", padx=frame_padx, pady=self._px(7))
 
@@ -1477,13 +1711,19 @@ class HRToolkitApp:
 
         def _update_form_responsive_layout(_event=None) -> None:
             content_padding = self._responsive_content_padding()
-            form_padding = self._responsive_form_padding()
+            form_padding = self._responsive_form_padding_units()
+            # 内容列限宽居中（对应设计稿 max-width:780 的主内容列）
+            canvas_width = self._right_canvas.winfo_width()
+            if canvas_width > 1:
+                base_left, pad_top, base_right, pad_bottom = content_padding
+                extra = max(0, (canvas_width - base_left - base_right - self._px(820)) // 2)
+                content_padding = (base_left + extra, pad_top, base_right + extra, pad_bottom)
             if getattr(self, "_right_content_padding", None) != content_padding:
                 self._right_content_padding = content_padding
                 right_frame.configure(padding=content_padding)
             if getattr(self, "_form_padding", None) != form_padding:
                 self._form_padding = form_padding
-                form.configure(padding=form_padding)
+                self.form_card.set_padding(form_padding)
             canvas_width = self._right_canvas.winfo_width()
             compact = canvas_width > 1 and (canvas_width / max(self.ui_scale, 1.0)) < 560
             if compact != self._form_compact_layout:
@@ -1495,7 +1735,7 @@ class HRToolkitApp:
         self._show_picker_button = lambda button: _set_picker_button_visible(button, True)
         self._hide_picker_button = lambda button: _set_picker_button_visible(button, False)
         self._right_content_padding = self._responsive_content_padding()
-        self._form_padding = self._responsive_form_padding()
+        self._form_padding = self._responsive_form_padding_units()
         self._right_canvas.bind("<Configure>", _update_form_responsive_layout, add="+")
         self.root.after_idle(_update_form_responsive_layout)
         self._update_change_tabs_visibility()
@@ -1505,37 +1745,44 @@ class HRToolkitApp:
         self._update_rename_controls()
         self._update_stats_range_controls()
 
-        self.tutorial_expanded = False
-
-        def toggle_tutorial() -> None:
-            self.tutorial_expanded = not self.tutorial_expanded
-            if self.tutorial_expanded:
-                self.tutorial_frame.pack(fill="x", pady=self._pad(0, 16), before=form)
-                self.tutorial_toggle_button.configure(text="收起教程")
-            else:
-                self.tutorial_frame.pack_forget()
-                self.tutorial_toggle_button.configure(text="使用教程")
-            self.root.after_idle(self._sync_right_canvas_window)
-
-        self.tutorial_toggle_button.configure(command=toggle_tutorial)
-
         actions = ttk.Frame(right_frame, style="Content.TFrame")
-        actions.pack(fill="x", pady=self._pad(24, 22))
-        run_button_box = ttk.Frame(actions, width=self._px(132), height=self._px(42), style="Content.TFrame")
+        actions.pack(fill="x", pady=self._pad(16, 16))
+        run_button_box = ttk.Frame(actions, width=self._px(132), height=self._px(40), style="Content.TFrame")
         run_button_box.pack(side=LEFT)
         run_button_box.pack_propagate(False)
-        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", icon="→", min_width=132, height=42)
+        self.run_button = CodexButton(run_button_box, textvariable=self.run_button_text, command=self._run_current_tool, variant="primary", min_width=132, height=40)
         self.run_button.pack(fill=BOTH, expand=True)
-        self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, icon="↗", width=148, height=42)
+        self.open_button = CodexButton(actions, text="打开结果目录", command=self._open_output_dir, width=138, height=40)
         self.open_button.pack(side=LEFT, padx=self._pad(12, 0))
+        last_run_box = ttk.Frame(actions, style="Content.TFrame")
+        last_run_box.pack(side=RIGHT)
+        self.last_run_state_label = Label(
+            last_run_box,
+            textvariable=self.last_run_state,
+            bg=COLOR_BG,
+            fg=COLOR_SUCCESS,
+            font=self.small_font,
+        )
+        self.last_run_state_label.pack(side=RIGHT)
+        Label(
+            last_run_box,
+            textvariable=self.last_run_text,
+            bg=COLOR_BG,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+        ).pack(side=RIGHT)
 
-        ttk.Label(right_frame, text="运行日志", style="Section.TLabel").pack(anchor="w")
-        log_frame = ttk.Frame(right_frame, padding=self._pad(1, 1, 1, 1), style="Card.TFrame")
-        log_frame.pack(fill=BOTH, expand=True, pady=self._pad(10, 0))
-        scrollbar = ttk.Scrollbar(log_frame, orient=VERTICAL)
+        log_card = RoundedCard(right_frame, padding=(20, 15, 20, 15), fill_height=True, min_height=150)
+        log_card.pack(fill=BOTH, expand=True)
+        log_header = ttk.Frame(log_card.inner, style="InputWrap.TFrame")
+        log_header.pack(fill="x", pady=self._pad(0, 8))
+        ttk.Label(log_header, text="运行记录", style="CardTitle.TLabel").pack(side=LEFT)
+        log_body = ttk.Frame(log_card.inner, style="InputWrap.TFrame")
+        log_body.pack(fill=BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(log_body, orient=VERTICAL)
         self.log_text = Text(
-            log_frame,
-            height=12,
+            log_body,
+            height=6,
             wrap="word",
             yscrollcommand=scrollbar.set,
             bg=COLOR_LOG_BG,
@@ -1544,16 +1791,40 @@ class HRToolkitApp:
             bd=0,
             highlightthickness=0,
             insertbackground=COLOR_LOG_TEXT,
-            padx=self._px(16),
-            pady=self._px(14),
+            padx=self._px(2),
+            pady=self._px(4),
             font=self.base_font,
+            spacing3=self._px(8),
         )
         self.log_text.tag_configure("success", foreground=COLOR_SUCCESS)
         self.log_text.tag_configure("warning", foreground=COLOR_WARNING)
+        self.log_text.tag_configure("error", foreground=COLOR_DANGER)
         self.log_text.tag_configure("muted", foreground=COLOR_LOG_MUTED)
+        self.log_text.tag_configure("timestamp", foreground=COLOR_LOG_MUTED, font=self.small_font)
+        self.log_text.tag_configure("dot_success", foreground=COLOR_SUCCESS_DOT)
+        self.log_text.tag_configure("dot_warning", foreground=COLOR_WARNING_DOT)
+        self.log_text.tag_configure("dot_error", foreground=COLOR_DANGER)
+        self.log_text.tag_configure("dot_muted", foreground=COLOR_DROP_BORDER)
+        self.log_text.tag_configure("dot_primary", foreground=COLOR_PRIMARY)
         scrollbar.config(command=self.log_text.yview)
         self.log_text.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
+
+        # 右下角低调的运行日志入口：图标形式，面向开发排查，不需要 HR 关注
+        log_footer = ttk.Frame(right_frame, style="Content.TFrame")
+        log_footer.pack(fill="x", pady=self._pad(4, 0))
+        log_icon = Canvas(log_footer, width=self._px(26), height=self._px(26), bg=COLOR_BG, highlightthickness=0, bd=0, cursor="hand2")
+        log_icon.pack(side=RIGHT)
+
+        def _draw_log_icon(color: str) -> None:
+            log_icon.delete("all")
+            _paint_tool_icon(log_icon, "social_security", color, self._pxf(5.5), self._pxf(5.5), self._pxf(15), max(1.0, self._pxf(1.3)))
+
+        _draw_log_icon(COLOR_DISABLED)
+        log_icon.bind("<Button-1>", lambda _event: self._open_run_log())
+        log_icon.bind("<Enter>", lambda _event: _draw_log_icon(COLOR_MUTED), add="+")
+        log_icon.bind("<Leave>", lambda _event: _draw_log_icon(COLOR_DISABLED), add="+")
+        self._bind_path_tooltip(log_icon, lambda: "查看运行日志")
 
         # Mousewheel on log_text:
         #  • log has scrollable content in that direction → scroll the log
@@ -1607,6 +1878,7 @@ class HRToolkitApp:
         self.log_text.bind("<Button-5>",   _on_log_mousewheel)
 
         # One-time full scan after all widgets are rendered.
+        self._apply_content_scroll_tag = _apply_scroll_tag
         self.root.after_idle(lambda: _apply_scroll_tag(right_frame))
         self.root.after_idle(self._sync_right_canvas_window)
 
@@ -2239,71 +2511,18 @@ class HRToolkitApp:
         self._write_log(self._initial_log_text())
 
     def _refresh_nav_buttons(self) -> None:
-        for tool_id, button in self.nav_buttons.items():
-            selected = tool_id == self.current_tool
-            style = "NavSelected.TButton" if selected else "Nav.TButton"
-            button.configure(style=style)
-            indicator = self.nav_indicators.get(tool_id)
-            if indicator is not None:
-                indicator_style = "NavIndicatorSelected.TFrame" if selected else "NavIndicator.TFrame"
-                indicator.configure(style=indicator_style, width=self._px(4))
-            icon = self.nav_icons.get(tool_id)
-            if icon is not None:
-                self._draw_nav_icon(icon, tool_id, selected)
-
-    def _draw_nav_icon(self, canvas: Canvas, tool_id: str, selected: bool) -> None:
-        canvas.delete("all")
-        background = COLOR_NAV_SELECTED if selected else COLOR_SIDEBAR
-        foreground = COLOR_PRIMARY if selected else COLOR_NAV_TEXT
-        canvas.configure(bg=background)
-        p = self._pxf
-        line_width = max(1.0, p(1.35))
-        line = {"fill": foreground, "width": line_width}
-
-        if tool_id == "social_security":
-            canvas.create_rectangle(p(9), p(12), p(19), p(24), outline=foreground, width=line_width)
-            canvas.create_line(p(12), p(15), p(17), p(15), **line)
-            canvas.create_line(p(12), p(18), p(17), p(18), **line)
-            canvas.create_line(p(12), p(21), p(16), p(21), **line)
-        elif tool_id == "data_statistics":
-            canvas.create_line(p(8), p(25), p(21), p(25), **line)
-            canvas.create_rectangle(p(9), p(19), p(11), p(25), outline=foreground, width=line_width)
-            canvas.create_rectangle(p(14), p(15), p(16), p(25), outline=foreground, width=line_width)
-            canvas.create_rectangle(p(19), p(11), p(21), p(25), outline=foreground, width=line_width)
-        elif tool_id == "insurance_ledger":
-            canvas.create_polygon(p(14), p(10), p(21), p(13), p(20), p(21), p(14), p(26), p(8), p(21), p(7), p(13), outline=foreground, fill=background, width=line_width)
-            canvas.create_line(p(11), p(18), p(13), p(20), p(17), p(15), **line)
-        elif tool_id == "salary_split":
-            canvas.create_oval(p(8), p(12), p(12), p(16), outline=foreground, width=line_width)
-            canvas.create_oval(p(8), p(23), p(12), p(27), outline=foreground, width=line_width)
-            canvas.create_line(p(12), p(15), p(21), p(24), **line)
-            canvas.create_line(p(12), p(24), p(21), p(15), **line)
-        elif tool_id == "salary_merge":
-            canvas.create_line(p(8), p(16), p(20), p(16), **line)
-            canvas.create_polygon(p(20), p(16), p(16), p(13), p(16), p(19), fill=foreground, outline=foreground)
-            canvas.create_line(p(20), p(22), p(8), p(22), **line)
-            canvas.create_polygon(p(8), p(22), p(12), p(19), p(12), p(25), fill=foreground, outline=foreground)
-        elif tool_id == "personnel_change_merge":
-            canvas.create_arc(p(8), p(11), p(21), p(24), start=35, extent=245, style="arc", outline=foreground, width=line_width)
-            canvas.create_polygon(p(18), p(11), p(22), p(12), p(20), p(16), fill=foreground, outline=foreground)
-            canvas.create_arc(p(7), p(13), p(20), p(26), start=215, extent=245, style="arc", outline=foreground, width=line_width)
-            canvas.create_polygon(p(10), p(26), p(6), p(25), p(8), p(21), fill=foreground, outline=foreground)
-        elif tool_id == "archive_import":
-            canvas.create_rectangle(p(8), p(13), p(20), p(25), outline=foreground, width=line_width)
-            canvas.create_rectangle(p(10), p(11), p(18), p(13), outline=foreground, width=line_width)
-            canvas.create_line(p(11), p(17), p(17), p(17), **line)
-            canvas.create_line(p(11), p(20), p(16), p(20), **line)
-        elif tool_id == "folder_rename":
-            canvas.create_polygon(p(9), p(13), p(16), p(13), p(21), p(18), p(14), p(25), p(7), p(18), outline=foreground, fill=background, width=line_width)
-            canvas.create_oval(p(11), p(16), p(13), p(18), outline=foreground, width=line_width)
-        else:
-            canvas.create_oval(p(10), p(14), p(18), p(22), outline=foreground, width=line_width)
+        for tool_id, item in self.nav_buttons.items():
+            item.set_selected(tool_id == self.current_tool)
 
     def _set_tool_texts(self) -> None:
+        self.tool_group.set(TOOL_GROUP_LABELS.get(self.current_tool, "人员运营自动化"))
+        multi_hint = "支持 .xlsx / .xls / .zip / 文件夹 · 可多选"
         if self.current_tool == "social_security":
             self.tool_title.set("社保明细与汇总")
             self.tool_description.set("选择社保缴费清单、压缩包或文件夹，再选择参保人员花名册，自动生成明细和汇总。")
-            self.input_label.set("社保清单输入")
+            self.input_label.set("社保缴费清单")
+            self.input_hint.set(multi_hint)
+            self._input_drop_title = "选择缴费清单、压缩包或文件夹"
             self.choose_input_text.set("选择")
             self.summary_label.set("参保人员花名册")
             self.summary_button_text.set("选择花名册")
@@ -2311,7 +2530,9 @@ class HRToolkitApp:
         elif self.current_tool == "data_statistics":
             self.tool_title.set("考勤与周月报统计")
             self.tool_description.set("选择考勤结果、周报记录、月报记录，或包含这些文件的文件夹/压缩包，自动生成统计表和异常明细。")
-            self.input_label.set("数据文件输入")
+            self.input_label.set("考勤与周月报数据")
+            self.input_hint.set(multi_hint)
+            self._input_drop_title = "选择考勤 / 周报 / 月报文件、压缩包或文件夹"
             self.choose_input_text.set("选择")
             self.summary_label.set("应汇报人员名单（可选）")
             self.summary_button_text.set("选择名单")
@@ -2319,7 +2540,9 @@ class HRToolkitApp:
         elif self.current_tool == "insurance_ledger":
             self.tool_title.set("保险台账与增减预警")
             self.tool_description.set("选择各保单人员清单、压缩包或文件夹，再选择需求6的人力资源分析表，自动生成保险台账。")
-            self.input_label.set("保单清单输入")
+            self.input_label.set("保单人员清单")
+            self.input_hint.set(multi_hint)
+            self._input_drop_title = "选择保单清单、压缩包或文件夹"
             self.choose_input_text.set("选择")
             self.summary_label.set("人力资源分析表")
             self.summary_button_text.set("选择分析表")
@@ -2327,7 +2550,9 @@ class HRToolkitApp:
         elif self.current_tool == "salary_merge":
             self.tool_title.set("多月工资合并")
             self.tool_description.set("选择工资表文件、压缩包或文件夹；如已有汇总表，可一并选择后追加新月份。")
-            self.input_label.set("工资表文件/文件夹")
+            self.input_label.set("工资表文件")
+            self.input_hint.set(multi_hint)
+            self._input_drop_title = "选择工资表、压缩包或文件夹"
             self.choose_input_text.set("选择")
             self.summary_label.set("已有汇总表（可选）")
             self.summary_button_text.set("选择汇总表")
@@ -2336,14 +2561,18 @@ class HRToolkitApp:
             self.tool_title.set("异动表汇总与花名册")
             if self.change_mode == "roster":
                 self.tool_description.set("选择异动汇总表和人力资源花名册，单独更新花名册。")
-                self.input_label.set("异动汇总表/文件夹")
+                self.input_label.set("异动汇总表")
+                self.input_hint.set(multi_hint)
+                self._input_drop_title = "选择异动汇总表、压缩包或文件夹"
                 self.choose_input_text.set("选择汇总表")
                 self.summary_label.set("人力资源花名册")
                 self.summary_button_text.set("选择花名册")
                 self.run_button_text.set("更新花名册")
             else:
                 self.tool_description.set("选择异动表、压缩包或文件夹；如已有月度汇总表，可选择后按月份追加。")
-                self.input_label.set("异动表文件/文件夹")
+                self.input_label.set("异动表文件")
+                self.input_hint.set(multi_hint)
+                self._input_drop_title = "选择异动表、压缩包或文件夹"
                 self.choose_input_text.set("选择")
                 self.summary_label.set("已有汇总表/文件夹（可选）")
                 self.summary_button_text.set("选择汇总表")
@@ -2352,6 +2581,8 @@ class HRToolkitApp:
             self.tool_title.set("人员资料文件夹改名")
             self.tool_description.set("选择人员资料目录，先预览，再确认改名。")
             self.input_label.set("人员文件夹目录")
+            self.input_hint.set("选择人员资料所在目录")
+            self._input_drop_title = "选择人员文件夹目录"
             self.choose_input_text.set("选择文件夹")
             self.summary_label.set("")
             self.summary_button_text.set("选择")
@@ -2360,14 +2591,18 @@ class HRToolkitApp:
             self.tool_title.set("档案入库与档案表")
             if self.archive_mode == "export":
                 self.tool_description.set("选择档案汇总表、压缩包或文件夹，按公司写入已有档案表；没有已有表时自动新建。")
-                self.input_label.set("档案汇总输入")
+                self.input_label.set("档案汇总表")
+                self.input_hint.set(multi_hint)
+                self._input_drop_title = "选择档案汇总表、压缩包或文件夹"
                 self.choose_input_text.set("选择汇总表")
                 self.summary_label.set("已有公司档案表（可选）")
                 self.summary_button_text.set("选择档案表")
                 self.run_button_text.set("生成档案表")
             else:
                 self.tool_description.set("选择项目档案移交表、压缩包或文件夹；可选已有档案汇总表，不选则新建。")
-                self.input_label.set("移交表文件/文件夹")
+                self.input_label.set("档案移交表")
+                self.input_hint.set(multi_hint)
+                self._input_drop_title = "选择移交表、压缩包或文件夹"
                 self.choose_input_text.set("选择")
                 self.summary_label.set("已有档案汇总表（可选）")
                 self.summary_button_text.set("选择汇总表")
@@ -2376,6 +2611,8 @@ class HRToolkitApp:
             self.tool_title.set("工资表按入职公司拆分")
             self.tool_description.set("选择一个包含“汇总表”和“明细表”的工资表，工具会按“入职公司”拆成多个公司文件。")
             self.input_label.set("工资表文件")
+            self.input_hint.set("支持 .xlsx / .xls · 单个文件")
+            self._input_drop_title = "选择工资表文件"
             self.choose_input_text.set("选择文件")
             self.summary_label.set("")
             self.summary_button_text.set("选择")
@@ -2384,6 +2621,8 @@ class HRToolkitApp:
             self.tool_title.set("该工具暂未实现")
             self.tool_description.set("请选择左侧已经可用的工具。")
             self.input_label.set("输入")
+            self.input_hint.set("")
+            self._input_drop_title = "选择输入文件"
             self.choose_input_text.set("选择")
             self.summary_label.set("")
             self.summary_button_text.set("选择")
@@ -2395,35 +2634,526 @@ class HRToolkitApp:
             self._update_output_controls()
             self._update_rename_controls()
             self._update_stats_range_controls()
-        if hasattr(self, "tutorial_text"):
-            self._set_tutorial_text()
+        self._refresh_last_run_status()
         if hasattr(self, "_sync_right_canvas_window"):
             self.root.after_idle(self._sync_right_canvas_window)
 
-    def _set_tutorial_text(self) -> None:
-        self.tutorial_text.config(state="normal")
-        self.tutorial_text.delete("1.0", END)
-        for line, tag in self._tutorial_lines():
-            if tag:
-                self.tutorial_text.insert(END, line + "\n", tag)
-            else:
-                self.tutorial_text.insert(END, line + "\n")
-        self.tutorial_text.config(state="disabled")
-        self._resize_tutorial_text()
+    # ---------- 运行状态 ----------
 
-    def _resize_tutorial_text(self, _event=None) -> None:
+    def _run_state_key(self) -> str:
+        if self.current_tool == "personnel_change_merge":
+            return f"personnel_change_merge:{self.change_mode}"
+        if self.current_tool == "archive_import":
+            return f"archive_import:{self.archive_mode}"
+        return self.current_tool
+
+    def _record_last_run(self, success: bool) -> None:
+        stamp = datetime.now().strftime("%H:%M")
+        self._last_run_results[self._run_state_key()] = (stamp, "成功" if success else "失败")
+        self._refresh_last_run_status()
+
+    def _refresh_last_run_status(self) -> None:
+        record = self._last_run_results.get(self._run_state_key())
+        if record is None:
+            self.last_run_text.set("")
+            self.last_run_state.set("")
+            return
+        stamp, state = record
+        self.last_run_text.set(f"上次运行 {stamp} · ")
+        self.last_run_state.set(state)
+        if hasattr(self, "last_run_state_label"):
+            self.last_run_state_label.configure(fg=COLOR_SUCCESS if state == "成功" else COLOR_DANGER)
+
+    def _open_run_log(self) -> None:
         try:
-            display_lines = self.tutorial_text.count("1.0", "end-1c", "displaylines")
+            log_path = runlog.run_log_path()
         except Exception:
             return
-        if isinstance(display_lines, (tuple, list)):
-            display_lines = display_lines[0] if display_lines else 0
-        height = max(3, int(display_lines or 0) + 1)
-        if int(self.tutorial_text.cget("height")) != height:
-            self.tutorial_text.configure(height=height)
+        if not log_path.exists():
+            messagebox.showinfo("暂无日志", "运行日志文件还未生成。", parent=self.root)
+            return
+        open_path(log_path)
 
-    def _tutorial_lines(self) -> list[tuple[str, str | None]]:
-        if self.current_tool == "social_security":
+    # ---------- 路径悬浮提示 ----------
+
+    def _cancel_path_tooltip_job(self) -> None:
+        job = getattr(self, "_path_tooltip_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._path_tooltip_job = None
+
+    def _hide_path_tooltip(self) -> None:
+        self._cancel_path_tooltip_job()
+        tip = getattr(self, "_path_tooltip", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+        self._path_tooltip = None
+
+    def _show_path_tooltip(self, widget, text: str) -> None:
+        # macOS Aqua 对 overrideredirect 顶层窗口不渲染，改为窗口内浮层，跨平台可靠
+        self._hide_path_tooltip()
+        if not text:
+            return
+        try:
+            if not widget.winfo_exists():
+                return
+            anchor_widget = widget.winfo_toplevel()
+            x = widget.winfo_rootx() - anchor_widget.winfo_rootx() + self._px(12)
+            y = widget.winfo_rooty() - anchor_widget.winfo_rooty() + widget.winfo_height() + self._px(4)
+        except Exception:
+            return
+        tip = Label(
+            anchor_widget,
+            text=text,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.small_font,
+            bd=0,
+            padx=self._px(9),
+            pady=self._px(5),
+            highlightthickness=self._px(1),
+            highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_BORDER,
+        )
+        tip.update_idletasks()
+        window_width = max(anchor_widget.winfo_width(), 1)
+        window_height = max(anchor_widget.winfo_height(), 1)
+        tip_width = tip.winfo_reqwidth()
+        tip_height = tip.winfo_reqheight()
+        x = max(self._px(4), min(x, window_width - tip_width - self._px(8)))
+        if y + tip_height > window_height - self._px(4):
+            y = widget.winfo_rooty() - anchor_widget.winfo_rooty() - tip_height - self._px(4)
+        tip.place(x=x, y=y)
+        tip.lift()
+        self._path_tooltip = tip
+
+    def _bind_path_tooltip(self, widget, text_getter) -> None:
+        """悬停约半秒后显示完整路径，移开或点击即收起。"""
+
+        def on_enter(_event=None):
+            self._cancel_path_tooltip_job()
+            self._path_tooltip_job = self.root.after(
+                450, lambda: self._show_path_tooltip(widget, text_getter())
+            )
+
+        def on_leave(_event=None):
+            self._hide_path_tooltip()
+
+        widget.bind("<Enter>", on_enter, add="+")
+        widget.bind("<Leave>", on_leave, add="+")
+        widget.bind("<Button-1>", on_leave, add="+")
+
+    def _ellipsize(self, text: str, font_spec, max_width: float) -> str:
+        if max_width <= 0:
+            return ""
+        cache = getattr(self, "_ellipsize_fonts", None)
+        if cache is None:
+            cache = self._ellipsize_fonts = {}
+        key = tuple(font_spec)
+        font = cache.get(key)
+        if font is None:
+            font = cache[key] = tkfont.Font(root=self.root, font=font_spec)
+        if font.measure(text) <= max_width:
+            return text
+        while text and font.measure(text + "…") > max_width:
+            text = text[:-1]
+        return text + "…"
+
+    def _update_summary_display(self) -> None:
+        if not hasattr(self, "summary_display"):
+            return
+        text = self.summary_path.get().strip()
+        if not text:
+            self.summary_display.configure(text="未选择", fg=COLOR_FAINT, font=self.base_font)
+            return
+        name = Path(text).name or text
+        self.summary_display.configure(text=name, fg=COLOR_TEXT, font=(self.base_font[0], _font_size(10), "bold"))
+
+    # ---------- 合并后的上传入口 ----------
+
+    def _upload_items(self) -> list[Path]:
+        if self._input_allow_multi:
+            return list(self.change_input_paths or [])
+        text = self.input_path.get().strip()
+        if text and not text.startswith("已选择 "):
+            return [Path(text)]
+        return []
+
+    def _remove_upload_item(self, index: int) -> None:
+        if self._input_allow_multi:
+            paths = list(self.change_input_paths or [])
+            if 0 <= index < len(paths):
+                del paths[index]
+            self.change_input_paths = paths or None
+            self._sync_input_path_text()
+        else:
+            self.input_path.set("")
+        self._refresh_upload_card()
+
+    def _show_add_input_menu(self, _event=None) -> None:
+        commands = []
+        if self._input_file_cmd is not None:
+            commands.append(("添加文件 / 压缩包", self._input_file_cmd))
+        if self._input_folder_cmd is not None:
+            commands.append(("添加文件夹", self._input_folder_cmd))
+        if not commands:
+            return
+        if len(commands) == 1:
+            commands[0][1]()
+            return
+        menu = Menu(
+            self.root,
+            tearoff=0,
+            font=self.base_font,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            activebackground=COLOR_SURFACE_PRESSED,
+            activeforeground=COLOR_TEXT,
+        )
+        for label, command in commands:
+            menu.add_command(label=label, command=command)
+        try:
+            menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    @staticmethod
+    def _format_file_size(path: Path) -> str:
+        try:
+            size = path.stat().st_size
+        except Exception:
+            return ""
+        if size >= 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        return f"{max(1, size // 1024)} KB"
+
+    def _upload_item_meta(self, path: Path) -> tuple[str, str, str, str]:
+        """返回 (徽标文字, 徽标底色, 徽标前景, 说明文字)。"""
+        if not path.exists():
+            return "！", COLOR_BADGE_ZIP_BG, COLOR_BADGE_ZIP_FG, "文件不存在"
+        if path.is_dir():
+            try:
+                child_count = sum(1 for _ in path.iterdir())
+                detail = f"文件夹 · {child_count} 个项目"
+            except Exception:
+                detail = "文件夹"
+            return "", COLOR_BADGE_DIR_BG, COLOR_BADGE_DIR_FG, detail
+        suffix = path.suffix.lower()
+        size_text = self._format_file_size(path)
+        if suffix == ".zip":
+            return "ZIP", COLOR_BADGE_ZIP_BG, COLOR_BADGE_ZIP_FG, size_text
+        if suffix in {".xlsx", ".xls"}:
+            return "XLS", COLOR_BADGE_XLS_BG, COLOR_BADGE_XLS_FG, size_text
+        return suffix.lstrip(".").upper()[:3] or "?", COLOR_BADGE_DIR_BG, COLOR_BADGE_DIR_FG, size_text
+
+    def _refresh_upload_card(self) -> None:
+        if not hasattr(self, "upload_body"):
+            return
+        for child in self.upload_body.winfo_children():
+            child.destroy()
+        items = self._upload_items()
+        if items and self._input_allow_multi:
+            self.upload_add_button.pack(side=RIGHT)
+        else:
+            self.upload_add_button.pack_forget()
+        if items:
+            self._render_upload_items(items)
+        else:
+            self._render_upload_drop_zone()
+        if hasattr(self, "_apply_content_scroll_tag"):
+            self._apply_content_scroll_tag(self.upload_body)
+        if hasattr(self, "_sync_right_canvas_window"):
+            self.root.after_idle(self._sync_right_canvas_window)
+
+    def _render_upload_items(self, items: list[Path]) -> None:
+        for index, path in enumerate(items):
+            self._render_upload_chip(index, path, last=index == len(items) - 1)
+
+    def _render_upload_chip(self, index: int, path: Path, *, last: bool) -> None:
+        """圆角文件条目：类型徽标 + 文件名（超长省略，悬停显示完整路径）+ 说明 + ✕。"""
+        badge_text, badge_bg, badge_fg, detail = self._upload_item_meta(path)
+        chip = Canvas(self.upload_body, height=self._px(44), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
+        chip.pack(fill="x", pady=0 if last else self._pad(0, 8))
+        name_font = (self.base_font[0], _font_size(10), "bold")
+
+        def redraw(_event=None) -> None:
+            chip.delete("all")
+            width = max(chip.winfo_width(), 1)
+            height = max(chip.winfo_height(), 1)
+            CodexButton._draw_round_rect(
+                chip,
+                self._pxf(0.5),
+                self._pxf(0.5),
+                width - self._pxf(0.5),
+                height - self._pxf(0.5),
+                self._pxf(10),
+                fill=COLOR_SURFACE_ALT,
+                outline=COLOR_BORDER_FAINT,
+                width=max(1.0, self._pxf(1)),
+            )
+            badge_x = self._pxf(13)
+            badge_size = self._pxf(26)
+            badge_y = (height - badge_size) / 2
+            CodexButton._draw_round_rect(chip, badge_x, badge_y, badge_x + badge_size, badge_y + badge_size, self._pxf(7), fill=badge_bg, outline="")
+            if badge_text:
+                chip.create_text(badge_x + badge_size / 2, height / 2, text=badge_text, fill=badge_fg, font=(self.base_font[0], _font_size(7), "bold"))
+            else:
+                _paint_tool_icon(chip, "folder_rename", badge_fg, badge_x + badge_size * 0.25, badge_y + badge_size * 0.25, badge_size * 0.5, max(1.0, self._pxf(1.3)))
+            close_x = width - self._pxf(20)
+            chip.create_text(close_x, height / 2, text="✕", fill="#C4C1B7", font=self.base_font, tags="chip_close")
+            right_edge = close_x - self._pxf(16)
+            if detail:
+                meta_item = chip.create_text(right_edge, height / 2, text=detail, fill=COLOR_FAINT, font=self.small_font, anchor="e")
+                meta_bbox = chip.bbox(meta_item)
+                if meta_bbox:
+                    right_edge = meta_bbox[0] - self._pxf(12)
+            name_x = badge_x + badge_size + self._pxf(11)
+            display_name = self._ellipsize(path.name or str(path), name_font, right_edge - name_x)
+            chip.create_text(name_x, height / 2, text=display_name, fill=COLOR_TEXT, font=name_font, anchor="w")
+
+        chip.bind("<Configure>", redraw)
+        chip.tag_bind("chip_close", "<Button-1>", lambda _event, item_index=index: self._remove_upload_item(item_index))
+        chip.tag_bind(
+            "chip_close",
+            "<Enter>",
+            lambda _event: (chip.itemconfigure("chip_close", fill=COLOR_DANGER), chip.configure(cursor="hand2")),
+        )
+        chip.tag_bind(
+            "chip_close",
+            "<Leave>",
+            lambda _event: (chip.itemconfigure("chip_close", fill="#C4C1B7"), chip.configure(cursor="")),
+        )
+        self._bind_path_tooltip(chip, lambda chip_path=path: str(chip_path))
+        redraw()
+
+    def _render_upload_drop_zone(self) -> None:
+        zone = Canvas(self.upload_body, height=self._px(118), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
+        zone.pack(fill="x")
+
+        def redraw(_event=None) -> None:
+            zone.delete("all")
+            width = max(zone.winfo_width(), 1)
+            height = max(zone.winfo_height(), 1)
+            x1, y1 = self._pxf(1), self._pxf(1)
+            x2, y2 = width - self._pxf(1), height - self._pxf(1)
+            radius = self._pxf(12)
+            self._draw_round_rect(zone, x1, y1, x2, y2, radius, fill=COLOR_SURFACE, outline="")
+            # 虚线圆角边框：平滑多边形加 dash 会在角上留下墨点，改用直线 + 圆弧拼接
+            dash = (5, 4)
+            border = {"fill": COLOR_DROP_BORDER, "width": max(1.0, self._pxf(1.5)), "dash": dash}
+            arc = {"outline": COLOR_DROP_BORDER, "width": max(1.0, self._pxf(1.5)), "dash": dash, "style": "arc"}
+            zone.create_line(x1 + radius, y1, x2 - radius, y1, **border)
+            zone.create_line(x2, y1 + radius, x2, y2 - radius, **border)
+            zone.create_line(x2 - radius, y2, x1 + radius, y2, **border)
+            zone.create_line(x1, y2 - radius, x1, y1 + radius, **border)
+            zone.create_arc(x1, y1, x1 + 2 * radius, y1 + 2 * radius, start=90, extent=90, **arc)
+            zone.create_arc(x2 - 2 * radius, y1, x2, y1 + 2 * radius, start=0, extent=90, **arc)
+            zone.create_arc(x2 - 2 * radius, y2 - 2 * radius, x2, y2, start=270, extent=90, **arc)
+            zone.create_arc(x1, y2 - 2 * radius, x1 + 2 * radius, y2, start=180, extent=90, **arc)
+            center_x = width / 2
+            icon_size = self._pxf(34)
+            icon_top = self._pxf(16)
+            self._draw_round_rect(
+                zone,
+                center_x - icon_size / 2,
+                icon_top,
+                center_x + icon_size / 2,
+                icon_top + icon_size,
+                self._pxf(10),
+                fill=COLOR_PRIMARY_SOFT,
+                outline="",
+            )
+            arrow = {"fill": COLOR_PRIMARY, "width": max(1.0, self._pxf(1.6)), "capstyle": "round", "joinstyle": "round"}
+            icon_cx = center_x
+            icon_cy = icon_top + icon_size / 2
+            zone.create_line(icon_cx, icon_cy + self._pxf(5), icon_cx, icon_cy - self._pxf(7), **arrow)
+            zone.create_line(icon_cx - self._pxf(5), icon_cy - self._pxf(2), icon_cx, icon_cy - self._pxf(7), icon_cx + self._pxf(5), icon_cy - self._pxf(2), **arrow)
+            zone.create_line(icon_cx - self._pxf(7), icon_cy + self._pxf(9), icon_cx + self._pxf(7), icon_cy + self._pxf(9), **arrow)
+            title_y = icon_top + icon_size + self._pxf(18)
+            zone.create_text(
+                center_x,
+                title_y,
+                text=self._input_drop_title,
+                fill=COLOR_TEXT,
+                font=(self.base_font[0], _font_size(10), "bold"),
+            )
+            links = []
+            if self._input_file_cmd is not None:
+                links.append(("浏览文件", self._input_file_cmd))
+            if self._input_folder_cmd is not None:
+                links.append(("选择文件夹", self._input_folder_cmd))
+            link_y = title_y + self._pxf(21)
+            segments: list[tuple[str, str, object | None]] = []
+            if links:
+                segments.append(("或 " if len(links) > 0 else "", COLOR_FAINT, None))
+            for link_index, (label, command) in enumerate(links):
+                if link_index > 0:
+                    segments.append((" · ", COLOR_FAINT, None))
+                segments.append((label, COLOR_PRIMARY, command))
+            font_plain = self.small_font
+            font_link = (self.small_font[0], self.small_font[1], "bold")
+            total_width = 0.0
+            measured = []
+            for text, color, command in segments:
+                font = font_link if command else font_plain
+                item = zone.create_text(0, -100, text=text, font=font, anchor="w")
+                bbox = zone.bbox(item)
+                segment_width = (bbox[2] - bbox[0]) if bbox else 0
+                zone.delete(item)
+                measured.append((text, color, command, font, segment_width))
+                total_width += segment_width
+            cursor_x = center_x - total_width / 2
+            for text, color, command, font, segment_width in measured:
+                item = zone.create_text(cursor_x, link_y, text=text, fill=color, font=font, anchor="w")
+                if command is not None:
+                    zone.addtag_withtag("link", item)
+                    zone.tag_bind(item, "<Button-1>", lambda _event, cmd=command: cmd())
+                    zone.tag_bind(item, "<Enter>", lambda _event: zone.configure(cursor="hand2"))
+                    zone.tag_bind(item, "<Leave>", lambda _event: zone.configure(cursor=""))
+                cursor_x += segment_width
+
+        def on_zone_click(_event=None):
+            # 链接文字有自己的点击动作，避免和整块区域的默认动作重复触发
+            current = zone.find_withtag("current")
+            if current and "link" in zone.gettags(current[0]):
+                return
+            self._on_drop_zone_click()
+
+        zone.bind("<Configure>", redraw)
+        zone.bind("<Button-1>", on_zone_click)
+        redraw()
+
+    def _on_drop_zone_click(self) -> None:
+        # 点击空态区域时弹出“文件/压缩包 或 文件夹”的选择菜单，
+        # 避免首次上传只能进文件对话框、无法直接选文件夹
+        self._show_add_input_menu()
+
+    # ---------- 使用教程 ----------
+
+    def _tutorial_entries(self) -> list[tuple[str, str | None, str]]:
+        entries: list[tuple[str, str | None, str]] = []
+        for tool_id, label in TOOL_NAV_ITEMS:
+            if tool_id == "personnel_change_merge":
+                entries.append((tool_id, "merge", "异动表汇总"))
+                entries.append((tool_id, "roster", "花名册更新"))
+            elif tool_id == "archive_import":
+                entries.append((tool_id, "import", "档案入库"))
+                entries.append((tool_id, "export", "档案表生成"))
+            else:
+                entries.append((tool_id, None, label))
+        return entries
+
+    def _current_tutorial_selection(self) -> tuple[str, str | None]:
+        if self.current_tool == "personnel_change_merge":
+            return self.current_tool, self.change_mode
+        if self.current_tool == "archive_import":
+            return self.current_tool, self.archive_mode
+        return self.current_tool, None
+
+    def _open_tutorial_window(self) -> None:
+        if self._tutorial_window is not None and self._tutorial_window.winfo_exists():
+            self._tutorial_window.lift()
+            self._tutorial_window.focus_force()
+            return
+        window = Toplevel(self.root)
+        self._tutorial_window = window
+        window.title("使用教程")
+        window.configure(bg=COLOR_BG)
+        width, height = self._update_dialog_size(860, 620)
+        self._center_window(window, width, height)
+        window.minsize(self._px(640), self._px(420))
+
+        body = ttk.Frame(window, padding=self._pad(16, 16, 20, 16), style="App.TFrame")
+        body.pack(fill=BOTH, expand=True)
+
+        nav = ttk.Frame(body, width=self._px(190), style="Sidebar.TFrame")
+        nav.pack(side=LEFT, fill=Y)
+        nav.pack_propagate(False)
+
+        content_card = RoundedCard(body, padding=(22, 18, 22, 18), fill_height=True, min_height=320)
+        content_card.pack(side=LEFT, fill=BOTH, expand=True, padx=self._pad(16, 0))
+        content_title = ttk.Label(content_card.inner, text="", style="CardTitle.TLabel")
+        content_title.pack(anchor="w", pady=self._pad(0, 10))
+        text_wrap = ttk.Frame(content_card.inner, style="InputWrap.TFrame")
+        text_wrap.pack(fill=BOTH, expand=True)
+        text_scroll = ttk.Scrollbar(text_wrap, orient=VERTICAL)
+        content_text = Text(
+            text_wrap,
+            wrap="word",
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=self.base_font,
+            padx=self._px(2),
+            pady=self._px(2),
+            spacing3=self._px(9),
+            yscrollcommand=text_scroll.set,
+        )
+        text_scroll.config(command=content_text.yview)
+        content_text.pack(side=LEFT, fill=BOTH, expand=True)
+        text_scroll.pack(side=RIGHT, fill=Y)
+        content_text.tag_configure("strong", font=(self.base_font[0], _font_size(10), "bold"))
+        content_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], _font_size(10), "bold"))
+
+        nav_items: dict[tuple[str, str | None], SidebarItem] = {}
+
+        def render(tool_id: str, mode: str | None) -> None:
+            for entry_key, entry_item in nav_items.items():
+                entry_item.set_selected(entry_key == (tool_id, mode))
+            label = next(
+                (entry_label for entry_tool, entry_mode, entry_label in self._tutorial_entries() if (entry_tool, entry_mode) == (tool_id, mode)),
+                TOOL_NAV_LABELS.get(tool_id, ""),
+            )
+            content_title.configure(text=label)
+            content_text.config(state="normal")
+            content_text.delete("1.0", END)
+            for line, tag in self._tutorial_lines(tool_id, mode):
+                if tag:
+                    content_text.insert(END, line + "\n", tag)
+                else:
+                    content_text.insert(END, line + "\n")
+            content_text.config(state="disabled")
+
+        previous_group: str | None = None
+        for entry_tool, entry_mode, entry_label in self._tutorial_entries():
+            group = TOOL_GROUP_LABELS.get(entry_tool, "")
+            if group and group != previous_group:
+                ttk.Label(nav, text=group, style="SidebarSection.TLabel").pack(anchor="w", padx=self._pad(9), pady=self._pad(10, 4))
+                previous_group = group
+            item = SidebarItem(
+                nav,
+                text=entry_label,
+                icon_id=entry_tool,
+                command=lambda tool=entry_tool, mode=entry_mode: render(tool, mode),
+                height=30,
+            )
+            item.pack(fill="x", pady=self._px(1))
+            nav_items[(entry_tool, entry_mode)] = item
+            previous_tool = entry_tool
+
+        selection = self._current_tutorial_selection()
+        if selection not in nav_items:
+            selection = next(iter(nav_items))
+        render(*selection)
+
+        def on_close() -> None:
+            self._tutorial_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", on_close)
+        window.transient(self.root)
+        window.focus_force()
+
+    def _tutorial_lines(self, tool_id: str, mode: str | None = None) -> list[tuple[str, str | None]]:
+        if tool_id == "social_security":
             return [
                 ("适用：把各社保账户缴费清单整理成社保明细表和社保汇总表。", "strong"),
                 ("步骤：选择单个缴费清单、多个清单、zip压缩包，或包含清单的文件夹；再选择参保人员花名册。", None),
@@ -2431,7 +3161,7 @@ class HRToolkitApp:
                 ("目前规则：按身份证关联花名册；优先按账单文件夹或文件名识别账单月份、缴纳地和缴纳单位。", None),
                 ("注意：公积金、残保金、管理费暂无数据时留空；账单识别结果与花名册不一致时会提醒。", "warning"),
             ]
-        if self.current_tool == "data_statistics":
+        if tool_id == "data_statistics":
             return [
                 ("适用：把 HR 系统导出的考勤结果、周报记录、月报记录自动整理成统计表。", "strong"),
                 ("步骤：选择单个文件、多个文件、zip压缩包，或包含这些文件的文件夹。", None),
@@ -2443,7 +3173,7 @@ class HRToolkitApp:
                 ("容易疑惑2：选了统计日期时，归属期超出范围的周报本次不统计、留给下一次。比如范围选到6.24，6.26（周五）交的属于6.29截止那期，本次不会出现。", None),
                 ("注意：周月报异常只统计次数和明细，不计算扣款金额。", "warning"),
             ]
-        if self.current_tool == "insurance_ledger":
+        if tool_id == "insurance_ledger":
             return [
                 ("适用：把各保单人员清单整理成保险台账，并根据需求6的人力资源分析表做增减预警。", "strong"),
                 ("步骤：选择单个保单清单、多个清单、zip压缩包，或包含清单的文件夹；再选择人力资源分析表。", None),
@@ -2451,7 +3181,7 @@ class HRToolkitApp:
                 ("当前规则：PZDX保额取“每人伤残死亡限额”，按万元显示；PEAC保额固定按60万元。", None),
                 ("注意：人力资源分析表需包含“花名册”工作表；花名册在职但保单没有会提示需加保，保单有但花名册没有或已标记离职会提示需减保。", "warning"),
             ]
-        if self.current_tool == "salary_merge":
+        if tool_id == "salary_merge":
             return [
                 ("适用：把 1-12 个月工资表合成一张个人应发工资汇总表。", "strong"),
                 ("步骤：可选择单个月度工资表、多个工资表、zip压缩包，或包含这些文件的文件夹。", None),
@@ -2460,8 +3190,8 @@ class HRToolkitApp:
                 ("结果：按姓名、身份证号、月份合并；没有工资的月份填 0；已存在的人员月份不会覆盖。", None),
                 ("注意：工资表文件名或表内日期要能识别月份；重复人员或重复月份会在执行结果里提醒。", "warning"),
             ]
-        if self.current_tool == "personnel_change_merge":
-            if self.change_mode == "roster":
+        if tool_id == "personnel_change_merge":
+            if mode == "roster":
                 return [
                     ("适用：已有月度异动汇总表时，单独更新人力资源花名册。", "strong"),
                     ("步骤：选择单个异动汇总表、多个汇总表，或包含汇总表的文件夹；再选择人力资源花名册。", None),
@@ -2479,8 +3209,8 @@ class HRToolkitApp:
                 ("月份规则：增员看入职日期，减员看离职日期，转正看转正日期，调动看调整日期。", None),
                 ("注意：只处理增补表、离职、转正、调整；薪酬、产值和同行对比分析暂不处理。", "warning"),
             ]
-        if self.current_tool == "archive_import":
-            if self.archive_mode == "export":
+        if tool_id == "archive_import":
+            if mode == "export":
                 return [
                     ("适用：把一个或多个档案汇总表写入各公司独立档案表。", "strong"),
                     ("步骤：选择档案汇总表文件、多个文件、zip压缩包，或包含汇总表的文件夹。", None),
@@ -2495,7 +3225,7 @@ class HRToolkitApp:
                 ("结果：按“公司”写入对应工作表；身份证已存在时不重复新增，只补充空白材料字段。", None),
                 ("注意：编号会从文件名或表头标题识别项目地区，如“茂名项目部”自动填 11；识别不到会留空并提醒。", "warning"),
             ]
-        if self.current_tool == "folder_rename":
+        if tool_id == "folder_rename":
             return [
                 ("适用：批量修改所选目录下第一层人员文件夹名称。", "strong"),
                 ("追加文字：姓名不填就是全部文件夹追加；填姓名就是只处理这个人。输入“劳动合同”会追加为“-劳动合同”。", None),
@@ -2503,7 +3233,7 @@ class HRToolkitApp:
                 ("修改单人名称：填写原姓名和新名称，例如“张三”改为“章五”。", None),
                 ("重要提醒：改名会直接改变真实文件夹名称。必须先看预览，确认无误后再点确认；建议操作前先备份。", "warning"),
             ]
-        if self.current_tool == "salary_split":
+        if tool_id == "salary_split":
             return [
                 ("适用：一个完整工资表按“入职公司”拆成多个公司工资表。", "strong"),
                 ("步骤：选择工资表文件，保存位置默认在桌面“工资表拆分结果”，点击“开始拆分”。", None),
@@ -2527,7 +3257,7 @@ class HRToolkitApp:
                 self.change_tabs.tab(1, text="花名册更新")
                 target_index = 1 if self.change_mode == "roster" else 0
             if not self.change_tabs.winfo_ismapped():
-                self.change_tabs.pack(fill="x", pady=self._pad(0, 16), before=self.form)
+                self.change_tabs.pack(fill="x", pady=self._pad(0, 16), before=self.upload_card)
             if self.change_tabs.index("current") != target_index:
                 self.change_tabs.select(target_index)
             return
@@ -2539,6 +3269,8 @@ class HRToolkitApp:
             self._apply_form_layout()
 
     def _update_change_picker_buttons(self) -> None:
+        """配置合并后的上传入口动作，以及第二行（花名册/汇总表）的选择链接。"""
+
         def hide(*buttons) -> None:
             for button in buttons:
                 self._hide_picker_button(button)
@@ -2547,71 +3279,83 @@ class HRToolkitApp:
             for button in buttons:
                 self._show_picker_button(button)
 
-        if self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import"}:
-            hide(self.input_choose_button, self.summary_choose_button)
-            if self.current_tool == "social_security":
-                self.change_folder_zip_button.configure(text="文件夹", command=self._choose_social_security_folder)
-                self.change_file_button.configure(text="文件/压缩包", command=self._choose_social_security_files_or_zip)
-                hide(self.change_summary_folder_button)
-                self.change_summary_file_button.configure(text="文件", command=self._choose_social_security_roster_file)
-                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
-                return
-            if self.current_tool == "data_statistics":
-                self.change_folder_zip_button.configure(text="文件夹", command=self._choose_data_statistics_folder)
-                self.change_file_button.configure(text="文件/压缩包", command=self._choose_data_statistics_files_or_zip)
-                hide(self.change_summary_folder_button)
-                self.change_summary_file_button.configure(text="文件", command=self._choose_data_statistics_staff_file)
-                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
-                return
-            if self.current_tool == "insurance_ledger":
-                self.change_folder_zip_button.configure(text="文件夹", command=self._choose_insurance_folder)
-                self.change_file_button.configure(text="文件/压缩包", command=self._choose_insurance_files_or_zip)
-                hide(self.change_summary_folder_button)
-                self.change_summary_file_button.configure(text="文件", command=self._choose_insurance_roster_file)
-                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
-                return
-            if self.current_tool == "salary_merge":
-                self.change_folder_zip_button.configure(text="文件夹", command=self._choose_salary_folder)
-                self.change_file_button.configure(text="文件/压缩包", command=self._choose_salary_files_or_zip)
-                hide(self.change_summary_folder_button, self.change_summary_file_button)
-                show(self.change_file_button, self.change_folder_zip_button, self.summary_choose_button)
-                return
-            if self.current_tool == "archive_import":
-                if self.archive_mode == "export":
-                    self.change_folder_zip_button.configure(text="文件夹", command=self._choose_archive_export_summary_folder)
-                    self.change_file_button.configure(text="文件/压缩包", command=self._choose_archive_export_summary_files_or_zip)
-                    self.change_summary_folder_button.configure(text="文件夹", command=self._choose_archive_export_existing_folder)
-                    self.change_summary_file_button.configure(text="文件/压缩包", command=self._choose_archive_export_existing_file_or_zip)
-                else:
-                    self.change_folder_zip_button.configure(text="文件夹", command=self._choose_archive_folder)
-                    self.change_file_button.configure(text="文件/压缩包", command=self._choose_archive_files_or_zip)
-                    self.change_summary_file_button.configure(text="文件", command=self._choose_archive_summary_file)
-                    hide(self.change_summary_folder_button)
-                show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
-                if self.archive_mode == "export":
-                    show(self.change_summary_folder_button)
-                return
-            if self.change_mode == "roster":
-                self.change_folder_zip_button.configure(text="文件夹", command=self._choose_roster_summary_folder)
-                self.change_file_button.configure(text="文件/压缩包", command=self._choose_roster_summary_files)
-                self.change_summary_file_button.configure(text="文件", command=self._choose_roster_analysis_file)
-                hide(self.change_summary_folder_button)
-            else:
-                self.change_folder_zip_button.configure(text="文件夹", command=self._choose_change_folder)
-                self.change_file_button.configure(text="文件/压缩包", command=self._choose_change_files_or_zip)
-                self.change_summary_folder_button.configure(text="文件夹", command=self._choose_change_summary_folder)
-                self.change_summary_file_button.configure(text="文件", command=self._choose_change_summary_file)
-                show(self.change_summary_folder_button)
-            show(self.change_file_button, self.change_folder_zip_button, self.change_summary_file_button)
-            return
+        tool = self.current_tool
+        self._input_allow_multi = tool in MULTI_INPUT_TOOLS
 
-        hide(
-            self.change_folder_zip_button,
-            self.change_file_button,
-            self.change_summary_folder_button,
-            self.change_summary_file_button,
-        )
-        show(self.input_choose_button, self.summary_choose_button)
+        if tool == "social_security":
+            self._input_file_cmd = self._choose_social_security_files_or_zip
+            self._input_folder_cmd = self._choose_social_security_folder
+        elif tool == "data_statistics":
+            self._input_file_cmd = self._choose_data_statistics_files_or_zip
+            self._input_folder_cmd = self._choose_data_statistics_folder
+        elif tool == "insurance_ledger":
+            self._input_file_cmd = self._choose_insurance_files_or_zip
+            self._input_folder_cmd = self._choose_insurance_folder
+        elif tool == "salary_merge":
+            self._input_file_cmd = self._choose_salary_files_or_zip
+            self._input_folder_cmd = self._choose_salary_folder
+        elif tool == "personnel_change_merge":
+            if self.change_mode == "roster":
+                self._input_file_cmd = self._choose_roster_summary_files
+                self._input_folder_cmd = self._choose_roster_summary_folder
+            else:
+                self._input_file_cmd = self._choose_change_files_or_zip
+                self._input_folder_cmd = self._choose_change_folder
+        elif tool == "archive_import":
+            if self.archive_mode == "export":
+                self._input_file_cmd = self._choose_archive_export_summary_files_or_zip
+                self._input_folder_cmd = self._choose_archive_export_summary_folder
+            else:
+                self._input_file_cmd = self._choose_archive_files_or_zip
+                self._input_folder_cmd = self._choose_archive_folder
+        elif tool == "folder_rename":
+            self._input_file_cmd = None
+            self._input_folder_cmd = self._choose_input
+        else:  # salary_split 及未实现工具：单个文件
+            self._input_file_cmd = self._choose_input
+            self._input_folder_cmd = None
+
+        if tool == "social_security":
+            hide(self.summary_choose_button, self.change_summary_folder_button)
+            self.change_summary_file_button.configure(text="选择文件", command=self._choose_social_security_roster_file)
+            show(self.change_summary_file_button)
+        elif tool == "data_statistics":
+            hide(self.summary_choose_button, self.change_summary_folder_button)
+            self.change_summary_file_button.configure(text="选择文件", command=self._choose_data_statistics_staff_file)
+            show(self.change_summary_file_button)
+        elif tool == "insurance_ledger":
+            hide(self.summary_choose_button, self.change_summary_folder_button)
+            self.change_summary_file_button.configure(text="选择文件", command=self._choose_insurance_roster_file)
+            show(self.change_summary_file_button)
+        elif tool == "salary_merge":
+            hide(self.change_summary_folder_button, self.change_summary_file_button)
+            self.summary_choose_button.configure(text="选择文件")
+            show(self.summary_choose_button)
+        elif tool == "personnel_change_merge":
+            hide(self.summary_choose_button)
+            if self.change_mode == "roster":
+                hide(self.change_summary_folder_button)
+                self.change_summary_file_button.configure(text="选择文件", command=self._choose_roster_analysis_file)
+                show(self.change_summary_file_button)
+            else:
+                self.change_summary_folder_button.configure(text="选择文件夹", command=self._choose_change_summary_folder)
+                self.change_summary_file_button.configure(text="选择文件", command=self._choose_change_summary_file)
+                show(self.change_summary_file_button, self.change_summary_folder_button)
+        elif tool == "archive_import":
+            hide(self.summary_choose_button)
+            if self.archive_mode == "export":
+                self.change_summary_folder_button.configure(text="选择文件夹", command=self._choose_archive_export_existing_folder)
+                self.change_summary_file_button.configure(text="选择文件", command=self._choose_archive_export_existing_file_or_zip)
+                show(self.change_summary_file_button, self.change_summary_folder_button)
+            else:
+                hide(self.change_summary_folder_button)
+                self.change_summary_file_button.configure(text="选择文件", command=self._choose_archive_summary_file)
+                show(self.change_summary_file_button)
+        else:
+            hide(self.change_summary_folder_button, self.change_summary_file_button)
+            show(self.summary_choose_button)
+
+        self._refresh_upload_card()
 
     def _update_output_controls(self) -> None:
         self._output_row_visible = self.current_tool != "folder_rename"
@@ -2729,6 +3473,7 @@ class HRToolkitApp:
                 self.input_path.set(directory)
                 if not self.output_dir_user_selected:
                     self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
+                self._refresh_upload_card()
             return
 
         filename = filedialog.askopenfilename(
@@ -2739,6 +3484,7 @@ class HRToolkitApp:
             self.input_path.set(filename)
             if not self.output_dir_user_selected:
                 self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
+            self._refresh_upload_card()
 
     def _choose_change_folder(self) -> None:
         directory = filedialog.askdirectory(title="选择异动表文件夹")
@@ -2890,13 +3636,25 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _set_change_input_paths(self, paths: list[Path]) -> None:
-        self.change_input_paths = paths
-        if len(paths) == 1:
+        # 合并后的上传入口支持“＋ 添加”累加选择，重复项按路径去重
+        current = list(self.change_input_paths or [])
+        for path in paths:
+            if path not in current:
+                current.append(path)
+        self.change_input_paths = current or None
+        self._sync_input_path_text()
+        if not self.output_dir_user_selected:
+            self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
+        self._refresh_upload_card()
+
+    def _sync_input_path_text(self) -> None:
+        paths = self.change_input_paths or []
+        if not paths:
+            self.input_path.set("")
+        elif len(paths) == 1:
             self.input_path.set(str(paths[0]))
         else:
             self.input_path.set(f"已选择 {len(paths)} 个文件")
-        if not self.output_dir_user_selected:
-            self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
 
     def _choose_change_summary_folder(self) -> None:
         directory = filedialog.askdirectory(title="选择已有异动汇总表文件夹")
@@ -3424,8 +4182,10 @@ class HRToolkitApp:
                     continue
                 self._finish_tool_run()
                 if status == "success":
+                    self._record_last_run(True)
                     self._handle_success(payload)
                 elif status == "error":
+                    self._record_last_run(False)
                     self._handle_error(payload)
         except queue.Empty:
             pass
@@ -3670,13 +4430,28 @@ class HRToolkitApp:
         open_path(directory)
 
     def _write_log(self, text: str) -> None:
+        # 时间线式日志：彩色圆点 + 时间戳 + 内容（对应设计稿“运行记录”）
         tag = None
-        if any(keyword in text for keyword in ("失败", "错误", "提醒", "不存在", "缺少")):
+        if any(keyword in text for keyword in ("失败", "错误")):
+            tag = "error"
+        elif any(keyword in text for keyword in ("提醒", "不存在", "缺少")):
             tag = "warning"
         elif any(keyword in text for keyword in ("完成", "成功")):
             tag = "success"
-        elif text.startswith("- "):
+        elif text.startswith(("- ", "  ", "（")):
             tag = "muted"
+        dot_tag = {
+            "error": "dot_error",
+            "warning": "dot_warning",
+            "success": "dot_success",
+            "muted": "dot_muted",
+        }.get(tag or "", "dot_success")
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        if tag == "muted":
+            self.log_text.insert(END, "   ", "muted")
+        else:
+            self.log_text.insert(END, "● ", dot_tag)
+            self.log_text.insert(END, f"{timestamp}  ", "timestamp")
         if tag:
             self.log_text.insert(END, text + "\n", tag)
         else:
