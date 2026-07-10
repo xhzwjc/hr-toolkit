@@ -206,6 +206,19 @@ def _configure_tk_font_scaling(root: Tk, ui_scale: float) -> None:
         pass
 
 
+def _font_size(size: int) -> int:
+    """把设计字号（Windows 96dpi 基准）换算成当前平台的 Tk 字号。
+
+    macOS 的 aqua 后端把“点”直接按像素渲染（72dpi 假设），且完全忽略
+    tk scaling 设置，同样的数值在 Mac 上只有 Windows 上的 3/4 大，
+    造成“布局一致、字明显偏小”。这里放大 4/3 对齐设计基准；
+    Windows/Linux 走 tk scaling 机制，原值返回。
+    """
+    if sys.platform == "darwin":
+        return max(1, round(size * 4 / 3))
+    return size
+
+
 def _widget_ui_scale(widget) -> float:
     try:
         return float(getattr(widget.winfo_toplevel(), "_hr_ui_scale", 1.0))
@@ -345,7 +358,7 @@ class CodexButton(Canvas):
         inset = self._pxf(1)
         self._draw_round_rect(inset, inset, width - inset, height - inset, self._pxf(8), fill=fill, outline=border, width=self._pxf(1))
         text = self._display_text()
-        font = (self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family"), 10)
+        font = (self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family"), _font_size(10))
         if self._icon:
             content_width = self._measure_width(text, self._icon, 0) - self._px(28)
             start_x = max((width - content_width) / 2, self._pxf(12))
@@ -392,6 +405,8 @@ class HRToolkitApp:
         self.root = root
         self.ui_scale = _detect_ui_scale(root)
         setattr(self.root, "_hr_ui_scale", self.ui_scale)
+        # Windows 依赖 tk scaling 把“点”字号按 DPI 转像素；
+        # macOS 的 aqua 后端忽略 tk scaling，字号统一走 _font_size() 换算
         if sys.platform.startswith("win") or _forced_ui_scale() is not None:
             _configure_tk_font_scaling(self.root, self.ui_scale)
 
@@ -458,7 +473,15 @@ class HRToolkitApp:
         self._tool_running = False
         self._idle_run_button_text = ""
 
-        runlog.log_line(f"{APP_DISPLAY_NAME} v{__version__} 启动（{sys.platform}）")
+        try:
+            tk_scaling = float(self.root.tk.call("tk", "scaling"))
+        except Exception:
+            tk_scaling = 0.0
+        runlog.log_line(
+            f"{APP_DISPLAY_NAME} v{__version__} 启动（{sys.platform}，"
+            f"分辨率 {self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}，"
+            f"ui_scale {self.ui_scale:.2f}，tk scaling {tk_scaling:.2f}）"
+        )
         # 界面回调里的异常默认只打到不存在的控制台，改为写入运行日志
         self.root.report_callback_exception = self._on_tk_callback_exception
 
@@ -567,14 +590,14 @@ class HRToolkitApp:
         else:
             family = "Arial"
             mono_family = "DejaVu Sans Mono"
-        self.base_font = (family, 10)
-        self.small_font = (family, 9)
-        self.tiny_font = (family, 8)
-        self.title_font = (family, 22, "bold")
-        self.section_font = (family, 10, "bold")
-        self.nav_font = (family, 10)
-        self.nav_selected_font = (family, 10, "bold")
-        self.mono_font = (mono_family, 10)
+        self.base_font = (family, _font_size(10))
+        self.small_font = (family, _font_size(9))
+        self.tiny_font = (family, _font_size(8))
+        self.title_font = (family, _font_size(22), "bold")
+        self.section_font = (family, _font_size(10), "bold")
+        self.nav_font = (family, _font_size(10))
+        self.nav_selected_font = (family, _font_size(10), "bold")
+        self.mono_font = (mono_family, _font_size(10))
         self.root.option_add("*TCombobox*Listbox.font", self.base_font)
 
         style = ttk.Style(self.root)
@@ -604,11 +627,11 @@ class HRToolkitApp:
         style.configure("NavIndicatorSelected.TFrame", background=COLOR_ACCENT)
         style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=self.title_font)
         style.configure("Subtitle.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=self.base_font)
-        style.configure("Eyebrow.TLabel", background=COLOR_BG, foreground=COLOR_PRIMARY, font=(self.base_font[0], 9, "bold"))
-        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], 10))
-        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], 14, "bold"))
+        style.configure("Eyebrow.TLabel", background=COLOR_BG, foreground=COLOR_PRIMARY, font=(self.base_font[0], _font_size(9), "bold"))
+        style.configure("Section.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=(self.base_font[0], _font_size(10)))
+        style.configure("SidebarTitle.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_TEXT, font=(self.base_font[0], _font_size(14), "bold"))
         style.configure("SidebarMuted.TLabel", background=COLOR_SIDEBAR, foreground=COLOR_MUTED, font=self.small_font)
-        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=(self.base_font[0], 8, "bold"))
+        style.configure("SidebarSection.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=(self.base_font[0], _font_size(8), "bold"))
         style.configure("Version.TLabel", background=COLOR_SIDEBAR, foreground="#5f6b7a", font=self.tiny_font)
         style.configure("TutorialTitle.TLabel", background=COLOR_TUTORIAL_BG, foreground=COLOR_TEXT, font=self.section_font)
         style.configure("Tooltip.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.small_font, padding=self._pad(8, 6))
@@ -676,11 +699,11 @@ class HRToolkitApp:
         style.layout("NavSelected.TButton", nav_button_layout)
         style.map("Nav.TButton", background=[("active", COLOR_NAV_HOVER)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
         style.map("NavSelected.TButton", background=[("active", COLOR_NAV_SELECTED)], foreground=[("active", COLOR_NAV_TEXT_SELECTED)])
-        style.configure("Primary.TButton", padding=self._pad(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], 10, "bold"), relief="flat")
+        style.configure("Primary.TButton", padding=self._pad(16, 8), background=COLOR_PRIMARY, foreground="#ffffff", borderwidth=0, font=(self.base_font[0], _font_size(10), "bold"), relief="flat")
         style.map("Primary.TButton", background=[("active", COLOR_PRIMARY_ACTIVE), ("disabled", COLOR_BORDER)], foreground=[("disabled", COLOR_MUTED)])
         style.configure("Secondary.TButton", padding=self._pad(12, 7), background=COLOR_SURFACE, foreground=COLOR_TEXT, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, relief="solid", borderwidth=self._px(1))
         style.map("Secondary.TButton", background=[("active", COLOR_SURFACE_ALT), ("disabled", "#eef1f0")], foreground=[("disabled", COLOR_MUTED)], bordercolor=[("active", "#cbd5d3")])
-        style.configure("Icon.TButton", padding=self._pad(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=self._px(1), relief="solid", font=(self.base_font[0], 10, "bold"))
+        style.configure("Icon.TButton", padding=self._pad(8, 6), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER, borderwidth=self._px(1), relief="solid", font=(self.base_font[0], _font_size(10), "bold"))
         style.map("Icon.TButton", background=[("active", COLOR_SURFACE_ALT)], foreground=[("active", COLOR_TEXT)], bordercolor=[("active", "#cbd5d3")])
         style.configure("Change.TNotebook", background=COLOR_BG, borderwidth=0)
         style.configure("Change.TNotebook.Tab", padding=self._pad(18, 9), background=COLOR_SURFACE, foreground=COLOR_MUTED, bordercolor=COLOR_BORDER)
@@ -809,7 +832,7 @@ class HRToolkitApp:
         brand_mark = Canvas(brand_row, width=self._px(48), height=self._px(48), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
         brand_mark.pack(side=LEFT)
         self._draw_round_rect(brand_mark, self._pxf(2), self._pxf(2), self._pxf(46), self._pxf(46), self._pxf(11), fill=COLOR_PRIMARY, outline="")
-        brand_mark.create_text(self._pxf(24), self._pxf(24), text="HR", fill="#ffffff", font=(self.base_font[0], 12, "bold"))
+        brand_mark.create_text(self._pxf(24), self._pxf(24), text="HR", fill="#ffffff", font=(self.base_font[0], _font_size(12), "bold"))
         brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
         brand_text.pack(side=LEFT, fill="x", expand=True, padx=self._pad(14, 0))
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
@@ -1183,8 +1206,8 @@ class HRToolkitApp:
             font=self.base_font,
         )
         self.tutorial_text.pack(fill="x")
-        self.tutorial_text.tag_configure("strong", font=(self.base_font[0], 10, "bold"))
-        self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], 10, "bold"))
+        self.tutorial_text.tag_configure("strong", font=(self.base_font[0], _font_size(10), "bold"))
+        self.tutorial_text.tag_configure("warning", foreground=COLOR_WARNING, font=(self.base_font[0], _font_size(10), "bold"))
         # 高度跟随换行后的实际行数，避免固定高度裁掉后面的内容
         self.tutorial_text.bind("<Configure>", self._resize_tutorial_text)
         self._set_tutorial_text()
@@ -1954,7 +1977,7 @@ class HRToolkitApp:
             text=title,
             bg=UPDATE_DIALOG_BG,
             fg=UPDATE_DIALOG_TEXT,
-            font=(self.base_font[0], 13, "bold"),
+            font=(self.base_font[0], _font_size(13), "bold"),
         ).pack(side=LEFT, padx=self._pad(14, 0))
 
     def _build_update_notes(self, body: Frame, notes: list[str], *, pad: int) -> None:
@@ -1993,6 +2016,9 @@ class HRToolkitApp:
         scaled_width, _ = self._update_dialog_size(width, 0)
         window = Toplevel(self.root)
         self.update_window = window
+        # 传递缩放系数：CodexButton 等自绘控件按所在顶层窗口取缩放，
+        # 不设置的话高缩放屏上弹窗里的按钮会偏小
+        setattr(window, "_hr_ui_scale", self.ui_scale)
         window.withdraw()
         window.title("软件更新")
         window.resizable(False, False)
@@ -2083,7 +2109,7 @@ class HRToolkitApp:
         fill = UPDATE_DIALOG_PRIMARY if primary else UPDATE_DIALOG_SECONDARY
         active_fill = UPDATE_DIALOG_PRIMARY_ACTIVE if primary else UPDATE_DIALOG_SECONDARY_ACTIVE
         foreground = "#ffffff" if primary else UPDATE_DIALOG_TEXT
-        font_spec = (self.base_font[0], 10, "bold")
+        font_spec = (self.base_font[0], _font_size(10), "bold")
         width = max(self._px(92), tkfont.Font(font=font_spec).measure(text) + self._px(40))
         height = self._px(32)
         button = Canvas(parent, width=width, height=height, bg=UPDATE_DIALOG_BG, highlightthickness=0, cursor="hand2")
