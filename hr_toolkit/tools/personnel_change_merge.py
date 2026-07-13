@@ -23,7 +23,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
-from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, insert_rows, snapshot_row
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
 
@@ -705,7 +705,7 @@ def _next_summary_write_row(ws: Worksheet, layout: ChangeSheetLayout) -> int:
         target_row = layout.footer_start_row
         template_row = max(layout.data_start_row, target_row - 1)
         template_snapshot = snapshot_row(ws, template_row, layout.max_column)
-        ws.insert_rows(target_row, 1)
+        insert_rows(ws, target_row, 1)
         apply_row_snapshot(ws, target_row, template_snapshot, translate_formulas=True)
         _clear_row_values(ws, target_row, layout.max_column)
         return target_row
@@ -1180,7 +1180,7 @@ def _insert_roster_addition(ws: Worksheet, layout: RosterLayout, row: ChangeRow)
     if template_row >= layout.footer_start_row:
         template_row = layout.data_start_row
     template_snapshot = snapshot_row(ws, template_row, layout.max_column)
-    ws.insert_rows(insert_at, 1)
+    insert_rows(ws, insert_at, 1)
     apply_row_snapshot(ws, insert_at, template_snapshot, translate_formulas=True)
     values = _roster_values_for_addition(ws, layout, row, project, template_row)
     for header, value in values.items():

@@ -16,7 +16,7 @@ from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cell_text as _cell_text, insert_cols, insert_rows, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -1118,7 +1118,7 @@ def _copy_template(temp_dir: Path) -> Path:
 def _write_attendance_sheet(ws: Worksheet, summaries: list[AttendancePersonSummary]) -> None:
     max_month = max([4] + [month for summary in summaries for month in summary.month_overtime_days])
     if max_month > 4:
-        ws.insert_cols(13, max_month - 4)
+        insert_cols(ws, 13, max_month - 4)
     stat_start_col = 9 + max_month
     headers = ["序号", "公司", "部门（片区）", "姓名", "事假（天）", "病假（天）", "带薪休假（天）", "调休（天）"]
     headers.extend(f"{month}月份加班天数" for month in range(1, max_month + 1))
@@ -1129,7 +1129,7 @@ def _write_attendance_sheet(ws: Worksheet, summaries: list[AttendancePersonSumma
     max_col = len(headers)
     template_snapshot = snapshot_row(ws, 3, min(ws.max_column, max_col))
     if len(summaries) > 1:
-        ws.insert_rows(4, len(summaries) - 1)
+        insert_rows(ws, 4, len(summaries) - 1)
     for offset, summary in enumerate(summaries):
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
@@ -1172,7 +1172,7 @@ def _write_report_sheet(
     ws["A1"].value = period_title
     template_snapshot = snapshot_row(ws, 3, 10)
     if len(summaries) > 2:
-        ws.insert_rows(5, len(summaries) - 2)
+        insert_rows(ws, 5, len(summaries) - 2)
     for offset, summary in enumerate(summaries):
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)

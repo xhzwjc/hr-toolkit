@@ -21,7 +21,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
-from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, insert_rows, snapshot_row
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
 
@@ -631,7 +631,7 @@ def _append_archive_rows(ws: Worksheet, layout: ArchiveSheetLayout, records: lis
     remaining_count = len(records) - len(target_rows)
     if remaining_count > 0:
         insert_at = layout.footer_start_row
-        ws.insert_rows(insert_at, remaining_count)
+        insert_rows(ws, insert_at, remaining_count)
         target_rows.extend(range(insert_at, insert_at + remaining_count))
     for row_index, record in zip(target_rows, records):
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)

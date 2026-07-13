@@ -111,6 +111,43 @@ class SheetGrid:
         return _GridCell(self.value(row_index, col_index))
 
 
+def insert_rows(ws: Worksheet, idx: int, amount: int = 1) -> None:
+    """在第 idx 行前插入 amount 个空行，内存占用与已用单元格数成正比。
+
+    openpyxl 自带的 ``ws.insert_rows`` 会先 ``list(iter_rows(min_row=idx))``，
+    把插入位置以下、所有列的空单元格全部物化成对象再逐个搬动。几千行 × 几十列
+    时会瞬间生成上百万个单元格对象而 MemoryError（见 openpyxl
+    ``worksheet._move_cells``）。这里只搬动实际存在的稀疏单元格，行为与
+    openpyxl 保持一致——同样不改动已有公式引用、不移动合并单元格与行高。
+    """
+    _shift_cells(ws, min_index=idx, amount=amount, is_row=True)
+    ws._current_row = ws.max_row
+
+
+def insert_cols(ws: Worksheet, idx: int, amount: int = 1) -> None:
+    """在第 idx 列前插入 amount 个空列，是 :func:`insert_rows` 的列向版本。"""
+    _shift_cells(ws, min_index=idx, amount=amount, is_row=False)
+
+
+def _shift_cells(ws: Worksheet, *, min_index: int, amount: int, is_row: bool) -> None:
+    if amount <= 0:
+        return
+    cells = ws._cells
+    # 只挑出受影响的已存在单元格；从远端向 min_index 方向搬，避免覆盖目标位置
+    axis = 0 if is_row else 1
+    affected = [key for key in cells if key[axis] >= min_index]
+    affected.sort(key=lambda key: key[axis], reverse=True)
+    for row, col in affected:
+        cell = cells.pop((row, col))
+        if is_row:
+            row += amount
+        else:
+            col += amount
+        cell.row = row
+        cell.column = col
+        cells[(row, col)] = cell
+
+
 def cell_text(value: Any) -> str:
     if value is None:
         return ""

@@ -26,7 +26,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cell_text as _cell_text, snapshot_row
+from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cell_text as _cell_text, insert_rows, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -803,7 +803,7 @@ def _write_detail_workbook(records: list[DetailRecord], output_file: Path, temp_
         template_snapshot = snapshot_row(ws, 4, ws.max_column)
         data_start = 4
         if records:
-            ws.insert_rows(data_start + 1, max(len(records) - 1, 0))
+            insert_rows(ws, data_start + 1, max(len(records) - 1, 0))
         for offset, record in enumerate(records):
             row_index = data_start + offset
             apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
