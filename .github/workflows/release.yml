@@ -385,6 +385,7 @@ jobs:
       - validate
       - publish
     if: >-
+      always() &&
       needs.validate.result == 'success' &&
       needs.publish.result == 'success'
     runs-on: ubuntu-latest

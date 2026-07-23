@@ -273,6 +273,7 @@ class WindowsPackagingTests(unittest.TestCase):
         mirror_job = workflow.split("\n  mirror-gitee:", 1)[1]
         job_configuration = mirror_job.split("\n    steps:", 1)[0]
         self.assertIn("- publish", job_configuration)
+        self.assertIn("always()", job_configuration)
         self.assertIn("needs.publish.result == 'success'", job_configuration)
         self.assertIn("secrets.GITEE_TOKEN", mirror_job)
         self.assertIn("publish_gitee_release.py", mirror_job)
@@ -294,6 +295,19 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("refs/tags", workflow)
         self.assertNotIn("publish_gitee_release.py", workflow)
         self.assertNotIn("gh release", workflow)
+
+    def test_gitee_release_recovery_reuses_github_assets_without_rebuilding(self) -> None:
+        workflow = (
+            build_windows.REPO_ROOT / ".github" / "workflows" / "gitee-release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("tag:", workflow)
+        self.assertIn("gh release download", workflow)
+        self.assertIn("publish_gitee_release.py", workflow)
+        self.assertIn("push --atomic gitee", workflow)
+        self.assertIn("secrets.GITEE_TOKEN", workflow)
+        self.assertNotIn("build_windows.py", workflow)
+        self.assertNotIn("build_macos.py", workflow)
 
     def test_installer_output_magic_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
