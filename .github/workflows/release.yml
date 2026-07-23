@@ -480,7 +480,8 @@ jobs:
             echo "Gitee tag ${TAG} already exists at a different object" >&2
             exit 1
           fi
-          git push --atomic gitee \
+          git -c http.postBuffer=1073741824 -c http.version=HTTP/1.1 \
+            push --atomic gitee \
             "${TAG_COMMIT}:refs/heads/main" \
             "refs/tags/${TAG}:refs/tags/${TAG}"
 

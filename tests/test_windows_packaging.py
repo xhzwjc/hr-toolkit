@@ -276,7 +276,9 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("needs.publish.result == 'success'", job_configuration)
         self.assertIn("secrets.GITEE_TOKEN", mirror_job)
         self.assertIn("publish_gitee_release.py", mirror_job)
-        self.assertIn("git push --atomic gitee", mirror_job)
+        self.assertIn("http.postBuffer=1073741824", mirror_job)
+        self.assertIn("http.version=HTTP/1.1", mirror_job)
+        self.assertIn("push --atomic gitee", mirror_job)
         self.assertNotIn("git add", mirror_job)
         self.assertNotIn("git commit", mirror_job)
 
