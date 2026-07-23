@@ -1,0 +1,81 @@
+name: Sync source to Gitee
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitee-source-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-main:
+    name: Fast-forward Gitee main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GITEE_REPOSITORY: optimistic-little-sunspot/hr-toolkit
+      GITEE_USERNAME: optimistic-little-sunspot
+    steps:
+      - name: Check out GitHub main with complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Require Gitee credential
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITEE_TOKEN}" ]]; then
+            echo "Missing required GitHub Actions Secret: GITEE_TOKEN" >&2
+            exit 1
+          fi
+
+      - name: Fast-forward source to Gitee
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          ASKPASS_PATH="${RUNNER_TEMP}/gitee-askpass.sh"
+          cat > "${ASKPASS_PATH}" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' "${GITEE_USERNAME}" ;;
+            *Password*) printf '%s\n' "${GITEE_TOKEN}" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 700 "${ASKPASS_PATH}"
+          export GIT_ASKPASS="${ASKPASS_PATH}"
+
+          git remote add gitee "https://gitee.com/${GITEE_REPOSITORY}.git"
+          git fetch gitee refs/heads/main:refs/remotes/gitee/main
+          git merge-base --is-ancestor refs/remotes/gitee/main HEAD
+
+          git -c http.postBuffer=1073741824 -c http.version=HTTP/1.1 \
+            push gitee HEAD:refs/heads/main
+
+      - name: Verify Gitee main matches GitHub main
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          ASKPASS_PATH="${RUNNER_TEMP}/gitee-askpass.sh"
+          export GIT_ASKPASS="${ASKPASS_PATH}"
+
+          LOCAL_MAIN="$(git rev-parse HEAD)"
+          REMOTE_MAIN="$(git ls-remote gitee refs/heads/main | awk '{print $1}')"
+          if [[ -z "${REMOTE_MAIN}" || "${REMOTE_MAIN}" != "${LOCAL_MAIN}" ]]; then
+            echo "Gitee main verification failed" >&2
+            exit 1
+          fi
+          echo "Gitee main synchronized at ${REMOTE_MAIN}"

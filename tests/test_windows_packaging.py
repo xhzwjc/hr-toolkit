@@ -282,6 +282,19 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("git add", mirror_job)
         self.assertNotIn("git commit", mirror_job)
 
+    def test_gitee_source_sync_is_manual_and_never_publishes_a_release(self) -> None:
+        workflow = (
+            build_windows.REPO_ROOT / ".github" / "workflows" / "gitee-sync.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("secrets.GITEE_TOKEN", workflow)
+        self.assertIn("git merge-base --is-ancestor refs/remotes/gitee/main HEAD", workflow)
+        self.assertIn("push gitee HEAD:refs/heads/main", workflow)
+        self.assertIn("git ls-remote gitee refs/heads/main", workflow)
+        self.assertNotIn("refs/tags", workflow)
+        self.assertNotIn("publish_gitee_release.py", workflow)
+        self.assertNotIn("gh release", workflow)
+
     def test_installer_output_magic_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
