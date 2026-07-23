@@ -497,4 +497,5 @@ jobs:
             --tag "${TAG}" \
             --repository "${GITEE_REPOSITORY}" \
             --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
-            --assets-dir gitee-release-assets
+            --assets-dir gitee-release-assets \
+            --timeout 600

@@ -277,6 +277,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("needs.publish.result == 'success'", job_configuration)
         self.assertIn("secrets.GITEE_TOKEN", mirror_job)
         self.assertIn("publish_gitee_release.py", mirror_job)
+        self.assertIn("--timeout 600", mirror_job)
         self.assertIn("http.postBuffer=1073741824", mirror_job)
         self.assertIn("http.version=HTTP/1.1", mirror_job)
         self.assertIn("push --atomic gitee", mirror_job)
@@ -306,6 +307,13 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("publish_gitee_release.py", workflow)
         self.assertIn("push --atomic gitee", workflow)
         self.assertIn("secrets.GITEE_TOKEN", workflow)
+        self.assertIn("ref: main", workflow)
+        self.assertIn("path: tagged-source", workflow)
+        self.assertIn(
+            "--project-version-file tagged-source/hr_toolkit/__init__.py",
+            workflow,
+        )
+        self.assertIn("--timeout 600", workflow)
         self.assertNotIn("build_windows.py", workflow)
         self.assertNotIn("build_macos.py", workflow)
 

@@ -26,6 +26,9 @@ from generate_release_metadata import (
 DEFAULT_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
 DEFAULT_API_BASE = "https://gitee.com/api/v5"
 DEFAULT_GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
+DEFAULT_TIMEOUT = 600
+DEFAULT_UPLOAD_ATTEMPTS = 3
+DEFAULT_RETRY_DELAY = 5.0
 METADATA_NAMES = ("latest.json", "SHA256SUMS.txt")
 USER_AGENT = "HRToolkit-Gitee-Publisher/1.0"
 
@@ -35,7 +38,13 @@ class GiteeReleaseError(RuntimeError):
 
 
 class GiteeClient:
-    def __init__(self, token: str, *, api_base: str = DEFAULT_API_BASE, timeout: int = 120) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        api_base: str = DEFAULT_API_BASE,
+        timeout: int = DEFAULT_TIMEOUT,
+    ) -> None:
         if not token.strip():
             raise GiteeReleaseError("GITEE_TOKEN 不能为空。")
         self._token = token.strip()
@@ -281,6 +290,8 @@ def publish_gitee_release(
     target_commitish: str,
     name: str,
     body: str,
+    upload_attempts: int = DEFAULT_UPLOAD_ATTEMPTS,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     names = validate_mirror_assets(
         assets_dir,
@@ -308,16 +319,153 @@ def publish_gitee_release(
         )
 
     release_id = _release_id(release)
-    for attachment in client.list_attachments(repository, release_id):
-        client.delete_attachment(repository, release_id, _attachment_id(attachment))
+    completed = _reconcile_attachments(
+        client,
+        repository=repository,
+        release_id=release_id,
+        assets_dir=assets_dir,
+        names=names,
+    )
 
     upload_order = sorted(name for name in names if name != "latest.json") + ["latest.json"]
     for asset_name in upload_order:
-        client.upload_attachment(repository, release_id, assets_dir / asset_name)
+        if asset_name in completed:
+            continue
+        _upload_attachment_with_retries(
+            client,
+            repository=repository,
+            release_id=release_id,
+            file_path=assets_dir / asset_name,
+            attempts=upload_attempts,
+            retry_delay=retry_delay,
+        )
 
+    _reconcile_attachments(
+        client,
+        repository=repository,
+        release_id=release_id,
+        assets_dir=assets_dir,
+        names=names,
+    )
     attachments = client.list_attachments(repository, release_id)
     _verify_attachment_list(attachments, assets_dir, names)
     return release, names
+
+
+def _reconcile_attachments(
+    client: GiteeClient,
+    *,
+    repository: str,
+    release_id: str,
+    assets_dir: Path,
+    names: Sequence[str],
+) -> set[str]:
+    """Keep valid uploaded files and remove stale or duplicate attachments."""
+
+    expected = {name: (assets_dir / name).stat().st_size for name in names}
+    completed: dict[str, Mapping[str, Any]] = {}
+    delete_queue: list[Mapping[str, Any]] = []
+    for attachment in client.list_attachments(repository, release_id):
+        name = str(attachment.get("name") or "").strip()
+        if name not in expected:
+            delete_queue.append(attachment)
+            continue
+        try:
+            size = _attachment_size(attachment)
+        except GiteeReleaseError:
+            delete_queue.append(attachment)
+            continue
+        if size != expected[name] or name in completed:
+            delete_queue.append(attachment)
+            continue
+        completed[name] = attachment
+
+    # latest.json is the publication marker. Never retain it when one of the
+    # payload/checksum assets is still missing from an interrupted upload.
+    payload_names = set(names) - {"latest.json"}
+    if "latest.json" in completed and not payload_names.issubset(completed):
+        delete_queue.append(completed.pop("latest.json"))
+
+    for attachment in delete_queue:
+        client.delete_attachment(repository, release_id, _attachment_id(attachment))
+    return set(completed)
+
+
+def _upload_attachment_with_retries(
+    client: GiteeClient,
+    *,
+    repository: str,
+    release_id: str,
+    file_path: Path,
+    attempts: int,
+    retry_delay: float,
+) -> None:
+    if attempts < 1:
+        raise GiteeReleaseError("附件上传重试次数必须至少为 1。")
+    expected_size = file_path.stat().st_size
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        existing = _find_exact_attachment(
+            client,
+            repository=repository,
+            release_id=release_id,
+            name=file_path.name,
+            size=expected_size,
+        )
+        if existing is not None:
+            return
+        try:
+            client.upload_attachment(repository, release_id, file_path)
+            return
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"上传 {file_path.name} 第 {attempt}/{attempts} 次未确认成功，正在核对 Gitee 附件。"
+            )
+            # The server may have accepted the multipart body even if the
+            # client timed out waiting for its response. Reconcile before a
+            # retry so an ambiguous success does not create duplicate assets.
+            if retry_delay > 0:
+                time.sleep(retry_delay)
+            existing = _find_exact_attachment(
+                client,
+                repository=repository,
+                release_id=release_id,
+                name=file_path.name,
+                size=expected_size,
+            )
+            if existing is not None:
+                return
+    raise GiteeReleaseError(
+        f"上传 {file_path.name} 在 {attempts} 次尝试后仍失败：{last_error}"
+    ) from None
+
+
+def _find_exact_attachment(
+    client: GiteeClient,
+    *,
+    repository: str,
+    release_id: str,
+    name: str,
+    size: int,
+) -> Mapping[str, Any] | None:
+    exact: Mapping[str, Any] | None = None
+    stale: list[Mapping[str, Any]] = []
+    for attachment in client.list_attachments(repository, release_id):
+        if str(attachment.get("name") or "").strip() != name:
+            continue
+        try:
+            attachment_size = _attachment_size(attachment)
+        except GiteeReleaseError:
+            stale.append(attachment)
+            continue
+        if attachment_size == size and exact is None:
+            exact = attachment
+        else:
+            stale.append(attachment)
+    for attachment in stale:
+        client.delete_attachment(repository, release_id, _attachment_id(attachment))
+    return exact
 
 
 def verify_public_release(
@@ -381,6 +529,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--assets-dir", type=Path, required=True)
     parser.add_argument("--api-base", default=DEFAULT_API_BASE)
     parser.add_argument("--token-env", default="GITEE_TOKEN")
+    parser.add_argument("--timeout", type=_positive_int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--upload-attempts",
+        type=_positive_int,
+        default=DEFAULT_UPLOAD_ATTEMPTS,
+    )
+    parser.add_argument("--retry-delay", type=_nonnegative_float, default=DEFAULT_RETRY_DELAY)
     parser.add_argument("--name")
     parser.add_argument("--body")
     parser.add_argument("--dry-run", action="store_true")
@@ -409,7 +564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     token = os.environ.get(args.token_env, "")
     if not token.strip():
         raise GiteeReleaseError(f"缺少 GitHub Actions Secret：{args.token_env}")
-    client = GiteeClient(token, api_base=args.api_base)
+    client = GiteeClient(token, api_base=args.api_base, timeout=args.timeout)
     release_name = args.name or f"HR Toolkit {tag}"
     body = args.body or "GitHub Release 构建完成后自动同步的国内下载镜像。"
     _release, names = publish_gitee_release(
@@ -421,6 +576,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         target_commitish=args.target_commitish,
         name=release_name,
         body=body,
+        upload_attempts=args.upload_attempts,
+        retry_delay=args.retry_delay,
     )
     verify_public_release(
         client,
@@ -436,6 +593,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _quoted_repository(repository: str) -> str:
     owner, name = repository.split("/", 1)
     return f"{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(name, safe='')}"
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("不能小于 0")
+    return parsed
 
 
 def _multipart_body(fields: Mapping[str, str], file_path: Path) -> tuple[bytes, str]:

@@ -40,6 +40,7 @@ class FakeGiteeClient:
         ]
         self.upload_order: list[str] = []
         self.deleted: list[str] = []
+        self.timeout_after_accepting: set[str] = set()
 
     def get_release_by_tag(self, _repository: str, _tag: str):
         return self.release
@@ -72,6 +73,9 @@ class FakeGiteeClient:
             ),
         }
         self.attachments.append(attachment)
+        if file_path.name in self.timeout_after_accepting:
+            self.timeout_after_accepting.remove(file_path.name)
+            raise gitee_publish.GiteeReleaseError("simulated response timeout")
         return attachment
 
     def get_public_latest_release(self, _repository: str):
@@ -176,8 +180,74 @@ class GiteeMirrorTests(unittest.TestCase):
                 name=f"HR Toolkit {self.TAG}",
                 body="mirror",
             )
+            self.assertEqual(client.upload_order, [])
+
+    def test_upload_timeout_after_server_accepts_does_not_duplicate_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            self._build_assets(assets_dir)
+            client = FakeGiteeClient(assets_dir, self.TAG)
+            first_asset = sorted(
+                name
+                for name in gitee_publish.expected_asset_names(assets_dir, self.VERSION)
+                if name != "latest.json"
+            )[0]
+            client.timeout_after_accepting.add(first_asset)
+
+            _release, names = gitee_publish.publish_gitee_release(
+                client,
+                assets_dir=assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.GITEE_REPOSITORY,
+                target_commitish="a" * 40,
+                name=f"HR Toolkit {self.TAG}",
+                body="mirror",
+                retry_delay=0,
+            )
+
+            self.assertEqual(client.upload_order.count(first_asset), 1)
             self.assertEqual(client.upload_order[-1], "latest.json")
-            self.assertEqual(set(client.upload_order), set(names))
+            self.assertEqual(
+                {item["name"] for item in client.attachments},
+                set(names),
+            )
+
+    def test_partial_release_resumes_and_reuploads_latest_json_last(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            self._build_assets(assets_dir)
+            client = FakeGiteeClient(assets_dir, self.TAG)
+            names = gitee_publish.expected_asset_names(assets_dir, self.VERSION)
+            completed_name = next(name for name in names if name not in {"latest.json", "SHA256SUMS.txt"})
+            completed_path = assets_dir / completed_name
+            client.attachments = [
+                {
+                    "id": 20,
+                    "name": completed_name,
+                    "size": completed_path.stat().st_size,
+                },
+                {
+                    "id": 21,
+                    "name": "latest.json",
+                    "size": (assets_dir / "latest.json").stat().st_size,
+                },
+            ]
+
+            gitee_publish.publish_gitee_release(
+                client,
+                assets_dir=assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.GITEE_REPOSITORY,
+                target_commitish="a" * 40,
+                name=f"HR Toolkit {self.TAG}",
+                body="mirror",
+            )
+
+            self.assertNotIn(completed_name, client.upload_order)
+            self.assertEqual(client.upload_order[-1], "latest.json")
+            self.assertIn("21", client.deleted)
 
     def test_dry_run_does_not_require_token(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
