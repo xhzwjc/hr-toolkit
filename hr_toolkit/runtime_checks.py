@@ -30,6 +30,10 @@ def run_headless_command(argv: list[str]) -> int | None:
         smoke_test()
         _emit(f"HRToolkit {__version__} smoke-test OK")
         return 0
+    if argv == ["--update-smoke-test"]:
+        latest_version = update_smoke_test()
+        _emit(f"HRToolkit {__version__} update-smoke-test OK; latest={latest_version}")
+        return 0
     return None
 
 
@@ -37,6 +41,10 @@ def smoke_test() -> None:
     """Validate dependencies and packaged whitelist resources without a GUI."""
     import openpyxl  # noqa: F401
     import xlrd  # noqa: F401
+    from hr_toolkit.app_update import create_https_context
+
+    # Loading the context proves that PyInstaller included certifi's CA bundle.
+    create_https_context()
 
     for template_name in TEMPLATE_NAMES:
         with open_template_resource(template_name) as handle:
@@ -47,6 +55,22 @@ def smoke_test() -> None:
         bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
         if not (bundle_root / "README.md").is_file():
             raise RuntimeError("打包程序缺少 README.md。")
+
+
+def update_smoke_test() -> str:
+    """Verify that the packaged runtime can securely read GitHub release metadata."""
+    from hr_toolkit.app_update import (
+        DEFAULT_UPDATE_MANIFEST_URL,
+        fetch_update_manifest,
+        manifest_version,
+        platform_key,
+    )
+
+    manifest = fetch_update_manifest(DEFAULT_UPDATE_MANIFEST_URL, timeout=30)
+    latest_version = manifest_version(manifest, platform=platform_key())
+    if not latest_version:
+        raise RuntimeError("GitHub 更新配置缺少当前平台版本。")
+    return latest_version
 
 
 def _emit(text: str) -> None:

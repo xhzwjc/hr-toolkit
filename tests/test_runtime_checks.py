@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hr_toolkit import __version__
 from hr_toolkit.runtime_checks import CHECK_OUTPUT_ENV, run_headless_command, smoke_test
@@ -27,6 +28,20 @@ class RuntimeChecksTest(unittest.TestCase):
 
     def test_unknown_arguments_are_left_for_cli(self) -> None:
         self.assertIsNone(run_headless_command(["salary-split"]))
+
+    def test_update_smoke_command_is_headless_and_machine_verifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "update-smoke.txt"
+            os.environ[CHECK_OUTPUT_ENV] = str(output)
+            try:
+                with patch("hr_toolkit.runtime_checks.update_smoke_test", return_value="0.2.1"):
+                    self.assertEqual(run_headless_command(["--update-smoke-test"]), 0)
+            finally:
+                os.environ.pop(CHECK_OUTPUT_ENV, None)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                f"HRToolkit {__version__} update-smoke-test OK; latest=0.2.1\n",
+            )
 
     def test_module_entrypoint_reports_version_without_starting_gui(self) -> None:
         completed = subprocess.run(

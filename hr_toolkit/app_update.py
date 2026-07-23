@@ -6,6 +6,7 @@ import os
 import platform as platform_module
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+import certifi
 
 
 DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json"
@@ -48,6 +51,24 @@ class UpdateInfo:
     update_mode: str = "auto"
 
 
+def create_https_context() -> ssl.SSLContext:
+    """Create a validating TLS context backed by the bundled Mozilla CA store."""
+    try:
+        context = ssl.create_default_context(cafile=certifi.where())
+    except (OSError, ssl.SSLError) as exc:
+        raise UpdateError(f"无法加载 HTTPS 根证书：{exc}") from exc
+    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
+        raise UpdateError("HTTPS 证书校验未正确启用。")
+    return context
+
+
+def _open_url(request: urllib.request.Request, *, timeout: int):
+    kwargs: dict[str, Any] = {"timeout": timeout}
+    if urllib.parse.urlparse(request.full_url).scheme.lower() == "https":
+        kwargs["context"] = create_https_context()
+    return urllib.request.urlopen(request, **kwargs)
+
+
 def update_check_enabled() -> bool:
     if _truthy(os.environ.get(SKIP_UPDATE_ENV)):
         return False
@@ -78,7 +99,7 @@ def check_for_update(current_version: str, manifest_url: str | None = None, plat
 def fetch_update_manifest(manifest_url: str, timeout: int = 10) -> dict[str, Any]:
     request = urllib.request.Request(manifest_url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_url(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8-sig")
     except Exception as exc:
         raise UpdateError(f"无法读取更新配置：{exc}") from exc
@@ -152,7 +173,7 @@ def download_update_package(
     request = urllib.request.Request(update.file_url, headers={"User-Agent": USER_AGENT})
 
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with _open_url(request, timeout=60) as response:
             total = int(response.headers.get("Content-Length") or 0)
             _ensure_disk_space(dest_dir, total)
             downloaded = 0

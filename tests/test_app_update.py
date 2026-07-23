@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import ssl
 import tempfile
 import unittest
 import urllib.request
@@ -15,6 +17,7 @@ from hr_toolkit.app_update import (
     check_for_update,
     cleanup_stale_update_files,
     download_update_package,
+    fetch_update_manifest,
     is_newer_version,
     launch_update_replacement,
     parse_update_manifest,
@@ -114,6 +117,25 @@ class AppUpdateTests(unittest.TestCase):
             manifest_url = "file://" + urllib.request.pathname2url(str(manifest))
 
             self.assertIsNone(check_for_update("0.1.0", manifest_url=manifest_url, platform="windows"))
+
+    def test_https_manifest_uses_validating_certifi_context(self) -> None:
+        response = io.BytesIO(b'{"version": "0.2.1"}')
+        with patch("hr_toolkit.app_update.urllib.request.urlopen", return_value=response) as urlopen:
+            manifest = fetch_update_manifest("https://example.test/latest.json")
+
+        self.assertEqual(manifest["version"], "0.2.1")
+        context = urlopen.call_args.kwargs["context"]
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertGreater(len(context.get_ca_certs()), 0)
+
+    def test_legacy_http_manifest_does_not_receive_tls_context(self) -> None:
+        response = io.BytesIO(b'{"version": "0.2.1"}')
+        with patch("hr_toolkit.app_update.urllib.request.urlopen", return_value=response) as urlopen:
+            fetch_update_manifest("http://hr.seedlingintl.com/hr-toolkit/latest.json")
+
+        self.assertNotIn("context", urlopen.call_args.kwargs)
 
     def test_download_package_verifies_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

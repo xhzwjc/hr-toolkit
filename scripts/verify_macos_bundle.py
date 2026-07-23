@@ -232,6 +232,33 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
                 f"打包程序 --smoke-test 结果不一致：文件={smoke_output!s}，stdout={fallback!r}"
             )
 
+        update_smoke_output = Path(temporary) / "update-smoke.txt"
+        environment["HR_TOOLKIT_CHECK_OUTPUT"] = str(update_smoke_output)
+        update_smoke_result = subprocess.run(
+            [str(launcher), "--update-smoke-test"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=90,
+        )
+        if update_smoke_result.returncode != 0:
+            raise MacBundleVerificationError(
+                "打包程序 --update-smoke-test 失败"
+                f"（{update_smoke_result.returncode}）：{update_smoke_result.stderr.strip()}"
+            )
+        expected_update_prefix = f"HRToolkit {version} update-smoke-test OK; latest="
+        if (
+            not update_smoke_output.is_file()
+            or not update_smoke_output.read_text(encoding="utf-8").strip().startswith(expected_update_prefix)
+        ):
+            fallback = update_smoke_result.stdout.strip()
+            raise MacBundleVerificationError(
+                "打包程序 --update-smoke-test 结果不一致："
+                f"文件={update_smoke_output!s}，stdout={fallback!r}"
+            )
+
 
 def verify_app_bundle(
     app_path: Path,

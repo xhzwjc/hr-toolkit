@@ -31,6 +31,7 @@ TEMPLATES_DIR = REPO_ROOT / "hr_toolkit" / "templates"
 
 WINDOWS_BUILD_MODULES = {
     "PyInstaller": "pyinstaller",
+    "certifi": "certifi",
     "openpyxl": "openpyxl",
     "xlrd": "xlrd",
     "pythoncom": "pywin32",
@@ -420,6 +421,13 @@ def run_runtime_smoke(app_executable: Path, updater_executable: Path) -> None:
         smoke_result = output_path.read_text(encoding="utf-8").strip()
         if f"HRToolkit {expected_version} smoke-test OK" not in smoke_result:
             raise RuntimeError(f"打包程序 smoke-test 输出不正确：{smoke_result or '空'}")
+        _run([str(app_executable), "--update-smoke-test"], timeout=90, env=env)
+        update_smoke_result = output_path.read_text(encoding="utf-8").strip()
+        expected_prefix = f"HRToolkit {expected_version} update-smoke-test OK; latest="
+        if not update_smoke_result.startswith(expected_prefix):
+            raise RuntimeError(
+                f"打包程序 update-smoke-test 输出不正确：{update_smoke_result or '空'}"
+            )
 
 
 def _is_template_payload_path(relative: Path) -> bool:

@@ -1,3 +1,4 @@
+certifi>=2024.8.30
 openpyxl>=3.1,<4
 xlrd>=2.0,<3
 pywin32>=306; platform_system=="Windows"
