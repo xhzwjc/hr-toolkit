@@ -65,6 +65,16 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("filevers=(0, 2, 1, 0)", payload)
         self.assertIn("StringStruct('ProductVersion', '0.2.1')", payload)
 
+    def test_windows_release_job_forces_utf8_python_output(self) -> None:
+        workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        windows_job = workflow.split("\n  build-windows:", 1)[1].split(
+            "\n  build-macos-universal:", 1
+        )[0]
+        job_configuration = windows_job.split("\n    steps:", 1)[0]
+        self.assertIn('PYTHONUTF8: "1"', job_configuration)
+
     def test_payload_verification_accepts_only_readme_and_builtin_excel_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app_dir, _updater = self._fake_app(Path(tmp))

@@ -71,6 +71,7 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.validate.outputs.version }}
+      PYTHONUTF8: "1"
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
