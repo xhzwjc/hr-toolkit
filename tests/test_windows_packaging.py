@@ -163,6 +163,8 @@ class WindowsPackagingTests(unittest.TestCase):
 
     def test_installer_definitions_are_per_user_and_keep_payload_under_app_subdir(self) -> None:
         build_windows_installers.validate_installer_definitions()
+        attributes = (build_windows.REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("packaging/windows/ChineseSimplified.isl text eol=lf", attributes)
         iss = build_windows_installers.INNO_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("PrivilegesRequired=lowest", iss)
         self.assertIn("DefaultDirName={localappdata}\\Programs\\HRToolkit", iss)
