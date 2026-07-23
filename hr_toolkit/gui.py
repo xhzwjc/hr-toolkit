@@ -169,6 +169,21 @@ def _clamp_ui_scale(scale: float) -> float:
     return max(1.0, min(scale, 3.0))
 
 
+def _indeterminate_progress_segment(
+    track_width: float,
+    sweep_head: float,
+    segment_width: float,
+) -> tuple[float, float] | None:
+    """Return the visible part of a left-to-right indeterminate sweep."""
+    if track_width <= 0 or segment_width <= 0:
+        return None
+    visible_start = max(0.0, sweep_head - segment_width)
+    visible_end = min(track_width, sweep_head)
+    if visible_end <= visible_start:
+        return None
+    return visible_start, visible_end
+
+
 def _forced_ui_scale() -> float | None:
     raw_value = os.environ.get(FORCE_UI_SCALE_ENV, "").strip()
     if not raw_value:
@@ -739,7 +754,8 @@ class HRToolkitApp:
         self.update_progress_canvas: Canvas | None = None
         self.update_progress_width = self._px(248)
         self.update_progress_job: str | None = None
-        self.update_progress_phase = 0
+        self.update_progress_phase = 0.0
+        self.update_progress_last_tick: float | None = None
         self.update_check_in_progress = False
         self.manual_update_check_active = False
         self.update_check_dismissed = False
@@ -2002,7 +2018,8 @@ class HRToolkitApp:
         self.update_window = None
         self.update_progress_label = None
         self.update_progress_canvas = None
-        self.update_progress_phase = 0
+        self.update_progress_phase = 0.0
+        self.update_progress_last_tick = None
 
     def _show_update_prompt(self, update: object | None) -> None:
         if not isinstance(update, UpdateInfo):
@@ -2388,12 +2405,20 @@ class HRToolkitApp:
         self.update_progress_canvas = Canvas(
             parent,
             width=self.update_progress_width,
-            height=self._px(8),
+            height=self._px(7),
             bg=UPDATE_DIALOG_BG,
             highlightthickness=0,
         )
         self.update_progress_canvas.pack(anchor="w", padx=padx, pady=pady)
-        self._draw_round_rect(self.update_progress_canvas, 0, self._pxf(1), self.update_progress_width, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_TRACK)
+        self._draw_round_rect(
+            self.update_progress_canvas,
+            0,
+            self._pxf(1),
+            self.update_progress_width,
+            self._pxf(6),
+            self._pxf(2.5),
+            fill=UPDATE_DIALOG_TRACK,
+        )
 
     def _set_update_progress(self, percent: float) -> None:
         canvas = self.update_progress_canvas
@@ -2403,25 +2428,59 @@ class HRToolkitApp:
         width = max(0, min(self.update_progress_width * percent / 100, self.update_progress_width))
         if width <= 0:
             return
-        self._draw_round_rect(canvas, 0, self._pxf(1), width, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
+        self._draw_round_rect(
+            canvas,
+            0,
+            self._pxf(1),
+            width,
+            self._pxf(6),
+            self._pxf(2.5),
+            fill=UPDATE_DIALOG_PRIMARY,
+            tags=("fill",),
+        )
 
     def _start_indeterminate_update_progress(self) -> None:
+        if self.update_progress_job is not None:
+            try:
+                self.root.after_cancel(self.update_progress_job)
+            except Exception:
+                pass
+            self.update_progress_job = None
+
+        segment = min(self._pxf(76), self.update_progress_width * 0.22)
+        gap = self._pxf(26)
+        span = self.update_progress_width + segment + gap * 2
+        speed = self._pxf(360)
+
         def tick() -> None:
             canvas = self.update_progress_canvas
             if canvas is None:
                 return
-            canvas.delete("fill")
-            segment = self._px(112)
-            span = self.update_progress_width + segment
-            x = (self.update_progress_phase % span) - segment
-            x1 = max(0, x)
-            x2 = min(self.update_progress_width, x + segment)
-            if x2 > x1:
-                self._draw_round_rect(canvas, x1, self._pxf(1), x2, self._pxf(7), self._pxf(3), fill=UPDATE_DIALOG_PRIMARY, tags=("fill",))
-            self.update_progress_phase += self._px(8)
-            self.update_progress_job = self.root.after(35, tick)
+            now = time.monotonic()
+            previous_tick = self.update_progress_last_tick
+            elapsed = 1 / 60 if previous_tick is None else max(0.0, min(now - previous_tick, 0.05))
+            self.update_progress_last_tick = now
+            self.update_progress_phase = (self.update_progress_phase + speed * elapsed) % span
 
-        self.update_progress_phase = 0
+            canvas.delete("fill")
+            sweep_head = self.update_progress_phase - gap
+            visible_segment = _indeterminate_progress_segment(self.update_progress_width, sweep_head, segment)
+            if visible_segment is not None:
+                x1, x2 = visible_segment
+                self._draw_round_rect(
+                    canvas,
+                    x1,
+                    self._pxf(1),
+                    x2,
+                    self._pxf(6),
+                    self._pxf(2.5),
+                    fill=UPDATE_DIALOG_PRIMARY,
+                    tags=("fill",),
+                )
+            self.update_progress_job = self.root.after(16, tick)
+
+        self.update_progress_phase = gap
+        self.update_progress_last_tick = time.monotonic()
         tick()
 
     def _create_update_button(
