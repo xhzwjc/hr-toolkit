@@ -29,6 +29,9 @@ from build_windows import (
 
 
 INNO_SCRIPT = REPO_ROOT / "packaging" / "windows" / "HRToolkit.iss"
+# Pinned from jrsoftware/issrc tag is-6_7_1 with trailing whitespace normalized.
+INNO_LANGUAGE_FILE = REPO_ROOT / "packaging" / "windows" / "ChineseSimplified.isl"
+INNO_LANGUAGE_SHA256 = "75ec648a9c1b547b1c35113b06bc85cede51c1c1d7d089af8fd974331f930570"
 WIX_SOURCE = REPO_ROOT / "packaging" / "windows" / "HRToolkit.wxs"
 INNO_ENV = "INNO_SETUP_COMPILER"
 WIX_ENV = "WIX_EXECUTABLE"
@@ -231,6 +234,15 @@ def generate_wix_payload_fragment(payload_dir: Path, output_path: Path) -> Path:
 
 
 def validate_installer_definitions() -> None:
+    if not INNO_LANGUAGE_FILE.is_file():
+        raise RuntimeError(f"缺少固定的 Inno 简体中文语言文件：{INNO_LANGUAGE_FILE}")
+    language_sha256 = hashlib.sha256(INNO_LANGUAGE_FILE.read_bytes()).hexdigest()
+    if language_sha256 != INNO_LANGUAGE_SHA256:
+        raise RuntimeError(
+            "Inno 简体中文语言文件校验失败："
+            f"期望 {INNO_LANGUAGE_SHA256}，实际 {language_sha256}"
+        )
+
     iss = INNO_SCRIPT.read_text(encoding="utf-8")
     required_iss = (
         "DefaultDirName={localappdata}\\Programs\\HRToolkit",
@@ -238,6 +250,7 @@ def validate_installer_definitions() -> None:
         "ArchitecturesAllowed=x64compatible",
         'DestDir: "{app}\\app"',
         'UninstallDisplayIcon={app}\\app\\{#MyAppExeName}',
+        'MessagesFile: "compiler:Default.isl,ChineseSimplified.isl"',
     )
     missing_iss = [value for value in required_iss if value not in iss]
     if missing_iss:

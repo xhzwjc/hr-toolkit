@@ -170,7 +170,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('Type: filesandordirs; Name: "{app}\\app"', iss)
         self.assertIn("SignTool={#SignToolName}", iss)
         self.assertIn(
-            'MessagesFile: "compiler:Languages\\Unofficial\\ChineseSimplified.isl"',
+            'MessagesFile: "compiler:Default.isl,ChineseSimplified.isl"',
             iss,
         )
 
