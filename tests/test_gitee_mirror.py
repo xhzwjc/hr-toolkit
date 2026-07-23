@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -41,6 +42,7 @@ class FakeGiteeClient:
         self.upload_order: list[str] = []
         self.deleted: list[str] = []
         self.timeout_after_accepting: set[str] = set()
+        self.upload_transport = "fake"
 
     def get_release_by_tag(self, _repository: str, _tag: str):
         return self.release
@@ -213,6 +215,60 @@ class GiteeMirrorTests(unittest.TestCase):
                 set(names),
             )
 
+    def test_curl_upload_streams_file_without_token_in_process_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "asset.zip"
+            asset.write_bytes(b"payload")
+            response = {
+                "id": 9,
+                "name": asset.name,
+                "size": asset.stat().st_size,
+                "browser_download_url": "https://gitee.com/download/asset.zip",
+            }
+            completed = mock.Mock(
+                returncode=0,
+                stdout=json.dumps(response),
+                stderr="",
+            )
+            client = gitee_publish.GiteeClient(
+                "top-secret-token",
+                upload_transport="curl",
+                curl_executable="/usr/bin/curl",
+            )
+
+            with mock.patch.object(gitee_publish.subprocess, "run", return_value=completed) as run:
+                result = client.upload_attachment(
+                    self.GITEE_REPOSITORY,
+                    "7",
+                    asset,
+                )
+
+            command = run.call_args.args[0]
+            self.assertNotIn("top-secret-token", "\n".join(command))
+            self.assertIn("top-secret-token", run.call_args.kwargs["input"])
+            self.assertIn("--http1.1", command)
+            self.assertIn("Expect:", command)
+            self.assertEqual(result, response)
+
+    def test_curl_upload_error_redacts_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "asset.zip"
+            asset.write_bytes(b"payload")
+            completed = mock.Mock(
+                returncode=28,
+                stdout="",
+                stderr="timeout top-secret-token",
+            )
+            client = gitee_publish.GiteeClient(
+                "top-secret-token",
+                upload_transport="curl",
+                curl_executable="/usr/bin/curl",
+            )
+
+            with mock.patch.object(gitee_publish.subprocess, "run", return_value=completed):
+                with self.assertRaisesRegex(gitee_publish.GiteeReleaseError, r"timeout \*\*\*"):
+                    client.upload_attachment(self.GITEE_REPOSITORY, "7", asset)
+
     def test_partial_release_resumes_and_reuploads_latest_json_last(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             assets_dir = Path(temporary)
@@ -246,6 +302,7 @@ class GiteeMirrorTests(unittest.TestCase):
             )
 
             self.assertNotIn(completed_name, client.upload_order)
+            self.assertEqual(client.upload_order[0], "SHA256SUMS.txt")
             self.assertEqual(client.upload_order[-1], "latest.json")
             self.assertIn("21", client.deleted)
 

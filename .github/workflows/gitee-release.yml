@@ -154,4 +154,5 @@ jobs:
             --repository "${GITEE_REPOSITORY}" \
             --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
             --assets-dir gitee-release-assets \
+            --upload-transport curl \
             --timeout 600

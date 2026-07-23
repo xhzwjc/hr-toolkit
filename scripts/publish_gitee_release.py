@@ -4,7 +4,9 @@ import argparse
 import json
 import mimetypes
 import os
+import shutil
 import ssl
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +31,7 @@ DEFAULT_GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
 DEFAULT_TIMEOUT = 600
 DEFAULT_UPLOAD_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 5.0
+UPLOAD_TRANSPORTS = ("urllib", "curl")
 METADATA_NAMES = ("latest.json", "SHA256SUMS.txt")
 USER_AGENT = "HRToolkit-Gitee-Publisher/1.0"
 
@@ -44,12 +47,18 @@ class GiteeClient:
         *,
         api_base: str = DEFAULT_API_BASE,
         timeout: int = DEFAULT_TIMEOUT,
+        upload_transport: str = "urllib",
+        curl_executable: str | None = None,
     ) -> None:
         if not token.strip():
             raise GiteeReleaseError("GITEE_TOKEN 不能为空。")
         self._token = token.strip()
         self.api_base = api_base.rstrip("/")
         self.timeout = timeout
+        if upload_transport not in UPLOAD_TRANSPORTS:
+            raise GiteeReleaseError(f"不支持的附件上传方式：{upload_transport}")
+        self.upload_transport = upload_transport
+        self._curl_executable = curl_executable
         self._ssl_context = ssl.create_default_context()
 
     def get_release_by_tag(self, repository: str, tag: str) -> dict[str, Any] | None:
@@ -128,12 +137,80 @@ class GiteeClient:
         release_id: str,
         file_path: Path,
     ) -> dict[str, Any]:
+        if self.upload_transport == "curl":
+            return self._upload_attachment_with_curl(repository, release_id, file_path)
         result = self._request_json(
             "POST",
             f"/repos/{_quoted_repository(repository)}/releases/{urllib.parse.quote(release_id, safe='')}/attach_files",
             file_path=file_path,
         )
         return _require_object(result, f"上传 {file_path.name}")
+
+    def _upload_attachment_with_curl(
+        self,
+        repository: str,
+        release_id: str,
+        file_path: Path,
+    ) -> dict[str, Any]:
+        if not file_path.is_file():
+            raise GiteeReleaseError(f"上传文件不存在：{file_path}")
+        curl = self._curl_executable or shutil.which("curl")
+        if not curl:
+            raise GiteeReleaseError("选择 curl 上传时系统必须提供 curl。")
+        path = (
+            f"/repos/{_quoted_repository(repository)}/releases/"
+            f"{urllib.parse.quote(release_id, safe='')}/attach_files"
+        )
+        content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        command = [
+            curl,
+            "--config",
+            "-",
+            "--fail-with-body",
+            "--silent",
+            "--show-error",
+            "--http1.1",
+            "--connect-timeout",
+            "30",
+            "--max-time",
+            str(self.timeout),
+            "--request",
+            "POST",
+            "--header",
+            f"User-Agent: {USER_AGENT}",
+            "--header",
+            "Accept: application/json",
+            # Some reverse proxies stop reading large multipart requests while
+            # curl waits for a 100 Continue response. Send the body directly.
+            "--header",
+            "Expect:",
+            "--form",
+            f"file=@{file_path.resolve()};filename={file_path.name};type={content_type}",
+            self.api_base + path,
+        ]
+        token_config = (
+            'form-string = "access_token='
+            + _curl_config_escape(self._token)
+            + '"\n'
+        )
+        result = subprocess.run(
+            command,
+            input=token_config,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or f"curl exit {result.returncode}").strip()
+            raise GiteeReleaseError(
+                f"Gitee API POST {path} curl 上传失败：{_redact(detail[:1000], self._token)}"
+            )
+        try:
+            payload = json.loads(result.stdout.lstrip("\ufeff"))
+        except json.JSONDecodeError as exc:
+            raise GiteeReleaseError(f"上传 {file_path.name} 返回无效 JSON：{exc}") from None
+        return _require_object(payload, f"上传 {file_path.name}")
 
     def get_public_latest_release(self, repository: str) -> dict[str, Any]:
         result = self._request_json(
@@ -327,18 +404,26 @@ def publish_gitee_release(
         names=names,
     )
 
-    upload_order = sorted(name for name in names if name != "latest.json") + ["latest.json"]
+    payload_names = set(names) - {"SHA256SUMS.txt", "latest.json"}
+    upload_order = ["SHA256SUMS.txt"] + sorted(payload_names) + ["latest.json"]
     for asset_name in upload_order:
         if asset_name in completed:
             continue
+        asset_path = assets_dir / asset_name
+        print(
+            f"正在上传 {asset_name}（{asset_path.stat().st_size} bytes，"
+            f"{client.upload_transport}）...",
+            flush=True,
+        )
         _upload_attachment_with_retries(
             client,
             repository=repository,
             release_id=release_id,
-            file_path=assets_dir / asset_name,
+            file_path=asset_path,
             attempts=upload_attempts,
             retry_delay=retry_delay,
         )
+        print(f"已确认 Gitee 附件：{asset_name}", flush=True)
 
     _reconcile_attachments(
         client,
@@ -420,7 +505,8 @@ def _upload_attachment_with_retries(
         except Exception as exc:
             last_error = exc
             print(
-                f"上传 {file_path.name} 第 {attempt}/{attempts} 次未确认成功，正在核对 Gitee 附件。"
+                f"上传 {file_path.name} 第 {attempt}/{attempts} 次未确认成功，正在核对 Gitee 附件。",
+                flush=True,
             )
             # The server may have accepted the multipart body even if the
             # client timed out waiting for its response. Reconcile before a
@@ -531,6 +617,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token-env", default="GITEE_TOKEN")
     parser.add_argument("--timeout", type=_positive_int, default=DEFAULT_TIMEOUT)
     parser.add_argument(
+        "--upload-transport",
+        choices=UPLOAD_TRANSPORTS,
+        default="urllib",
+    )
+    parser.add_argument(
         "--upload-attempts",
         type=_positive_int,
         default=DEFAULT_UPLOAD_ATTEMPTS,
@@ -564,7 +655,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     token = os.environ.get(args.token_env, "")
     if not token.strip():
         raise GiteeReleaseError(f"缺少 GitHub Actions Secret：{args.token_env}")
-    client = GiteeClient(token, api_base=args.api_base, timeout=args.timeout)
+    client = GiteeClient(
+        token,
+        api_base=args.api_base,
+        timeout=args.timeout,
+        upload_transport=args.upload_transport,
+    )
     release_name = args.name or f"HR Toolkit {tag}"
     body = args.body or "GitHub Release 构建完成后自动同步的国内下载镜像。"
     _release, names = publish_gitee_release(
@@ -607,6 +703,12 @@ def _nonnegative_float(value: str) -> float:
     if parsed < 0:
         raise argparse.ArgumentTypeError("不能小于 0")
     return parsed
+
+
+def _curl_config_escape(value: str) -> str:
+    if any(character in value for character in ("\0", "\r", "\n")):
+        raise GiteeReleaseError("GITEE_TOKEN 包含不支持的控制字符。")
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _multipart_body(fields: Mapping[str, str], file_path: Path) -> tuple[bytes, str]:

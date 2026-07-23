@@ -278,6 +278,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("secrets.GITEE_TOKEN", mirror_job)
         self.assertIn("publish_gitee_release.py", mirror_job)
         self.assertIn("--timeout 600", mirror_job)
+        self.assertIn("--upload-transport curl", mirror_job)
         self.assertIn("http.postBuffer=1073741824", mirror_job)
         self.assertIn("http.version=HTTP/1.1", mirror_job)
         self.assertIn("push --atomic gitee", mirror_job)
@@ -314,6 +315,7 @@ class WindowsPackagingTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("--timeout 600", workflow)
+        self.assertIn("--upload-transport curl", workflow)
         self.assertNotIn("build_windows.py", workflow)
         self.assertNotIn("build_macos.py", workflow)
 
