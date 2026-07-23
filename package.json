@@ -1,0 +1,8 @@
+{
+  "name": "hr-toolkit",
+  "private": true,
+  "version": "0.1.32",
+  "scripts": {
+    "release": "sh -c 'if [ -x .venv/bin/python ]; then exec .venv/bin/python scripts/release.py \"$@\"; else exec python3 scripts/release.py \"$@\"; fi' --"
+  }
+}

@@ -1,18 +1,22 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mandatory": true,
   "notes": [
-    "优化界面显示",
-    "新增自动更新能力"
+    "一次性迁移到 GitHub Release",
+    "Windows 保留 ZIP 自动更新，macOS 使用 DMG 手动更新"
   ],
   "platforms": {
     "windows": {
-      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.2.0-win.zip",
-      "sha256": "把发布zip的SHA256填到这里"
+      "version": "0.2.1",
+      "file_url": "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/HRToolkit-0.2.1-win-update.zip",
+      "sha256": "由发布工作流写入更新ZIP的SHA256",
+      "update_mode": "auto"
     },
     "macos": {
-      "file_url": "http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-0.2.0-mac.zip",
-      "sha256": "把发布zip的SHA256填到这里"
+      "version": "0.2.1",
+      "file_url": "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/HRToolkit_0.2.1_universal.dmg",
+      "sha256": "由发布工作流写入DMG的SHA256",
+      "update_mode": "manual"
     }
   }
 }

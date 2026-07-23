@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!--
+    PayloadComponents 由 build_windows_installers.py 根据经过白名单校验的
+    PyInstaller onedir 动态生成。Product payload 固定放在 INSTALLROOT\app，
+    Windows Installer 注册信息留在系统 MSI 数据库，不会被目录自更新删除。
+  -->
+  <Package
+    Name="HRToolkit"
+    Manufacturer="xhzwjc"
+    Version="$(var.AppVersion)"
+    Language="2052"
+    UpgradeCode="{F4C2759D-434B-4FA1-B9F4-D4934346A4A7}"
+    Scope="perUser"
+    InstallerVersion="500"
+    Compressed="yes">
+    <SummaryInformation Description="HRToolkit 人事 Excel 自动化工具箱" />
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 HRToolkit。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Feature Id="MainFeature" Title="HRToolkit" Level="1">
+      <ComponentGroupRef Id="PayloadComponents" />
+      <ComponentRef Id="ApplicationShortcuts" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLROOT" Name="HRToolkit">
+          <Directory Id="APPDIR" Name="app" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+  </Fragment>
+
+  <Fragment>
+    <Component Id="ApplicationShortcuts" Directory="INSTALLROOT" Guid="{BD749A59-E58D-4B78-A0E9-C07884FCE13D}">
+      <!-- 使用格式化路径创建非 advertised shortcut，避免 MSI 自修复覆盖 ZIP 自更新。 -->
+      <Shortcut
+        Id="StartMenuShortcut"
+        Directory="ProgramMenuFolder"
+        Name="HRToolkit"
+        Target="[APPDIR]HRToolkit.exe"
+        WorkingDirectory="APPDIR" />
+      <Shortcut
+        Id="DesktopShortcut"
+        Directory="DesktopFolder"
+        Name="HRToolkit"
+        Target="[APPDIR]HRToolkit.exe"
+        WorkingDirectory="APPDIR" />
+      <RemoveFolder Id="RemoveInstallRoot" Directory="INSTALLROOT" On="uninstall" />
+      <RegistryValue
+        Root="HKCU"
+        Key="Software\xhzwjc\HRToolkit"
+        Name="Installed"
+        Type="integer"
+        Value="1"
+        KeyPath="yes" />
+    </Component>
+  </Fragment>
+</Wix>

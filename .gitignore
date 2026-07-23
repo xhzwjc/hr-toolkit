@@ -24,6 +24,7 @@ htmlcov/
 # Build and packaging artifacts
 build/
 dist/
+artifacts/
 *.egg-info/
 *.spec
 

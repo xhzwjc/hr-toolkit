@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform as platform_module
 import re
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-DEFAULT_UPDATE_MANIFEST_URL = "http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json"
+DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json"
 UPDATE_URL_ENV = "HR_TOOLKIT_UPDATE_URL"
 SKIP_UPDATE_ENV = "HR_TOOLKIT_SKIP_UPDATE"
 FORCE_UPDATE_ENV = "HR_TOOLKIT_FORCE_UPDATE_CHECK"
@@ -44,6 +45,7 @@ class UpdateInfo:
     notes: tuple[str, ...]
     mandatory: bool
     manifest_url: str
+    update_mode: str = "auto"
 
 
 def update_check_enabled() -> bool:
@@ -102,6 +104,8 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
     sha256 = str(platform_payload.get("sha256") or manifest.get("sha256") or "").strip().lower()
     mandatory = bool(platform_payload.get("mandatory", manifest.get("mandatory", True)))
     notes_value = platform_payload.get("notes", manifest.get("notes", ()))
+    default_update_mode = "manual" if platform == "macos" else "auto"
+    update_mode = str(platform_payload.get("update_mode") or default_update_mode).strip().lower()
 
     if not version:
         raise UpdateError("更新配置缺少 version。")
@@ -109,6 +113,8 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
         raise UpdateError("更新配置缺少 file_url。")
     if not sha256:
         raise UpdateError("更新配置缺少 sha256。")
+    if update_mode not in {"auto", "manual"}:
+        raise UpdateError("更新配置中的 update_mode 只能是 auto 或 manual。")
 
     file_url = urllib.parse.urljoin(manifest_url, file_url)
     notes = _normalize_notes(notes_value)
@@ -119,6 +125,7 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
         notes=notes,
         mandatory=mandatory,
         manifest_url=manifest_url,
+        update_mode=update_mode,
     )
 
 
@@ -132,6 +139,8 @@ def download_update_package(
     dest_dir: Path | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> Path:
+    if update.update_mode != "auto":
+        raise UpdateError("当前平台使用手动安装包，不能交给自动更新器。")
     if dest_dir is None:
         dest_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_update_"))
     else:
@@ -377,11 +386,20 @@ def _platform_payload(manifest: dict[str, Any], platform: str) -> dict[str, Any]
     platforms = manifest.get("platforms")
     if not isinstance(platforms, dict):
         return manifest
-    aliases = {
-        "windows": ("windows", "win", "win32"),
-        "macos": ("macos", "darwin", "mac"),
-        "linux": ("linux",),
-    }.get(platform, (platform,))
+    if platform == "macos":
+        machine = platform_module.machine().strip().lower()
+        if machine in {"arm64", "aarch64"}:
+            architecture_aliases = ("macos-arm64",)
+        elif machine in {"x86_64", "amd64"}:
+            architecture_aliases = ("macos-x64", "macos-x86_64")
+        else:
+            architecture_aliases = ()
+        aliases = architecture_aliases + ("macos", "darwin", "mac")
+    else:
+        aliases = {
+            "windows": ("windows", "win", "win32"),
+            "linux": ("linux",),
+        }.get(platform, (platform,))
     for key in aliases:
         payload = platforms.get(key)
         if isinstance(payload, dict):

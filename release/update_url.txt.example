@@ -1,4 +1,2 @@
-# 把这一行改成你的更新配置地址。
-# 示例：
-# http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
-http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
+# 新版客户端直接读取公开 GitHub Release；旧服务器只用于 v0.2.1 一次性桥接。
+https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json

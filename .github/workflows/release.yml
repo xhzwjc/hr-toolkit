@@ -1,0 +1,379 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate tag and source
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Require exact v<SemVer> tag and matching project version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          python scripts/generate_release_metadata.py \
+            --version "${VERSION}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --check-only
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Run complete unit test suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile all Python sources
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/hr-toolkit-pycache
+        run: python -m compileall -q -f hr_toolkit scripts tests hr_toolkit_app.py hr_toolkit_updater.py
+
+      - name: Check tagged commit whitespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git diff --check
+          fi
+
+  build-windows:
+    name: Build Windows EXE, MSI, and update ZIP
+    needs: validate
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+
+      - name: Install Inno Setup and WiX
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run Windows tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -v
+
+      - name: Build application, installers, and update assets
+        run: >-
+          python scripts/release_windows.py
+          --version "${{ env.VERSION }}"
+          --build-dir dist/windows
+          --output-dir artifacts/windows
+
+      - name: Verify deterministic Windows asset names
+        shell: pwsh
+        run: |
+          $expected = @(
+            "artifacts/windows/HRToolkit_${env:VERSION}_x64-setup.exe",
+            "artifacts/windows/HRToolkit_${env:VERSION}_x64.msi",
+            "artifacts/windows/HRToolkit-${env:VERSION}-win-update.zip"
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing release asset: $path"
+            }
+            if ((Get-Item -LiteralPath $path).Length -le 0) {
+              throw "Empty release asset: $path"
+            }
+          }
+
+      - name: Upload direct Windows assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: |
+            artifacts/windows/HRToolkit_${{ env.VERSION }}_x64-setup.exe
+            artifacts/windows/HRToolkit_${{ env.VERSION }}_x64.msi
+            artifacts/windows/HRToolkit-${{ env.VERSION }}-win-update.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload legacy server bridge manifest for operations
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-server-bridge
+          path: artifacts/windows/legacy-server-latest.json
+          if-no-files-found: error
+          retention-days: 90
+
+  build-macos-universal:
+    name: Build verified macOS universal2 DMG
+    needs: validate
+    runs-on: macos-15-intel
+    outputs:
+      universal_ok: ${{ steps.mode.outputs.universal_ok }}
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      # Future Developer ID entry. Empty today; a configured runner/keychain may set this secret later.
+      MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up universal2-capable Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Show Python architecture slices
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHON_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+          file "${PYTHON_EXECUTABLE}"
+          # Diagnostic only. The continue-on-error build step below performs
+          # the strict universal2 gate and activates the real-arch fallback.
+          lipo -archs "${PYTHON_EXECUTABLE}" || true
+
+      - name: Install macOS build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+
+      - name: Attempt universal2 app and DMG
+        id: universal
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_macos.py \
+            --version "${VERSION}" \
+            --architecture universal2 \
+            --output-dir artifacts/macos
+
+      - name: Record whether universal2 verification succeeded
+        id: mode
+        shell: bash
+        run: |
+          if [[ "${{ steps.universal.outcome }}" == "success" ]]; then
+            echo "universal_ok=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "universal_ok=false" >> "${GITHUB_OUTPUT}"
+            echo "universal2 build or file/lipo validation failed; real per-architecture fallback is required."
+          fi
+
+      - name: Upload verified universal DMG
+        if: steps.mode.outputs.universal_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-universal
+          path: artifacts/macos/HRToolkit_${{ env.VERSION }}_universal.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos-fallback:
+    name: Build real macOS ${{ matrix.asset_suffix }} DMG
+    needs:
+      - validate
+      - build-macos-universal
+    if: needs.build-macos-universal.outputs.universal_ok != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            architecture: x86_64
+            asset_suffix: x64
+          - runner: macos-15
+            architecture: arm64
+            asset_suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Confirm native runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.architecture }}"
+
+      - name: Install macOS build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+
+      - name: Build and verify native app and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_macos.py \
+            --version "${VERSION}" \
+            --architecture "${{ matrix.architecture }}" \
+            --output-dir artifacts/macos
+
+      - name: Upload verified architecture DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.asset_suffix }}
+          path: artifacts/macos/HRToolkit_${{ env.VERSION }}_${{ matrix.asset_suffix }}.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release direct assets
+    needs:
+      - validate
+      - build-windows
+      - build-macos-universal
+      - build-macos-fallback
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-macos-universal.result == 'success' &&
+      (
+        (needs.build-macos-universal.outputs.universal_ok == 'true' &&
+         needs.build-macos-fallback.result == 'skipped') ||
+        (needs.build-macos-universal.outputs.universal_ok != 'true' &&
+         needs.build-macos-fallback.result == 'success')
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.validate.outputs.version }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Download successful platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate unified latest.json and SHA256SUMS.txt
+        run: >-
+          python scripts/generate_release_metadata.py
+          --version "${VERSION}"
+          --tag "${TAG}"
+          --repository "${GITHUB_REPOSITORY}"
+          --assets-dir release-assets
+          --notes "HR Toolkit v${VERSION}"
+
+      - name: Create or reuse a draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --json isDraft > "${RUNNER_TEMP}/release-state.json" 2>/dev/null; then
+            python - "${RUNNER_TEMP}/release-state.json" <<'PY'
+          import json
+          import sys
+          state = json.load(open(sys.argv[1], encoding="utf-8"))
+          if not state.get("isDraft"):
+              raise SystemExit("Refusing to modify an already-published release")
+          PY
+          else
+            gh release create "${TAG}" \
+              --draft \
+              --verify-tag \
+              --title "HR Toolkit ${TAG}" \
+              --generate-notes
+          fi
+
+      - name: Upload files as direct GitHub Release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A retried failed run may reuse its own draft. Remove only assets
+          # from that verified draft so a prior universal/split mode cannot
+          # leave stale names that would block the exact allowlist check.
+          while IFS= read -r asset_name; do
+            if [[ -n "${asset_name}" ]]; then
+              gh release delete-asset "${TAG}" "${asset_name}" --yes
+            fi
+          done < <(gh release view "${TAG}" --json assets --jq '.assets[].name')
+          while IFS= read -r -d '' asset; do
+            gh release upload "${TAG}" "${asset}" --clobber
+          done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+
+      - name: Verify draft asset names and sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "${TAG}" --json isDraft,assets > "${RUNNER_TEMP}/release-assets.json"
+          python - "${RUNNER_TEMP}/release-assets.json" release-assets <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          state = json.load(open(sys.argv[1], encoding="utf-8"))
+          expected = {path.name: path.stat().st_size for path in Path(sys.argv[2]).iterdir() if path.is_file()}
+          actual = {asset["name"]: asset["size"] for asset in state.get("assets", [])}
+          if not state.get("isDraft"):
+              raise SystemExit("Release became public before asset verification")
+          if actual != expected:
+              raise SystemExit(f"Release assets mismatch: expected={expected}, actual={actual}")
+          PY
+
+      - name: Publish the fully verified release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "${TAG}" --draft=false --latest
+          test "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" = "false"

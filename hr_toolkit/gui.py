@@ -2006,6 +2006,21 @@ class HRToolkitApp:
         self._write_log(f"发现新版本：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
         notes = list(update.notes) or ["本次发布未填写更新说明。"]
+        if update.update_mode == "manual":
+            self._show_update_message_window(
+                title=f"发现新版本 v{update.version}",
+                detail=(
+                    "macOS 当前使用标准 DMG 手动更新。点击“下载 DMG”后，"
+                    "请打开下载的文件并把 HRToolkit 拖到 Applications；本程序不会自动替换 .app。"
+                ),
+                notes=notes,
+                primary_text="下载 DMG",
+                primary_command=lambda: self._open_manual_update(update),
+                secondary_text="稍后再说",
+                secondary_command=self._defer_update,
+                close_command=self._defer_update,
+            )
+            return
         if update.mandatory:
             self._show_update_message_window(
                 title=f"发现新版本 v{update.version}",
@@ -2029,6 +2044,15 @@ class HRToolkitApp:
                 secondary_command=self._defer_update,
                 close_command=self._defer_update,
             )
+
+    def _open_manual_update(self, update: UpdateInfo) -> None:
+        self._write_log(f"正在打开手动更新下载地址：{update.file_url}")
+        try:
+            open_path(update.file_url)
+        except Exception as exc:
+            self._show_update_failure_window("无法打开下载地址", str(exc), exit_after=False)
+            return
+        self._close_update_window()
 
     def _defer_update(self) -> None:
         self._write_log("已选择稍后更新，下次启动时会再次提醒。")
@@ -4501,7 +4525,7 @@ def desktop_dir() -> Path:
     return home / "桌面"
 
 
-def open_path(path: Path) -> None:
+def open_path(path: Path | str) -> None:
     if sys.platform.startswith("win"):
         os.startfile(str(path))  # type: ignore[attr-defined]
     elif sys.platform == "darwin":

@@ -7,8 +7,10 @@ import zipfile
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from hr_toolkit.app_update import (
+    DEFAULT_UPDATE_MANIFEST_URL,
     UpdateError,
     check_for_update,
     cleanup_stale_update_files,
@@ -60,6 +62,44 @@ class AppUpdateTests(unittest.TestCase):
         self.assertEqual(update.file_url, "http://hr.seedlingintl.com/hr-toolkit/releases/HRToolkit-0.2.0-win.zip")
         self.assertEqual(update.sha256, "abc123")
         self.assertEqual(update.notes, ("修复问题",))
+        self.assertEqual(update.update_mode, "auto")
+
+    def test_macos_defaults_to_manual_update(self) -> None:
+        update = parse_update_manifest(
+            {
+                "version": "0.2.1",
+                "platforms": {
+                    "macos": {
+                        "file_url": "HRToolkit_0.2.1_universal.dmg",
+                        "sha256": "abc123",
+                    }
+                },
+            },
+            manifest_url="https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json",
+            platform="macos",
+        )
+
+        self.assertEqual(update.update_mode, "manual")
+        with self.assertRaisesRegex(UpdateError, "手动安装包"):
+            download_update_package(update)
+
+    def test_macos_manifest_selects_current_architecture_before_generic_entry(self) -> None:
+        manifest = {
+            "version": "0.2.1",
+            "platforms": {
+                "macos": {"file_url": "universal.dmg", "sha256": "universal"},
+                "macos-arm64": {"file_url": "arm64.dmg", "sha256": "arm64"},
+                "macos-x64": {"file_url": "x64.dmg", "sha256": "x64"},
+            },
+        }
+
+        with patch("hr_toolkit.app_update.platform_module.machine", return_value="arm64"):
+            arm_update = parse_update_manifest(manifest, "https://example.test/latest.json", "macos")
+        with patch("hr_toolkit.app_update.platform_module.machine", return_value="x86_64"):
+            x64_update = parse_update_manifest(manifest, "https://example.test/latest.json", "macos")
+
+        self.assertEqual(arm_update.file_url, "https://example.test/arm64.dmg")
+        self.assertEqual(x64_update.file_url, "https://example.test/x64.dmg")
 
     def test_parse_manifest_requires_platform(self) -> None:
         manifest = {"version": "0.2.0", "platforms": {"macos": {"file_url": "mac.zip", "sha256": "abc"}}}
@@ -110,6 +150,22 @@ class AppUpdateTests(unittest.TestCase):
                     update_manifest_url(),
                     "https://gitee.com/company/hr-toolkit/raw/master/release/latest.json",
                 )
+            finally:
+                os.chdir(old_cwd)
+                if old_env is not None:
+                    os.environ["HR_TOOLKIT_UPDATE_URL"] = old_env
+
+    def test_default_update_url_points_to_public_github_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            old_env = os.environ.pop("HR_TOOLKIT_UPDATE_URL", None)
+            try:
+                os.chdir(tmp)
+                self.assertEqual(
+                    update_manifest_url(),
+                    "https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json",
+                )
+                self.assertEqual(update_manifest_url(), DEFAULT_UPDATE_MANIFEST_URL)
             finally:
                 os.chdir(old_cwd)
                 if old_env is not None:

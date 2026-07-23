@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+from hr_toolkit.runtime_checks import run_headless_command
+
 from .tools.folder_rename import rename_person_folders, FILE_TYPE_FOLDER
 from .tools.archive_import import export_company_archive_tables, import_archive_transfers
 from .tools.data_statistics import generate_data_statistics_reports
@@ -418,8 +420,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    headless_result = run_headless_command(raw_argv)
+    if headless_result is not None:
+        return headless_result
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     if args.command == "social-security":
         result = generate_social_security_reports(

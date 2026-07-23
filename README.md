@@ -422,172 +422,112 @@ python3 -m hr_toolkit folder-rename \
 
 CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 
-## Windows 打包
+## 自动构建与发布
 
-命令行版调试包：
-
-```powershell
-python -m PyInstaller --name HRToolkit --onedir --console --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone --hidden-import xlrd hr_toolkit_app.py
-```
-
-给人事双击使用的桌面版：
-
-```powershell
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md;." --add-data "hr_toolkit/templates;hr_toolkit/templates" --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32com.client --hidden-import win32timezone --hidden-import xlrd hr_toolkit_app.py
-```
-
-自动更新程序：
-
-```powershell
-python -m PyInstaller --name HRToolkitUpdater --onefile --windowed --clean hr_toolkit_updater.py
-Copy-Item dist\HRToolkitUpdater.exe dist\HRToolkit\ -Force
-```
-
-Mac 打包时把 `;` 改成 `:`，更新程序复制无后缀文件：
+日常发布只在本地 Mac 做版本检查、测试、版本提交、annotated Tag 和原子推送；Windows、macOS 构建与 GitHub Release 发布全部交给 GitHub Actions。正式发布命令为：
 
 ```bash
-python -m PyInstaller --name HRToolkit --onedir --windowed --clean --add-data "README.md:." --add-data "hr_toolkit/templates:hr_toolkit/templates" --hidden-import xlrd hr_toolkit_app.py
-python -m PyInstaller --name HRToolkitUpdater --onefile --windowed --clean hr_toolkit_updater.py
-cp dist/HRToolkitUpdater dist/HRToolkit/
+npm run release -- 0.2.1
 ```
 
-打包完成后，把整个目录发给使用者：
+首次使用先安装 Python 依赖和 Node.js。npm 入口会优先使用 `.venv/bin/python`，不存在时再使用 `python3`；两者之一必须能运行完整测试。发布前可执行不修改版本文件、commit、Tag 或远端的演练：
+
+```bash
+npm run release -- 0.2.1 --dry-run
+```
+
+无人值守环境审核完版本后可追加 `--yes`。发布脚本会严格检查 stable SemVer、clean `main`、`HEAD == origin/main`、本地/远端 Tag 冲突以及全部版本字段，然后运行 `unittest`、`compileall` 和 `git diff --check`。正式执行只会暂存 `hr_toolkit/__init__.py`、`package.json`、`package-lock.json`，不会运行本地跨平台构建，也不会使用 `git add .`。
+
+脚本创建单一版本提交和 `v<version>` annotated Tag，再通过一次 atomic push 同时推送 `main` 与 Tag。推送失败时只有在确认远端两个引用都未变化后才自动回滚；远端状态不明确时会保留现场，要求人工核对。
+
+> 不要为了测试发布脚本在正式仓库创建 `v0.2.1`。先使用 `--dry-run`；正式命令必须等发布负责人确认。
+
+### GitHub Actions 产物
+
+普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行 Python 3.9+ 测试、编译和静态发布检查。只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。
+
+`v0.2.1` 的直接下载资产为：
 
 ```text
-dist/
-  HRToolkit/
-    HRToolkit.exe
-    HRToolkitUpdater.exe
-    update_url.txt
-    _internal/
+HRToolkit_0.2.1_universal.dmg
+HRToolkit_0.2.1_x64-setup.exe
+HRToolkit_0.2.1_x64.msi
+HRToolkit-0.2.1-win-update.zip
+latest.json
+SHA256SUMS.txt
 ```
 
-不要只发送 `.exe`，`_internal` 目录也是程序运行必需的。
-
-## 自动更新发布
-
-程序启动后会检查：
+macOS 优先构建 universal2，并对 Bundle 中的 Mach-O 使用 `file`/`lipo` 验证 `arm64` 与 `x86_64`。如果 universal2 构建或验证失败，发布资产会改为两个真实架构文件：
 
 ```text
-http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
+HRToolkit_0.2.1_arm64.dmg
+HRToolkit_0.2.1_x64.dmg
 ```
 
-也可以在 `HRToolkit.exe` 同目录放一个 `update_url.txt`，第一行写 Gitee 上的 `latest.json` 地址。程序会优先读取这个文件，例如：
+不会把单架构程序改名伪装成 `universal`。DMG 内包含标准 `HRToolkit.app` 和指向 `/Applications` 的快捷方式。
+
+正式 PyInstaller 数据资源只允许 `README.md` 与 `hr_toolkit/templates/*.xlsx`。构建验证会拒绝附件、真实 Excel、outputs、日志、缓存和测试数据。打包后的主程序支持无界面检查：
+
+```bash
+HRToolkit --version
+HRToolkit --smoke-test
+```
+
+### Windows 三阶段构建
+
+Windows runner 按三个独立阶段执行：
+
+```powershell
+python scripts\build_windows.py --version 0.2.1 --output-dir dist\windows
+python scripts\build_windows_installers.py --version 0.2.1 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
+python scripts\build_update_assets.py --version 0.2.1 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
+```
+
+兼容入口 `scripts/release_windows.py` 只负责依次调用这三个阶段，不再递增版本、不提交代码、不上传发布物。主程序是 PyInstaller onedir，Updater 是 onefile；更新 ZIP 根目录保持 `HRToolkit.exe`、`HRToolkitUpdater.exe` 和 `_internal/`，继续使用现有备份、替换与失败回滚逻辑。
+
+EXE 安装器是普通用户的主要下载项，MSI 用于企业部署。两者使用当前用户可写的 `%LOCALAPPDATA%\Programs\HRToolkit`，程序 payload 位于其 `app` 子目录，安装器/卸载器元数据留在外层，保证自更新器可以只替换 `app`。
+
+### macOS 本地检查
+
+当前 Mac 可以在不发布的情况下构建并检查当前版本 DMG：
+
+```bash
+python scripts/build_macos.py \
+  --version 0.1.32 \
+  --architecture arm64 \
+  --output-dir dist/release-assets
+```
+
+使用 universal2 Python 时把架构改为 `universal2`。构建脚本会生成 `.app`、创建 DMG、验证 Applications 快捷方式、Bundle 版本、资源白名单、无界面启动以及所有 Mach-O 的真实架构。
+
+### 更新地址迁移与 v0.2.1 桥接
+
+新版本默认读取公开 GitHub Release：
 
 ```text
-http://hr.seedlingintl.com/api/static/hr-toolkit/latest.json
+https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json
 ```
 
-启动时的检查在后台静默进行，只有发现新版本才会弹窗提示；主界面右上角也有“检查更新”，可手动检查。更新提示遵循 `latest.json` 中的 `mandatory` 字段：强制更新（默认）只能“立即更新”或退出程序；非强制更新（`"mandatory": false`）可选择“稍后再说”，下次启动时再次提醒。下载失败不再直接退出，可以点击“重试”重新下载。
+Windows 继续下载 `HRToolkit-<version>-win-update.zip` 并使用现有 Updater 自动替换。`v0.2.1` 发布成功后，Windows 构建还会提供一次性 `legacy-server-latest.json`：先确认其中的 GitHub 下载地址和 SHA256，再把它部署到旧服务器原 `latest.json` 的位置。旧 Windows 客户端由服务器发现 `v0.2.1`，下载 GitHub Release 的更新 ZIP；安装后的 `update_url.txt` 已转向 GitHub，以后不再依赖旧服务器。不要在 GitHub Release 成功前部署桥接文件。
 
-下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，弹出“正在安装更新”进度窗口（替换文件可能需要几十秒，期间请勿手动打开程序），替换整个 `HRToolkit` 目录后自动重新打开新版本。安装成功后会自动清理下载的更新包和解压的临时文件。更新过程不会弹出黑色命令窗口。
+macOS 第一阶段只支持 DMG 手动更新。新版客户端发现更新后只打开 DMG 下载地址，不会调用 ZIP 替换器，也不应宣传为 Mac 自动更新。旧 Mac 客户端不能安全消费标准 `.app` DMG，应通过人工通知和 DMG 安装迁移，旧服务器桥接清单只提供 Windows 条目。
 
-更新失败时，程序会在 `HRToolkit` 文件夹同级目录写入 `HRToolkit_update.log`。这个日志会记录下载包路径、解压目录、备份目录、替换步骤和具体错误，方便直接定位是哪一步失败。
+### 签名预留
+
+当前版本不做 Windows Authenticode、Apple Developer ID 签名或 notarization，因此正式构建不要求额外签名 Secret。Windows 安装器保留 `--inno-sign-tool-name`，macOS 构建保留 `--codesign-identity` / `MACOS_CODESIGN_IDENTITY` 与 entitlements 入口；未来启用时再配置证书、密码、Developer ID、Apple ID/App Store Connect 凭据，并在 Release 发布门禁前加入完整签名与公证验证。
+
+应用图标（窗口/任务栏/exe）由 `scripts/generate_app_icons.py` 生成：品牌绿圆角方块加白色 “HR” 字标，与侧栏标识一致。调整图标后运行该脚本，重新生成 `hr_toolkit/_icon_data.py` 与 `packaging/windows/HRToolkit.ico`；macOS 构建会基于同一图形生成 `.icns`。
+
+## 自动更新行为
+
+启动时的检查在后台静默进行，只有发现新版本才会弹窗提示；主界面右上角也有“检查更新”，可手动检查。更新提示遵循 `latest.json` 中的 `mandatory` 字段：强制更新（默认）只能“立即更新”或退出程序；非强制更新（`"mandatory": false`）可选择“稍后再说”，下次启动时再次提醒。
+
+Windows 下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 payload 目录后自动重新打开新版本。更新成功会清理下载包和临时文件；失败时会保留或恢复备份，并在安装目录同级写入 `HRToolkit_update.log`。
+
+如果旧版本更新失败后只剩 `HRToolkit_backup_时间`，先把该文件夹改名回 `HRToolkit`，再打开 `HRToolkit.exe` 检查更新。正常版本不需要单独下载更新器，更新器已包含在更新 ZIP 中。
 
 ## 运行日志
 
 程序在 `HRToolkit_update.log` 同一位置写入 `HRToolkit_app.log`（开发环境写到当前目录，可用环境变量 `HR_TOOLKIT_APP_LOG` 指定路径）。远程排查问题时，让使用者把这两个日志文件发过来即可。
 
 记录内容：程序启动（版本号）、每次工具运行的开始（工具名、输入文件名和大小、参数）、完成（耗时、提醒条数）、失败（耗时和完整错误堆栈）、用户手动停止，以及界面和后台线程的未捕获异常。**只记录文件名和统计数字，不记录任何表格内容**（身份证、工资等敏感数据不会进日志），日志文件可以放心外发。日志超过 1MB 时自动截断，只保留最近的内容。
-
-发布步骤推荐使用一键脚本。脚本会自动递增版本号、打包、计算 SHA256，并生成服务器静态目录，不需要手动改 `latest.json`。默认发布为强制更新；追加 `--optional` 参数可发布为可选更新（客户端出现“稍后再说”按钮）。
-
-应用图标（窗口/任务栏/exe）由 `scripts/generate_app_icons.py` 生成：品牌绿圆角方块加白色 “HR” 字标，与侧栏标识一致。调整图标改脚本后运行 `python scripts/generate_app_icons.py` 重新生成 `hr_toolkit/_icon_data.py` 与 `packaging/windows/HRToolkit.ico`。
-
-### 通过 Gitee 中转发布
-
-更新包最终放在 ScriptHub 静态目录中。Gitee 只用于让 Windows 打包机把发布文件同步到 Mac。推荐用一键发布脚本，不要手写 `version`、`file_url` 和 `sha256`。
-
-Windows 版必须在 Windows 上执行。日常发布用补丁版本：
-
-```powershell
-python scripts\release_windows.py --bump patch --notes "本次更新说明"
-```
-
-版本变化：
-
-```text
-0.1.0 -> 0.1.1 -> 0.1.2
-```
-
-阶段性小版本用：
-
-```powershell
-python scripts\release_windows.py --bump minor --notes "完成一批新需求"
-```
-
-版本变化：
-
-```text
-0.1.9 -> 0.2.0
-```
-
-大版本用：
-
-```powershell
-python scripts\release_windows.py --bump major --notes "正式版发布"
-```
-
-版本变化：
-
-```text
-0.9.9 -> 1.0.0
-```
-
-一键发布脚本会自动完成这些事：
-
-- 先递增 `hr_toolkit/__init__.py` 里的版本号
-- 打包 `HRToolkit.exe`
-- 打包 `HRToolkitUpdater.exe`
-- 把 `HRToolkitUpdater.exe` 复制进 `dist\HRToolkit\`
-- 在 `dist\HRToolkit\` 写入 `update_url.txt`
-- 把 `dist\HRToolkit\*` 压缩到 `release/scripthub_static/hr-toolkit/releases/HRToolkit-版本号-win.zip`
-- 计算 zip 的 SHA256
-- 更新 `release/scripthub_static/hr-toolkit/latest.json` 里的 `version`、`file_url`、`sha256`
-- 自动清理历史发布文件，每个平台只保留当前最新版本
-
-发布脚本生成后，会得到：
-
-```text
-release/scripthub_static/hr-toolkit/
-  latest.json
-  releases/
-    HRToolkit-版本号-win.zip
-```
-
-把 `release/scripthub_static/hr-toolkit/` 这个文件夹复制到 ScriptHub 项目的：
-
-```text
-fastApiProject/static/
-```
-
-最终目录应为：
-
-```text
-fastApiProject/static/hr-toolkit/latest.json
-fastApiProject/static/hr-toolkit/releases/HRToolkit-版本号-win.zip
-```
-
-如果旧版本更新失败后只剩 `HRToolkit_backup_时间`，先把这个文件夹改名回 `HRToolkit`，再重新打开 `HRToolkit.exe` 检查更新。正常版本不需要单独下载更新器，更新器已经包含在 zip 更新包里。
-
-如果打包机上也有 ScriptHub 项目，可以直接让脚本复制过去：
-
-```powershell
-python scripts\release_windows.py --bump patch --notes "本次更新说明" --publish-dir "E:\path\to\Nexus-Scripts\fastApiProject\static\hr-toolkit"
-```
-
-4. 提交并推送：
-
-```bash
-git add hr_toolkit/__init__.py release/scripthub_static/hr-toolkit/latest.json release/scripthub_static/hr-toolkit/releases/
-git commit -m "发布 HR工具箱 0.2.0"
-git push gitee main
-```
-
-推送 Gitee 后，Mac 拉取仓库，再把 `release/scripthub_static/hr-toolkit/` 复制到服务器的 `fastApiProject/static/` 下。客户端真正下载的 zip 会走 ScriptHub：
-
-```text
-http://hr.seedlingintl.com/api/static/hr-toolkit/releases/HRToolkit-版本号-win.zip
-```
-
-只推源码不会触发客户端更新。客户端只看 `latest.json` 里的 `version` 是否大于当前程序版本，并按 `file_url` 下载 zip。

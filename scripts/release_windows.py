@@ -1,128 +1,164 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from prepare_gitee_release import main as prepare_gitee_release
-from versioning import REPO_ROOT, bump_project_version
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-
-WINDOWS_DPI_MANIFEST = REPO_ROOT / "packaging" / "windows" / "HRToolkit.manifest"
-WINDOWS_APP_ICON = REPO_ROOT / "packaging" / "windows" / "HRToolkit.ico"
-WINDOWS_BUILD_MODULES = {
-    "PyInstaller": "pyinstaller",
-    "openpyxl": "openpyxl",
-    "xlrd": "xlrd",
-    "pythoncom": "pywin32",
-    "pywintypes": "pywin32",
-    "win32com.client": "pywin32",
-    "win32timezone": "pywin32",
-}
+from build_update_assets import LEGACY_MANIFEST_NAME, update_zip_name
+from build_windows import APP_NAME, UPDATER_NAME, validate_build_version
+from build_windows_installers import installer_asset_names
+from versioning import read_project_version
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Windows 一键发布 HR工具箱")
-    parser.add_argument("--bump", choices=["patch", "minor", "major"], default="patch")
-    parser.add_argument("--notes", nargs="*", default=["更新 HR工具箱"], help="更新说明，可写多条")
-    parser.add_argument("--optional", action="store_true", help="发布为可选更新，客户端可选择“稍后再说”")
-    parser.add_argument("--publish-dir", type=Path, help="可选：直接复制到 ScriptHub 的 fastApiProject/static/hr-toolkit 目录")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Windows 三阶段发布产物编排器：纯构建、纯安装器、纯更新资产。"
+            "不修改版本、不提交、不创建 Tag、不推送。"
+        )
+    )
+    parser.add_argument("--version", default=read_project_version(), help="必须与 hr_toolkit.__version__ 一致")
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        default=REPO_ROOT / "dist" / "windows",
+        help="PyInstaller 二进制输出目录",
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        default=REPO_ROOT / "build" / "windows",
+        help="PyInstaller 临时工作目录",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=REPO_ROOT / "dist" / "release-windows",
+        help="EXE/MSI/ZIP/桥接清单输出目录",
+    )
+    parser.add_argument("--notes", nargs="*", default=None, help="旧服务器桥接更新说明")
+    parser.add_argument("--optional", action="store_true", help="旧服务器桥接清单标记为可选更新")
+    parser.add_argument("--inno-compiler", help="ISCC.exe 路径或命令名")
+    parser.add_argument("--wix-executable", help="WiX v4 wix.exe 路径或命令名")
+    parser.add_argument(
+        "--skip-install-smoke",
+        action="store_true",
+        help="仅供诊断；跳过安装器静默安装、运行和卸载验证",
+    )
     args = parser.parse_args(argv)
 
-    _ensure_windows_build_dependencies()
-    new_version = bump_project_version(args.bump)
-    print(f"发布版本：{new_version}")
+    version = validate_build_version(args.version)
+    commands = stage_commands(
+        version=version,
+        build_dir=args.build_dir.resolve(),
+        work_dir=args.work_dir.resolve(),
+        output_dir=args.output_dir.resolve(),
+        notes=args.notes,
+        optional=args.optional,
+        inno_compiler=args.inno_compiler,
+        wix_executable=args.wix_executable,
+        skip_install_smoke=args.skip_install_smoke,
+    )
+    for label, command in commands:
+        print(f"\n=== {label} ===")
+        _run(command)
 
-    _run([
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--name",
-        "HRToolkit",
-        "--onedir",
-        "--windowed",
-        "--clean",
-        "--icon",
-        str(WINDOWS_APP_ICON),
-        "--manifest",
-        str(WINDOWS_DPI_MANIFEST),
-        "--add-data",
-        "README.md;.",
-        "--add-data",
-        "hr_toolkit/templates;hr_toolkit/templates",
-        "--hidden-import",
-        "pythoncom",
-        "--hidden-import",
-        "pywintypes",
-        "--hidden-import",
-        "win32com.client",
-        "--hidden-import",
-        "win32timezone",
-        "--hidden-import",
-        "xlrd",
-        "hr_toolkit_app.py",
-    ])
-    _run([
-        sys.executable,
-        "-m",
-        "PyInstaller",
-        "--name",
-        "HRToolkitUpdater",
-        "--onefile",
-        "--windowed",
-        "--clean",
-        "--icon",
-        str(WINDOWS_APP_ICON),
-        "hr_toolkit_updater.py",
-    ])
-    prepare_gitee_release([
-        "--platform",
-        "windows",
-        "--version",
-        new_version,
-        "--notes",
-        *args.notes,
-        *(["--optional"] if args.optional else []),
-        *([] if args.publish_dir is None else ["--publish-dir", str(args.publish_dir)]),
-    ])
-    print("Windows 发布文件已生成。提交并推送后，旧版客户端即可检查到更新。")
+    exe_name, msi_name = installer_asset_names(version)
+    expected = (
+        args.output_dir.resolve() / exe_name,
+        args.output_dir.resolve() / msi_name,
+        args.output_dir.resolve() / update_zip_name(version),
+        args.output_dir.resolve() / LEGACY_MANIFEST_NAME,
+    )
+    missing = [path for path in expected if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"Windows 三阶段完成后缺少产物：{missing}")
+    print("\nWindows 发布资产已完成：")
+    for path in expected:
+        print(f"- {path}")
     return 0
 
 
-def _run(command: list[str]) -> None:
-    print("执行：" + " ".join(command))
-    subprocess.run(command, cwd=REPO_ROOT, check=True)
+def stage_commands(
+    *,
+    version: str,
+    build_dir: Path,
+    work_dir: Path,
+    output_dir: Path,
+    notes: list[str] | None = None,
+    optional: bool = False,
+    inno_compiler: str | None = None,
+    wix_executable: str | None = None,
+    skip_install_smoke: bool = False,
+) -> tuple[tuple[str, list[str]], ...]:
+    validate_build_version(version)
+    python = sys.executable
+    app_dir = build_dir / APP_NAME
+    updater = build_dir / f"{UPDATER_NAME}.exe"
 
+    build = [
+        python,
+        str(SCRIPT_DIR / "build_windows.py"),
+        "--version",
+        version,
+        "--output-dir",
+        str(build_dir),
+        "--work-dir",
+        str(work_dir),
+    ]
+    installers = [
+        python,
+        str(SCRIPT_DIR / "build_windows_installers.py"),
+        "--version",
+        version,
+        "--app-dir",
+        str(app_dir),
+        "--updater",
+        str(updater),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if inno_compiler:
+        installers.extend(["--inno-compiler", inno_compiler])
+    if wix_executable:
+        installers.extend(["--wix-executable", wix_executable])
+    if skip_install_smoke:
+        installers.append("--skip-install-smoke")
 
-def _ensure_windows_build_dependencies() -> None:
-    if not sys.platform.startswith("win"):
-        raise RuntimeError("Windows 发布包必须在 Windows 电脑上打包，不能在 Mac 上直接生成 Windows exe。")
+    update_assets = [
+        python,
+        str(SCRIPT_DIR / "build_update_assets.py"),
+        "--version",
+        version,
+        "--app-dir",
+        str(app_dir),
+        "--updater",
+        str(updater),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if notes:
+        update_assets.extend(["--notes", *notes])
+    if optional:
+        update_assets.append("--optional")
 
-    missing = [module for module in WINDOWS_BUILD_MODULES if not _module_exists(module)]
-    if not missing:
-        return
-
-    packages = sorted({WINDOWS_BUILD_MODULES[module] for module in missing})
-    raise RuntimeError(
-        "Windows 打包环境缺少依赖模块："
-        + ", ".join(missing)
-        + "。请在 Windows 虚拟环境中执行："
-        + f"{sys.executable} -m pip install -r requirements.txt；"
-        + f"{sys.executable} -m pip install "
-        + " ".join(packages)
-        + "。安装后重新执行发布命令。"
+    return (
+        ("1/3 PyInstaller 纯构建", build),
+        ("2/3 EXE/MSI 安装器", installers),
+        ("3/3 Windows ZIP 更新资产", update_assets),
     )
 
 
-def _module_exists(module: str) -> bool:
-    try:
-        return importlib.util.find_spec(module) is not None
-    except ModuleNotFoundError:
-        return False
+def _run(command: list[str]) -> None:
+    print("执行：" + subprocess.list2cmdline(command))
+    subprocess.run(command, cwd=REPO_ROOT, check=True)
 
 
 if __name__ == "__main__":
