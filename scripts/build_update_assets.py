@@ -28,8 +28,16 @@ from build_windows import (
 
 
 GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
+GITEE_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
+GITEE_LATEST_RELEASE_API_URL = (
+    f"https://gitee.com/api/v5/repos/{GITEE_REPOSITORY}/releases/latest"
+)
 GITHUB_LATEST_MANIFEST_URL = (
     f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/latest.json"
+)
+UPDATE_MANIFEST_URLS = (
+    GITEE_LATEST_RELEASE_API_URL,
+    GITHUB_LATEST_MANIFEST_URL,
 )
 LEGACY_MANIFEST_NAME = "legacy-server-latest.json"
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
@@ -116,7 +124,7 @@ def stage_windows_payload(*, app_dir: Path, updater: Path, target_dir: Path) -> 
     shutil.copytree(app_dir, target_dir)
     shutil.copy2(updater, target_dir / f"{UPDATER_NAME}.exe")
     (target_dir / "update_url.txt").write_text(
-        GITHUB_LATEST_MANIFEST_URL + "\n",
+        "\n".join(UPDATE_MANIFEST_URLS) + "\n",
         encoding="utf-8",
     )
     verify_staged_payload(target_dir)
@@ -137,9 +145,13 @@ def verify_staged_payload(payload_dir: Path) -> None:
         raise RuntimeError(
             f"Windows 更新 payload 根文件不符合白名单，实际={sorted(root_files)}"
         )
-    update_url = (payload_dir / "update_url.txt").read_text(encoding="utf-8").strip()
-    if update_url != GITHUB_LATEST_MANIFEST_URL:
-        raise RuntimeError(f"update_url.txt 地址不正确：{update_url}")
+    update_urls = tuple(
+        line.strip()
+        for line in (payload_dir / "update_url.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    if update_urls != UPDATE_MANIFEST_URLS:
+        raise RuntimeError(f"update_url.txt 地址不正确：{update_urls}")
 
 
 def update_zip_name(version: str) -> str:
@@ -158,7 +170,10 @@ def legacy_server_manifest(
     validate_build_version(version)
     if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256.lower()):
         raise ValueError("sha256 必须是 64 位十六进制字符串。")
-    release_url = (
+    gitee_release_url = (
+        f"https://gitee.com/{GITEE_REPOSITORY}/releases/download/v{version}/{filename}"
+    )
+    github_release_url = (
         f"https://github.com/{GITHUB_REPOSITORY}/releases/download/v{version}/{filename}"
     )
     normalized_notes = [str(note).strip() for note in (notes or []) if str(note).strip()]
@@ -171,7 +186,8 @@ def legacy_server_manifest(
         "platforms": {
             "windows": {
                 "version": version,
-                "file_url": release_url,
+                "file_url": gitee_release_url,
+                "fallback_urls": [github_release_url],
                 "sha256": sha256.lower(),
             }
         },

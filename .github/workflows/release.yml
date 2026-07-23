@@ -378,3 +378,121 @@ jobs:
           set -euo pipefail
           gh release edit "${TAG}" --draft=false --latest
           test "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" = "false"
+
+  mirror-gitee:
+    name: Mirror verified Release to Gitee
+    needs:
+      - validate
+      - publish
+    if: >-
+      needs.validate.result == 'success' &&
+      needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITEE_REPOSITORY: optimistic-little-sunspot/hr-toolkit
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Require Gitee release credential
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITEE_TOKEN}" ]]; then
+            echo "Missing required GitHub Actions Secret: GITEE_TOKEN" >&2
+            exit 1
+          fi
+
+      - name: Download the published GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p gitee-release-assets
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir gitee-release-assets
+
+      - name: Regenerate Gitee-first metadata with GitHub fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_release_metadata.py \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --assets-dir gitee-release-assets \
+            --notes "HR Toolkit v${VERSION}" \
+            --download-base-url "https://gitee.com/${GITEE_REPOSITORY}/releases/download" \
+            --release-url "https://gitee.com/${GITEE_REPOSITORY}/releases/tag/${TAG}" \
+            --fallback-download-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download"
+          python scripts/publish_gitee_release.py \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repository "${GITEE_REPOSITORY}" \
+            --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
+            --assets-dir gitee-release-assets \
+            --dry-run
+
+      - name: Fast-forward source and annotated tag to Gitee
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_USERNAME: optimistic-little-sunspot
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          ASKPASS_PATH="${RUNNER_TEMP}/gitee-askpass.sh"
+          cat > "${ASKPASS_PATH}" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' "${GITEE_USERNAME}" ;;
+            *Password*) printf '%s\n' "${GITEE_TOKEN}" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 700 "${ASKPASS_PATH}"
+          export GIT_ASKPASS="${ASKPASS_PATH}"
+
+          git remote add gitee "https://gitee.com/${GITEE_REPOSITORY}.git"
+          git fetch gitee refs/heads/main:refs/remotes/gitee/main
+          TAG_COMMIT="$(git rev-parse "${TAG}^{commit}")"
+          git merge-base --is-ancestor refs/remotes/gitee/main "${TAG_COMMIT}"
+
+          REMOTE_TAG="$(git ls-remote gitee "refs/tags/${TAG}" | awk '{print $1}')"
+          LOCAL_TAG="$(git rev-parse "refs/tags/${TAG}")"
+          if [[ -n "${REMOTE_TAG}" && "${REMOTE_TAG}" != "${LOCAL_TAG}" ]]; then
+            echo "Gitee tag ${TAG} already exists at a different object" >&2
+            exit 1
+          fi
+          git push --atomic gitee \
+            "${TAG_COMMIT}:refs/heads/main" \
+            "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      - name: Publish and verify public Gitee Release assets
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/publish_gitee_release.py \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repository "${GITEE_REPOSITORY}" \
+            --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
+            --assets-dir gitee-release-assets

@@ -93,6 +93,43 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertTrue(platforms["macos-arm64"]["file_url"].endswith("_arm64.dmg"))
             self.assertTrue(platforms["macos-x64"]["file_url"].endswith("_x64.dmg"))
 
+    def test_generates_gitee_primary_manifest_with_github_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            self._write_assets(assets_dir, "universal2")
+
+            latest_path, _checksums_path, _names = release_metadata.generate_release_metadata(
+                assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.REPOSITORY,
+                project_version=self.VERSION,
+                download_base_url=(
+                    "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download"
+                ),
+                release_url=(
+                    "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/tag/v0.2.1"
+                ),
+                fallback_download_base_url=(
+                    "https://github.com/xhzwjc/hr-toolkit/releases/download"
+                ),
+            )
+
+            manifest = json.loads(latest_path.read_text(encoding="utf-8"))
+            windows = manifest["platforms"]["windows"]
+            self.assertTrue(windows["file_url"].startswith("https://gitee.com/"))
+            self.assertEqual(
+                windows["fallback_urls"],
+                [
+                    "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/"
+                    "HRToolkit-0.2.1-win-update.zip"
+                ],
+            )
+            self.assertEqual(
+                manifest["release_url"],
+                "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/tag/v0.2.1",
+            )
+
     def test_rejects_incomplete_or_mixed_macos_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             assets_dir = Path(temporary)

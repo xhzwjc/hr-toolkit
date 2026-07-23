@@ -13,6 +13,9 @@ from unittest.mock import patch
 
 from hr_toolkit.app_update import (
     DEFAULT_UPDATE_MANIFEST_URL,
+    DEFAULT_UPDATE_MANIFEST_URLS,
+    GITEE_LATEST_RELEASE_API_URL,
+    GITHUB_LATEST_MANIFEST_URL,
     UpdateError,
     check_for_update,
     cleanup_stale_update_files,
@@ -20,10 +23,13 @@ from hr_toolkit.app_update import (
     fetch_update_manifest,
     is_newer_version,
     launch_update_replacement,
+    load_update_manifest,
     parse_update_manifest,
+    resolve_download_url,
     sha256_file,
     trim_log_file,
     update_manifest_url,
+    update_manifest_urls,
 )
 from hr_toolkit import update_runner
 from hr_toolkit.update_runner import main as update_runner_main
@@ -66,6 +72,30 @@ class AppUpdateTests(unittest.TestCase):
         self.assertEqual(update.sha256, "abc123")
         self.assertEqual(update.notes, ("修复问题",))
         self.assertEqual(update.update_mode, "auto")
+
+    def test_parse_manifest_keeps_gitee_primary_and_github_fallback(self) -> None:
+        update = parse_update_manifest(
+            {
+                "version": "0.2.3",
+                "file_url": "https://gitee.com/company/hr/releases/download/v0.2.3/update.zip",
+                "fallback_urls": [
+                    "https://github.com/company/hr/releases/download/v0.2.3/update.zip",
+                    "https://gitee.com/company/hr/releases/download/v0.2.3/update.zip",
+                ],
+                "sha256": "abc123",
+            },
+            manifest_url="https://gitee.com/company/hr/releases/download/v0.2.3/latest.json",
+            platform="windows",
+        )
+
+        self.assertEqual(update.file_url, "https://gitee.com/company/hr/releases/download/v0.2.3/update.zip")
+        self.assertEqual(
+            update.download_urls,
+            (
+                "https://gitee.com/company/hr/releases/download/v0.2.3/update.zip",
+                "https://github.com/company/hr/releases/download/v0.2.3/update.zip",
+            ),
+        )
 
     def test_macos_defaults_to_manual_update(self) -> None:
         update = parse_update_manifest(
@@ -118,6 +148,59 @@ class AppUpdateTests(unittest.TestCase):
 
             self.assertIsNone(check_for_update("0.1.0", manifest_url=manifest_url, platform="windows"))
 
+    def test_check_for_update_uses_github_only_after_gitee_failure(self) -> None:
+        github_manifest = {
+            "version": "0.2.3",
+            "file_url": "https://github.com/company/hr/releases/download/v0.2.3/update.zip",
+            "sha256": "abc123",
+        }
+        with patch(
+            "hr_toolkit.app_update.load_update_manifest",
+            side_effect=[
+                UpdateError("timed out"),
+                (github_manifest, GITHUB_LATEST_MANIFEST_URL),
+            ],
+        ) as loader:
+            update = check_for_update("0.2.2", platform="windows")
+
+        self.assertIsNotNone(update)
+        assert update is not None
+        self.assertEqual(update.file_url, github_manifest["file_url"])
+        self.assertEqual(
+            [call.args[0] for call in loader.call_args_list],
+            list(DEFAULT_UPDATE_MANIFEST_URLS),
+        )
+
+    def test_check_for_update_does_not_query_github_when_gitee_succeeds(self) -> None:
+        with patch(
+            "hr_toolkit.app_update.load_update_manifest",
+            return_value=({"version": "0.2.2"}, "https://gitee.com/latest.json"),
+        ) as loader:
+            self.assertIsNone(check_for_update("0.2.2", platform="windows"))
+
+        loader.assert_called_once_with(GITEE_LATEST_RELEASE_API_URL)
+
+    def test_gitee_latest_release_resolves_attached_manifest(self) -> None:
+        release = {
+            "tag_name": "v0.2.3",
+            "assets": [
+                {
+                    "name": "latest.json",
+                    "browser_download_url": "https://gitee.com/company/hr/releases/download/v0.2.3/latest.json",
+                }
+            ],
+        }
+        manifest = {"version": "0.2.3"}
+        with patch(
+            "hr_toolkit.app_update._fetch_json_object",
+            side_effect=[release, manifest],
+        ) as fetcher:
+            payload, resolved_url = load_update_manifest(GITEE_LATEST_RELEASE_API_URL)
+
+        self.assertEqual(payload, manifest)
+        self.assertEqual(resolved_url, release["assets"][0]["browser_download_url"])
+        self.assertEqual(fetcher.call_count, 2)
+
     def test_https_manifest_uses_validating_certifi_context(self) -> None:
         response = io.BytesIO(b'{"version": "0.2.1"}')
         with patch("hr_toolkit.app_update.urllib.request.urlopen", return_value=response) as urlopen:
@@ -157,11 +240,56 @@ class AppUpdateTests(unittest.TestCase):
 
             self.assertEqual(downloaded.read_bytes(), b"fake zip payload")
 
+    def test_download_package_falls_back_after_primary_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            missing = tmp_dir / "missing.zip"
+            fallback = tmp_dir / "fallback.zip"
+            fallback.write_bytes(b"fallback payload")
+            update = parse_update_manifest(
+                {
+                    "version": "0.2.3",
+                    "file_url": "file://" + urllib.request.pathname2url(str(missing)),
+                    "fallback_urls": [
+                        "file://" + urllib.request.pathname2url(str(fallback)),
+                    ],
+                    "sha256": sha256_file(fallback),
+                },
+                manifest_url="file://" + urllib.request.pathname2url(str(tmp_dir / "latest.json")),
+                platform="windows",
+            )
+
+            downloaded = download_update_package(update, dest_dir=tmp_dir / "download")
+            self.assertEqual(downloaded.read_bytes(), b"fallback payload")
+
+    def test_manual_download_url_falls_back_to_github(self) -> None:
+        update = parse_update_manifest(
+            {
+                "version": "0.2.3",
+                "file_url": "https://gitee.com/company/hr/releases/download/v0.2.3/app.dmg",
+                "fallback_urls": ["https://github.com/company/hr/releases/download/v0.2.3/app.dmg"],
+                "sha256": "abc123",
+                "update_mode": "manual",
+            },
+            manifest_url="https://gitee.com/company/hr/releases/download/v0.2.3/latest.json",
+            platform="macos",
+        )
+        response = io.BytesIO(b"")
+        with patch(
+            "hr_toolkit.app_update._open_url",
+            side_effect=[OSError("timed out"), response],
+        ) as opener:
+            selected = resolve_download_url(update)
+
+        self.assertEqual(selected, update.fallback_urls[0])
+        self.assertEqual(opener.call_count, 2)
+
     def test_update_url_file_overrides_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             (tmp_dir / "update_url.txt").write_text(
-                "https://gitee.com/company/hr-toolkit/raw/master/release/latest.json\n",
+                "https://gitee.com/company/hr-toolkit/releases/latest\n"
+                "https://github.com/company/hr-toolkit/releases/latest/download/latest.json\n",
                 encoding="utf-8",
             )
             old_cwd = Path.cwd()
@@ -170,14 +298,21 @@ class AppUpdateTests(unittest.TestCase):
                 os.chdir(tmp_dir)
                 self.assertEqual(
                     update_manifest_url(),
-                    "https://gitee.com/company/hr-toolkit/raw/master/release/latest.json",
+                    "https://gitee.com/company/hr-toolkit/releases/latest",
+                )
+                self.assertEqual(
+                    update_manifest_urls(),
+                    (
+                        "https://gitee.com/company/hr-toolkit/releases/latest",
+                        "https://github.com/company/hr-toolkit/releases/latest/download/latest.json",
+                    ),
                 )
             finally:
                 os.chdir(old_cwd)
                 if old_env is not None:
                     os.environ["HR_TOOLKIT_UPDATE_URL"] = old_env
 
-    def test_default_update_url_points_to_public_github_release(self) -> None:
+    def test_default_update_urls_use_gitee_then_github(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_cwd = Path.cwd()
             old_env = os.environ.pop("HR_TOOLKIT_UPDATE_URL", None)
@@ -185,9 +320,13 @@ class AppUpdateTests(unittest.TestCase):
                 os.chdir(tmp)
                 self.assertEqual(
                     update_manifest_url(),
-                    "https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json",
+                    GITEE_LATEST_RELEASE_API_URL,
                 )
                 self.assertEqual(update_manifest_url(), DEFAULT_UPDATE_MANIFEST_URL)
+                self.assertEqual(
+                    update_manifest_urls(),
+                    (GITEE_LATEST_RELEASE_API_URL, GITHUB_LATEST_MANIFEST_URL),
+                )
             finally:
                 os.chdir(old_cwd)
                 if old_env is not None:

@@ -58,19 +58,13 @@ def smoke_test() -> None:
 
 
 def update_smoke_test() -> str:
-    """Verify that the packaged runtime can securely read GitHub release metadata."""
-    from hr_toolkit.app_update import (
-        DEFAULT_UPDATE_MANIFEST_URL,
-        fetch_update_manifest,
-        manifest_version,
-        platform_key,
-    )
+    """Verify secure Gitee-first metadata discovery with GitHub fallback."""
+    from hr_toolkit.app_update import check_for_update
 
-    manifest = fetch_update_manifest(DEFAULT_UPDATE_MANIFEST_URL, timeout=30)
-    latest_version = manifest_version(manifest, platform=platform_key())
-    if not latest_version:
-        raise RuntimeError("GitHub 更新配置缺少当前平台版本。")
-    return latest_version
+    update = check_for_update("0.0.0")
+    if update is None or not update.version:
+        raise RuntimeError("更新配置缺少当前平台版本。")
+    return update.version
 
 
 def _emit(text: str) -> None:

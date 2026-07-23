@@ -21,6 +21,7 @@ from hr_toolkit.app_update import (
     cleanup_stale_update_files,
     download_update_package,
     launch_update_replacement,
+    resolve_download_url,
     update_check_enabled,
 )
 from hr_toolkit.tools.folder_rename import (
@@ -1960,6 +1961,10 @@ class HRToolkitApp:
                     self._finish_update_download(payload)
                 elif status == "download_error":
                     self._handle_update_failure(payload)
+                elif status == "manual_download_ready":
+                    self._finish_manual_update(payload)
+                elif status == "manual_download_error":
+                    self._handle_manual_update_failure(payload)
         except queue.Empty:
             pass
         self.root.after(150, self._poll_update_queue)
@@ -2046,13 +2051,38 @@ class HRToolkitApp:
             )
 
     def _open_manual_update(self, update: UpdateInfo) -> None:
-        self._write_log(f"正在打开手动更新下载地址：{update.file_url}")
+        self._write_log("正在选择可用的 DMG 下载地址，优先使用 Gitee 国内源...")
+        self._show_update_progress_window(
+            title=f"准备下载 v{update.version}",
+            detail="正在连接国内下载源；不可用时会自动尝试 GitHub 备用源。",
+            indeterminate=True,
+            close_command=None,
+        )
+        worker = threading.Thread(target=self._manual_update_worker, args=(update,), daemon=True)
+        worker.start()
+
+    def _manual_update_worker(self, update: UpdateInfo) -> None:
         try:
-            open_path(update.file_url)
+            download_url = resolve_download_url(update)
         except Exception as exc:
-            self._show_update_failure_window("无法打开下载地址", str(exc), exit_after=False)
+            self.update_queue.put(("manual_download_error", exc))
+            return
+        self.update_queue.put(("manual_download_ready", download_url))
+
+    def _finish_manual_update(self, download_url: object | None) -> None:
+        if not isinstance(download_url, str):
+            return
+        self._write_log(f"正在打开手动更新下载地址：{download_url}")
+        try:
+            open_path(download_url)
+        except Exception as exc:
+            self._handle_manual_update_failure(exc)
             return
         self._close_update_window()
+
+    def _handle_manual_update_failure(self, exc: object | None) -> None:
+        self._write_log(f"无法打开 DMG 下载地址：{exc}")
+        self._show_update_failure_window("无法打开下载地址", str(exc), exit_after=False)
 
     def _defer_update(self) -> None:
         self._write_log("已选择稍后更新，下次启动时会再次提醒。")

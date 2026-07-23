@@ -136,8 +136,12 @@ class WindowsPackagingTests(unittest.TestCase):
                 self.assertIn("HRToolkitUpdater.exe", names)
                 self.assertIn("update_url.txt", names)
                 self.assertTrue(all(info.date_time == build_update_assets.ZIP_EPOCH for info in archive.infolist()))
-                update_url = archive.read("update_url.txt").decode("utf-8").strip()
-                self.assertEqual(update_url, build_update_assets.GITHUB_LATEST_MANIFEST_URL)
+                update_urls = tuple(
+                    line.strip()
+                    for line in archive.read("update_url.txt").decode("utf-8").splitlines()
+                    if line.strip()
+                )
+                self.assertEqual(update_urls, build_update_assets.UPDATE_MANIFEST_URLS)
                 xlsx_names = [name for name in names if name.lower().endswith(".xlsx")]
                 self.assertEqual(
                     {Path(name).name for name in xlsx_names},
@@ -154,7 +158,15 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertEqual(windows["sha256"], first_digest)
             self.assertEqual(
                 windows["file_url"],
-                f"https://github.com/xhzwjc/hr-toolkit/releases/download/v{self.version}/{zip_path.name}",
+                "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/"
+                f"v{self.version}/{zip_path.name}",
+            )
+            self.assertEqual(
+                windows["fallback_urls"],
+                [
+                    "https://github.com/xhzwjc/hr-toolkit/releases/download/"
+                    f"v{self.version}/{zip_path.name}"
+                ],
             )
 
             # staging/zip 生成不得污染纯 PyInstaller 输出目录。
@@ -253,6 +265,20 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("prepare_gitee_release", flat)
         self.assertNotIn("git add", flat)
         self.assertNotIn("--publish-dir", flat)
+
+    def test_release_workflow_mirrors_only_after_github_publish(self) -> None:
+        workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        mirror_job = workflow.split("\n  mirror-gitee:", 1)[1]
+        job_configuration = mirror_job.split("\n    steps:", 1)[0]
+        self.assertIn("- publish", job_configuration)
+        self.assertIn("needs.publish.result == 'success'", job_configuration)
+        self.assertIn("secrets.GITEE_TOKEN", mirror_job)
+        self.assertIn("publish_gitee_release.py", mirror_job)
+        self.assertIn("git push --atomic gitee", mirror_job)
+        self.assertNotIn("git add", mirror_job)
+        self.assertNotIn("git commit", mirror_job)
 
     def test_installer_output_magic_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

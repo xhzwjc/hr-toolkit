@@ -1,2 +1,3 @@
-# 新版客户端直接读取公开 GitHub Release；旧服务器只用于 v0.2.1 一次性桥接。
+# 国内默认读取 Gitee 最新 Release；连接失败、超时或配置无效时自动尝试 GitHub。
+https://gitee.com/api/v5/repos/optimistic-little-sunspot/hr-toolkit/releases/latest
 https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json

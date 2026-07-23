@@ -427,32 +427,32 @@ CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
 日常发布只在本地 Mac 做版本检查、测试、版本提交、annotated Tag 和原子推送；Windows、macOS 构建与 GitHub Release 发布全部交给 GitHub Actions。正式发布命令为：
 
 ```bash
-npm run release -- 0.2.1
+npm run release -- 0.2.3
 ```
 
 首次使用先安装 Python 依赖和 Node.js。npm 入口会优先使用 `.venv/bin/python`，不存在时再使用 `python3`；两者之一必须能运行完整测试。发布前可执行不修改版本文件、commit、Tag 或远端的演练：
 
 ```bash
-npm run release -- 0.2.1 --dry-run
+npm run release -- 0.2.3 --dry-run
 ```
 
 无人值守环境审核完版本后可追加 `--yes`。发布脚本会严格检查 stable SemVer、clean `main`、`HEAD == origin/main`、本地/远端 Tag 冲突以及全部版本字段，然后运行 `unittest`、`compileall` 和 `git diff --check`。正式执行只会暂存 `hr_toolkit/__init__.py`、`package.json`、`package-lock.json`，不会运行本地跨平台构建，也不会使用 `git add .`。
 
 脚本创建单一版本提交和 `v<version>` annotated Tag，再通过一次 atomic push 同时推送 `main` 与 Tag。推送失败时只有在确认远端两个引用都未变化后才自动回滚；远端状态不明确时会保留现场，要求人工核对。
 
-> 不要为了测试发布脚本在正式仓库创建 `v0.2.1`。先使用 `--dry-run`；正式命令必须等发布负责人确认。
+> 不要为了测试发布脚本在正式仓库创建 Tag。先使用 `--dry-run`；正式命令必须等发布负责人确认。
 
 ### GitHub Actions 产物
 
-普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行 Python 3.9+ 测试、编译和静态发布检查。只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。
+普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行 Python 3.9+ 测试、编译和静态发布检查。只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag 和直接下载资产同步到 Gitee，并生成“Gitee 主地址 + GitHub 备用地址”的 `latest.json`。Gitee 镜像失败会让该工作流显示失败，方便运维重试，但不会删除或回滚已经发布的 GitHub Release。
 
-`v0.2.1` 的直接下载资产为：
+每个版本的直接下载资产为（以下用 `<version>` 表示版本号）：
 
 ```text
-HRToolkit_0.2.1_universal.dmg
-HRToolkit_0.2.1_x64-setup.exe
-HRToolkit_0.2.1_x64.msi
-HRToolkit-0.2.1-win-update.zip
+HRToolkit_<version>_universal.dmg
+HRToolkit_<version>_x64-setup.exe
+HRToolkit_<version>_x64.msi
+HRToolkit-<version>-win-update.zip
 latest.json
 SHA256SUMS.txt
 ```
@@ -460,8 +460,8 @@ SHA256SUMS.txt
 macOS 优先构建 universal2，并对 Bundle 中的 Mach-O 使用 `file`/`lipo` 验证 `arm64` 与 `x86_64`。如果 universal2 构建或验证失败，发布资产会改为两个真实架构文件：
 
 ```text
-HRToolkit_0.2.1_arm64.dmg
-HRToolkit_0.2.1_x64.dmg
+HRToolkit_<version>_arm64.dmg
+HRToolkit_<version>_x64.dmg
 ```
 
 不会把单架构程序改名伪装成 `universal`。DMG 内包含标准 `HRToolkit.app` 和指向 `/Applications` 的快捷方式。
@@ -478,9 +478,9 @@ HRToolkit --smoke-test
 Windows runner 按三个独立阶段执行：
 
 ```powershell
-python scripts\build_windows.py --version 0.2.1 --output-dir dist\windows
-python scripts\build_windows_installers.py --version 0.2.1 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
-python scripts\build_update_assets.py --version 0.2.1 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
+python scripts\build_windows.py --version 0.2.3 --output-dir dist\windows
+python scripts\build_windows_installers.py --version 0.2.3 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
+python scripts\build_update_assets.py --version 0.2.3 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
 ```
 
 兼容入口 `scripts/release_windows.py` 只负责依次调用这三个阶段，不再递增版本、不提交代码、不上传发布物。主程序是 PyInstaller onedir，Updater 是 onefile；更新 ZIP 根目录保持 `HRToolkit.exe`、`HRToolkitUpdater.exe` 和 `_internal/`，继续使用现有备份、替换与失败回滚逻辑。
@@ -493,24 +493,31 @@ EXE 安装器是普通用户的主要下载项，MSI 用于企业部署。两者
 
 ```bash
 python scripts/build_macos.py \
-  --version 0.1.32 \
+  --version 0.2.3 \
   --architecture arm64 \
   --output-dir dist/release-assets
 ```
 
 使用 universal2 Python 时把架构改为 `universal2`。构建脚本会生成 `.app`、创建 DMG、验证 Applications 快捷方式、Bundle 版本、资源白名单、无界面启动以及所有 Mach-O 的真实架构。
 
-### 更新地址迁移与 v0.2.1 桥接
+### 国内更新源、GitHub 回退与旧客户端迁移
 
-新版本默认读取公开 GitHub Release：
+新版客户端按以下顺序检查公开更新源：
 
 ```text
+https://gitee.com/api/v5/repos/optimistic-little-sunspot/hr-toolkit/releases/latest
 https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json
 ```
 
-Windows 继续下载 `HRToolkit-<version>-win-update.zip` 并使用现有 Updater 自动替换。`v0.2.1` 发布成功后，Windows 构建还会提供一次性 `legacy-server-latest.json`：先确认其中的 GitHub 下载地址和 SHA256，再把它部署到旧服务器原 `latest.json` 的位置。旧 Windows 客户端由服务器发现 `v0.2.1`，下载 GitHub Release 的更新 ZIP；安装后的 `update_url.txt` 已转向 GitHub，以后不再依赖旧服务器。不要在 GitHub Release 成功前部署桥接文件。
+Gitee 最新 Release 接口会返回公开附件列表，客户端从中找到 `latest.json`。只要 Gitee 能返回有效配置，就不会访问 GitHub；Gitee 连接失败、超时、404、配置无效或缺少当前平台资产时，才自动尝试 GitHub。Gitee 版 `latest.json` 中每个平台的 `file_url` 指向 Gitee，同一 SHA256 的 GitHub 地址写入 `fallback_urls`。Windows 下载和 SHA256 校验失败时会继续尝试备用地址；macOS 点击“下载 DMG”后也会在后台选择第一个可访问地址，不阻塞界面。
 
-macOS 第一阶段只支持 DMG 手动更新。新版客户端发现更新后只打开 DMG 下载地址，不会调用 ZIP 替换器，也不应宣传为 Mac 自动更新。旧 Mac 客户端不能安全消费标准 `.app` DMG，应通过人工通知和 DMG 安装迁移，旧服务器桥接清单只提供 Windows 条目。
+Windows 继续下载 `HRToolkit-<version>-win-update.zip` 并使用现有 Updater 自动替换。Windows 构建仍会提供 `legacy-server-latest.json`，其主下载地址现在指向 Gitee，GitHub 写作备用字段。只有在对应 Gitee Release 资产已经公开并验证后，才能把该文件部署到旧服务器原 `latest.json` 的位置；旧版客户端不认识多源配置，因此这一步必须保证 Gitee 主地址真实可下载。安装后的 `update_url.txt` 包含上面的 Gitee、GitHub 两行，后续不再依赖旧服务器。
+
+已经安装的 v0.2.1/v0.2.2 客户端内置的是 GitHub 地址：能访问 GitHub 的客户端会先升级到首个双源版本；完全无法访问 GitHub 的机器需要通过 Gitee Release、内网共享或 U 盘手动安装一次双源版本。完成这一次迁移后，后续检查与下载默认走 Gitee。
+
+macOS 第一阶段只支持 DMG 手动更新。新版客户端发现更新后只打开已验证可访问的 DMG 下载地址，不会调用 ZIP 替换器，也不应宣传为 Mac 自动更新。旧 Mac 客户端不能安全消费标准 `.app` DMG，应通过人工通知和 DMG 安装迁移，旧服务器桥接清单只提供 Windows 条目。
+
+Gitee 镜像发布需要在 GitHub 仓库 Actions Secrets 中配置 `GITEE_TOKEN`。Token 需要对 `optimistic-little-sunspot/hr-toolkit` 具备推送源码/Tag、创建或更新 Release、删除和上传 Release 附件的权限；不要把 Token 写入仓库、命令输出或聊天记录。镜像脚本会先删除该 Tag Release 的旧附件，上传二进制和校验文件，最后上传 `latest.json`，因此失败中的不完整 Release 不会被新版客户端当作有效国内更新源。
 
 ### 签名预留
 

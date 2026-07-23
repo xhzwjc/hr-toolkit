@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -87,25 +88,41 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _asset_url(repository: str, tag: str, name: str) -> str:
-    return f"https://github.com/{repository}/releases/download/{tag}/{name}"
+def _validated_url(value: str, *, label: str, strip_trailing_slash: bool = False) -> str:
+    normalized = value.strip()
+    parsed = urllib.parse.urlparse(normalized)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise ReleaseMetadataError(f"{label} 必须是无凭据的 HTTPS URL：{value!r}")
+    if strip_trailing_slash:
+        normalized = normalized.rstrip("/")
+    return normalized
+
+
+def _asset_url(download_base_url: str, tag: str, name: str) -> str:
+    return f"{download_base_url}/{tag}/{name}"
 
 
 def _asset_payload(
     assets_dir: Path,
-    repository: str,
     tag: str,
     version: str,
     name: str,
     *,
     update_mode: str,
+    download_base_url: str,
+    fallback_download_base_url: str | None,
 ) -> dict:
-    return {
+    payload = {
         "version": version,
-        "file_url": _asset_url(repository, tag, name),
+        "file_url": _asset_url(download_base_url, tag, name),
         "sha256": sha256_file(assets_dir / name),
         "update_mode": update_mode,
     }
+    if fallback_download_base_url:
+        payload["fallback_urls"] = [
+            _asset_url(fallback_download_base_url, tag, name)
+        ]
+    return payload
 
 
 def build_latest_manifest(
@@ -117,45 +134,66 @@ def build_latest_manifest(
     notes: Sequence[str],
     mandatory: bool,
     mac_variant: str,
+    download_base_url: str | None = None,
+    release_url: str | None = None,
+    fallback_download_base_url: str | None = None,
 ) -> dict:
+    download_base_url = _validated_url(
+        download_base_url or f"https://github.com/{repository}/releases/download",
+        label="下载基础地址",
+        strip_trailing_slash=True,
+    )
+    release_url = _validated_url(
+        release_url or f"https://github.com/{repository}/releases/tag/{tag}",
+        label="Release 页面地址",
+    )
+    if fallback_download_base_url:
+        fallback_download_base_url = _validated_url(
+            fallback_download_base_url,
+            label="备用下载基础地址",
+            strip_trailing_slash=True,
+        )
     windows_zip = f"HRToolkit-{version}-win-update.zip"
     platforms = {
         "windows": _asset_payload(
             assets_dir,
-            repository,
             tag,
             version,
             windows_zip,
             update_mode="auto",
+            download_base_url=download_base_url,
+            fallback_download_base_url=fallback_download_base_url,
         )
     }
     if mac_variant == "universal2":
         mac_name = f"HRToolkit_{version}_universal.dmg"
         platforms["macos"] = _asset_payload(
             assets_dir,
-            repository,
             tag,
             version,
             mac_name,
             update_mode="manual",
+            download_base_url=download_base_url,
+            fallback_download_base_url=fallback_download_base_url,
         )
     else:
         for platform_key, suffix in (("macos-arm64", "arm64"), ("macos-x64", "x64")):
             mac_name = f"HRToolkit_{version}_{suffix}.dmg"
             platforms[platform_key] = _asset_payload(
                 assets_dir,
-                repository,
                 tag,
                 version,
                 mac_name,
                 update_mode="manual",
+                download_base_url=download_base_url,
+                fallback_download_base_url=fallback_download_base_url,
             )
 
     return {
         "version": version,
         "mandatory": mandatory,
         "notes": list(notes),
-        "release_url": f"https://github.com/{repository}/releases/tag/{tag}",
+        "release_url": release_url,
         "platforms": platforms,
     }
 
@@ -193,10 +231,13 @@ def generate_release_metadata(
     project_version: str,
     notes: Optional[Sequence[str]] = None,
     mandatory: bool = True,
+    download_base_url: str | None = None,
+    release_url: str | None = None,
+    fallback_download_base_url: str | None = None,
 ) -> tuple[Path, Path, tuple[str, ...]]:
     validate_release_identity(version, tag, project_version)
     if not REPOSITORY_PATTERN.fullmatch(repository):
-        raise ReleaseMetadataError(f"GitHub 仓库名必须是 owner/repo：{repository!r}")
+        raise ReleaseMetadataError(f"仓库名必须是 owner/repo：{repository!r}")
     mac_variant = detect_mac_variant(assets_dir, version)
     asset_names = release_asset_names(version, mac_variant=mac_variant)
     _validate_asset_directory(assets_dir, asset_names)
@@ -213,6 +254,9 @@ def generate_release_metadata(
         notes=normalized_notes,
         mandatory=mandatory,
         mac_variant=mac_variant,
+        download_base_url=download_base_url,
+        release_url=release_url,
+        fallback_download_base_url=fallback_download_base_url,
     )
     latest_path = assets_dir / "latest.json"
     _atomic_write_text(latest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
@@ -225,17 +269,26 @@ def generate_release_metadata(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="验证跨平台资产并生成 GitHub Release 元数据")
+    parser = argparse.ArgumentParser(description="验证跨平台资产并生成 Release 元数据")
     parser.add_argument("--version", required=True, help="严格 MAJOR.MINOR.PATCH 版本")
     parser.add_argument("--tag", help="Git Tag，默认 v<version>")
     parser.add_argument("--assets-dir", type=Path, default=Path("release-assets"))
     parser.add_argument(
         "--repository",
         default=os.environ.get("GITHUB_REPOSITORY", "xhzwjc/hr-toolkit"),
-        help="GitHub owner/repo",
+        help="owner/repo（默认 GitHub 主仓库）",
     )
     parser.add_argument("--project-version-file", type=Path, default=VERSION_FILE)
     parser.add_argument("--notes", nargs="*", help="latest.json 更新说明")
+    parser.add_argument(
+        "--download-base-url",
+        help="资产下载基础地址，默认 GitHub releases/download",
+    )
+    parser.add_argument("--release-url", help="latest.json 中的 Release 页面地址")
+    parser.add_argument(
+        "--fallback-download-base-url",
+        help="资产备用下载基础地址；Gitee 镜像使用 GitHub 作为备用",
+    )
     parser.add_argument("--optional", action="store_true", help="将更新标记为非强制")
     parser.add_argument("--check-only", action="store_true", help="只检查 Tag 与项目版本，不读取资产")
     return parser
@@ -259,10 +312,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         project_version=project_version,
         notes=args.notes,
         mandatory=not args.optional,
+        download_base_url=args.download_base_url,
+        release_url=args.release_url,
+        fallback_download_base_url=args.fallback_download_base_url,
     )
     print(f"已生成：{latest_path}")
     print(f"已生成：{checksums_path}")
-    print("GitHub Release 直接资产：")
+    print("Release 直接资产：")
     for name in sorted(asset_names):
         print(f"- {name}")
     return 0

@@ -1,20 +1,26 @@
 {
-  "version": "0.2.1",
+  "version": "0.2.3",
   "mandatory": true,
   "notes": [
-    "一次性迁移到 GitHub Release",
+    "国内默认使用 Gitee 下载，失败时自动回退 GitHub",
     "Windows 保留 ZIP 自动更新，macOS 使用 DMG 手动更新"
   ],
   "platforms": {
     "windows": {
-      "version": "0.2.1",
-      "file_url": "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/HRToolkit-0.2.1-win-update.zip",
+      "version": "0.2.3",
+      "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/v0.2.3/HRToolkit-0.2.3-win-update.zip",
+      "fallback_urls": [
+        "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.3/HRToolkit-0.2.3-win-update.zip"
+      ],
       "sha256": "由发布工作流写入更新ZIP的SHA256",
       "update_mode": "auto"
     },
     "macos": {
-      "version": "0.2.1",
-      "file_url": "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/HRToolkit_0.2.1_universal.dmg",
+      "version": "0.2.3",
+      "file_url": "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/v0.2.3/HRToolkit_0.2.3_universal.dmg",
+      "fallback_urls": [
+        "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.3/HRToolkit_0.2.3_universal.dmg"
+      ],
       "sha256": "由发布工作流写入DMG的SHA256",
       "update_mode": "manual"
     }

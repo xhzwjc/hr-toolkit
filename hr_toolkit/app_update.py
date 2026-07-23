@@ -16,12 +16,23 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import certifi
 
 
-DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json"
+GITEE_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
+GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
+GITEE_LATEST_RELEASE_API_URL = f"https://gitee.com/api/v5/repos/{GITEE_REPOSITORY}/releases/latest"
+GITHUB_LATEST_MANIFEST_URL = (
+    f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/latest.json"
+)
+DEFAULT_UPDATE_MANIFEST_URLS = (
+    GITEE_LATEST_RELEASE_API_URL,
+    GITHUB_LATEST_MANIFEST_URL,
+)
+# 保留单地址常量，兼容已有调用；默认值现在是国内 Gitee 源。
+DEFAULT_UPDATE_MANIFEST_URL = DEFAULT_UPDATE_MANIFEST_URLS[0]
 UPDATE_URL_ENV = "HR_TOOLKIT_UPDATE_URL"
 SKIP_UPDATE_ENV = "HR_TOOLKIT_SKIP_UPDATE"
 FORCE_UPDATE_ENV = "HR_TOOLKIT_FORCE_UPDATE_CHECK"
@@ -49,6 +60,11 @@ class UpdateInfo:
     mandatory: bool
     manifest_url: str
     update_mode: str = "auto"
+    fallback_urls: tuple[str, ...] = ()
+
+    @property
+    def download_urls(self) -> tuple[str, ...]:
+        return _dedupe_urls((self.file_url, *self.fallback_urls))
 
 
 def create_https_context() -> ssl.SSLContext:
@@ -78,26 +94,56 @@ def update_check_enabled() -> bool:
 
 
 def update_manifest_url() -> str:
-    env_url = os.environ.get(UPDATE_URL_ENV, "").strip()
-    if env_url:
-        return env_url
-    config_url = _read_update_url_file()
-    if config_url:
-        return config_url
-    return DEFAULT_UPDATE_MANIFEST_URL
+    return update_manifest_urls()[0]
+
+
+def update_manifest_urls() -> tuple[str, ...]:
+    env_urls = _normalize_url_lines(os.environ.get(UPDATE_URL_ENV, ""))
+    if env_urls:
+        return env_urls
+    config_urls = _read_update_url_files()
+    if config_urls:
+        return config_urls
+    return DEFAULT_UPDATE_MANIFEST_URLS
 
 
 def check_for_update(current_version: str, manifest_url: str | None = None, platform: str | None = None) -> UpdateInfo | None:
-    manifest_url = manifest_url or update_manifest_url()
-    manifest = fetch_update_manifest(manifest_url)
-    remote_version = manifest_version(manifest, platform=platform or platform_key())
-    if not is_newer_version(remote_version, current_version):
-        return None
-    return parse_update_manifest(manifest, manifest_url=manifest_url, platform=platform or platform_key())
+    manifest_urls = (manifest_url,) if manifest_url else update_manifest_urls()
+    selected_platform = platform or platform_key()
+    errors: list[str] = []
+    for candidate_url in manifest_urls:
+        try:
+            manifest, resolved_manifest_url = load_update_manifest(candidate_url)
+            remote_version = manifest_version(manifest, platform=selected_platform)
+            if not is_newer_version(remote_version, current_version):
+                return None
+            return parse_update_manifest(
+                manifest,
+                manifest_url=resolved_manifest_url,
+                platform=selected_platform,
+            )
+        except Exception as exc:
+            errors.append(f"{_update_source_name(candidate_url)}：{exc}")
+    raise UpdateError("所有更新源均不可用，已按顺序尝试：" + "；".join(errors))
 
 
 def fetch_update_manifest(manifest_url: str, timeout: int = 10) -> dict[str, Any]:
-    request = urllib.request.Request(manifest_url, headers={"User-Agent": USER_AGENT})
+    manifest, _resolved_url = load_update_manifest(manifest_url, timeout=timeout)
+    return manifest
+
+
+def load_update_manifest(manifest_url: str, timeout: int = 10) -> tuple[dict[str, Any], str]:
+    data = _fetch_json_object(manifest_url, timeout=timeout)
+    if _is_release_discovery_url(manifest_url):
+        asset_url = _find_manifest_asset_url(data)
+        if not asset_url:
+            raise UpdateError("最新 Release 缺少 latest.json 附件。")
+        return _fetch_json_object(asset_url, timeout=timeout), asset_url
+    return data, manifest_url
+
+
+def _fetch_json_object(url: str, *, timeout: int) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with _open_url(request, timeout=timeout) as response:
             payload = response.read().decode("utf-8-sig")
@@ -127,6 +173,10 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
     notes_value = platform_payload.get("notes", manifest.get("notes", ()))
     default_update_mode = "manual" if platform == "macos" else "auto"
     update_mode = str(platform_payload.get("update_mode") or default_update_mode).strip().lower()
+    fallback_urls = _normalize_manifest_urls(
+        platform_payload.get("fallback_urls") or platform_payload.get("fallback_url"),
+        manifest_url,
+    )
 
     if not version:
         raise UpdateError("更新配置缺少 version。")
@@ -147,6 +197,7 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
         mandatory=mandatory,
         manifest_url=manifest_url,
         update_mode=update_mode,
+        fallback_urls=tuple(url for url in fallback_urls if url != file_url),
     )
 
 
@@ -170,33 +221,52 @@ def download_update_package(
     filename = Path(urllib.parse.urlparse(update.file_url).path).name or f"HRToolkit-{update.version}.zip"
     final_path = dest_dir / filename
     temp_path = dest_dir / f"{filename}.download"
-    request = urllib.request.Request(update.file_url, headers={"User-Agent": USER_AGENT})
-
-    try:
-        with _open_url(request, timeout=60) as response:
-            total = int(response.headers.get("Content-Length") or 0)
-            _ensure_disk_space(dest_dir, total)
-            downloaded = 0
-            with temp_path.open("wb") as output:
-                while True:
-                    chunk = response.read(1024 * 256)
-                    if not chunk:
-                        break
-                    output.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback is not None:
-                        progress_callback(downloaded, total)
-        os.replace(temp_path, final_path)
-    except Exception as exc:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise UpdateError(f"更新包下载失败：{exc}；下载地址：{update.file_url}") from exc
-
-    actual_sha256 = sha256_file(final_path)
-    if actual_sha256.lower() != update.sha256.lower():
+    failures: list[str] = []
+    for download_url in update.download_urls:
+        request = urllib.request.Request(download_url, headers={"User-Agent": USER_AGENT})
+        temp_path.unlink(missing_ok=True)
         final_path.unlink(missing_ok=True)
-        raise UpdateError("更新包校验失败，请检查 latest.json 中的 sha256。")
-    return final_path
+        try:
+            with _open_url(request, timeout=60) as response:
+                total = int(response.headers.get("Content-Length") or 0)
+                _ensure_disk_space(dest_dir, total)
+                downloaded = 0
+                with temp_path.open("wb") as output:
+                    while True:
+                        chunk = response.read(1024 * 256)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback is not None:
+                            progress_callback(downloaded, total)
+            os.replace(temp_path, final_path)
+            actual_sha256 = sha256_file(final_path)
+            if actual_sha256.lower() != update.sha256.lower():
+                raise UpdateError("更新包 SHA256 校验失败。")
+            return final_path
+        except Exception as exc:
+            temp_path.unlink(missing_ok=True)
+            final_path.unlink(missing_ok=True)
+            failures.append(f"{_update_source_name(download_url)}：{exc}")
+    raise UpdateError("更新包下载失败，已按顺序尝试：" + "；".join(failures))
+
+
+def resolve_download_url(update: UpdateInfo, timeout: int = 10) -> str:
+    """Return the first reachable package URL without downloading its body."""
+    failures: list[str] = []
+    for download_url in update.download_urls:
+        request = urllib.request.Request(
+            download_url,
+            headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"},
+            method="GET",
+        )
+        try:
+            with _open_url(request, timeout=timeout):
+                return download_url
+        except Exception as exc:
+            failures.append(f"{_update_source_name(download_url)}：{exc}")
+    raise UpdateError("更新包地址均不可用，已按顺序尝试：" + "；".join(failures))
 
 
 def launch_update_replacement(
@@ -359,15 +429,19 @@ def current_launcher_path() -> Path:
 
 
 def _read_update_url_file() -> str | None:
+    urls = _read_update_url_files()
+    return urls[0] if urls else None
+
+
+def _read_update_url_files() -> tuple[str, ...]:
     for parent in _update_url_search_dirs():
         path = parent / UPDATE_URL_FILE
         if not path.exists():
             continue
-        for line in path.read_text(encoding="utf-8-sig").splitlines():
-            value = line.strip()
-            if value and not value.startswith("#"):
-                return value
-    return None
+        urls = _normalize_url_lines(path.read_text(encoding="utf-8-sig"))
+        if urls:
+            return urls
+    return ()
 
 
 def _update_url_search_dirs() -> tuple[Path, ...]:
@@ -437,6 +511,65 @@ def _normalize_notes(value: Any) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item).strip() for item in value if str(item).strip())
     return ()
+
+
+def _normalize_manifest_urls(value: Any, manifest_url: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values: Iterable[Any] = (value,)
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = ()
+    urls = (
+        urllib.parse.urljoin(manifest_url, str(item).strip())
+        for item in values
+        if str(item).strip()
+    )
+    return _dedupe_urls(urls)
+
+
+def _normalize_url_lines(value: str) -> tuple[str, ...]:
+    return _dedupe_urls(
+        line.strip()
+        for line in value.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+
+
+def _dedupe_urls(urls: Iterable[str]) -> tuple[str, ...]:
+    unique: list[str] = []
+    for url in urls:
+        normalized = str(url).strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return tuple(unique)
+
+
+def _is_release_discovery_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.path.rstrip("/").endswith("/releases/latest")
+
+
+def _find_manifest_asset_url(release: dict[str, Any]) -> str | None:
+    assets = release.get("assets") or release.get("attach_files")
+    if not isinstance(assets, list):
+        return None
+    for asset in assets:
+        if not isinstance(asset, dict) or str(asset.get("name", "")).strip() != "latest.json":
+            continue
+        url = str(asset.get("browser_download_url") or asset.get("url") or "").strip()
+        if url:
+            return url
+    return None
+
+
+def _update_source_name(url: str) -> str:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host == "gitee.com" or host.endswith(".gitee.com"):
+        return "Gitee 国内源"
+    if host == "github.com" or host.endswith(".github.com") or host.endswith("githubusercontent.com"):
+        return "GitHub 备用源"
+    return url
 
 
 def _manifest_version_from_payload(platform_payload: dict[str, Any], manifest: dict[str, Any]) -> str:
