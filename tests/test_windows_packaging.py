@@ -169,6 +169,10 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('DestDir: "{app}\\app"', iss)
         self.assertIn('Type: filesandordirs; Name: "{app}\\app"', iss)
         self.assertIn("SignTool={#SignToolName}", iss)
+        self.assertIn(
+            'MessagesFile: "compiler:Languages\\Unofficial\\ChineseSimplified.isl"',
+            iss,
+        )
 
         tree = ET.parse(build_windows_installers.WIX_SOURCE)
         root = tree.getroot()
