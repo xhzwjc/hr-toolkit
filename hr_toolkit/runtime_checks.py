@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -42,6 +43,7 @@ def smoke_test() -> None:
     import openpyxl  # noqa: F401
     import xlrd  # noqa: F401
     from hr_toolkit.app_update import create_https_context
+    from hr_toolkit.project_store import ProjectStore
 
     # Loading the context proves that PyInstaller included certifi's CA bundle.
     create_https_context()
@@ -50,6 +52,30 @@ def smoke_test() -> None:
         with open_template_resource(template_name) as handle:
             if not zipfile.is_zipfile(handle):
                 raise RuntimeError(f"模板资源不是有效的 xlsx：{template_name}")
+
+    with tempfile.TemporaryDirectory(prefix="hr_toolkit_smoke_") as temp_root:
+        # macOS 上 tempfile 可能返回经过 /var -> /private/var 的系统链接；
+        # 运行检查使用真实路径，不降低项目对链接路径的安全限制。
+        project_root = Path(temp_root).resolve() / "project"
+        with ProjectStore.create(project_root, "运行检查项目") as project:
+            draft = project.create_draft_batch(
+                group_name="薪酬管理",
+                tool_id="salary_split",
+                tool_name="工资表拆分",
+                business_description="运行检查",
+                business_period="临时",
+            )
+            batch_id = draft.summary.id
+            project.start_processing(batch_id)
+            project.mark_success(batch_id)
+            detail = project.get_batch(batch_id)
+            if (
+                detail is None
+                or detail.summary.status != "success"
+                or not (project_root / ".hrtoolkit").is_dir()
+                or not project.verify_batch_files(batch_id)
+            ):
+                raise RuntimeError("本地项目工作区运行检查失败。")
 
     if getattr(sys, "frozen", False):
         bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))

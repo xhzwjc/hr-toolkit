@@ -63,8 +63,28 @@ FORBIDDEN_PAYLOAD_PARTS = {
     "test",
     "outputs",
     "output",
+    ".hrtoolkit",
+    "上传资料",
+    "处理结果",
+    "补充资料",
+    "共用资料",
     "附件",
     "二期新增的附件",
+}
+FORBIDDEN_DATA_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+FORBIDDEN_DATA_FILENAMES = {
+    "history.db-wal",
+    "history.db-shm",
+    "history.db-journal",
+    "history.db.bak",
+    "history.db.backup",
+    ".hrtoolkit-data-v1",
+    ".archive.lock",
+    ".manifest.lock",
+    ".database-access.lock",
+    ".database-recovery-pending.json",
+    ".project.lock",
+    "project-write.lock",
 }
 
 
@@ -329,8 +349,14 @@ def verify_windows_payload(app_dir: Path) -> None:
         lowered_parts = {part.lower() for part in relative.parts}
         if lowered_parts & {part.lower() for part in FORBIDDEN_PAYLOAD_PARTS}:
             raise RuntimeError(f"程序包包含禁止目录或缓存：{relative}")
-        if path.suffix.lower() in {".log", ".xlsm", ".xls"}:
-            raise RuntimeError(f"程序包包含非白名单数据文件：{relative}")
+        if path.suffix.lower() in {".log", ".xlsm", ".xls"} | FORBIDDEN_DATA_SUFFIXES:
+            raise RuntimeError(f"程序包包含非白名单或用户项目数据：{relative}")
+        if (
+            path.name.lower() in FORBIDDEN_DATA_FILENAMES
+            or path.name.lower().startswith("history.db")
+            or path.name.lower().startswith(".trash-move-")
+        ):
+            raise RuntimeError(f"程序包包含非白名单或用户项目数据：{relative}")
         if path.suffix.lower() == ".xlsx" and not _is_template_payload_path(relative):
             raise RuntimeError(f"程序包包含模板目录之外的 Excel：{relative}")
 

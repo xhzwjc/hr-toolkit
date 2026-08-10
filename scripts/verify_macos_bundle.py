@@ -17,12 +17,32 @@ DEFAULT_README = REPO_ROOT / "README.md"
 EXPECTED_BUNDLE_IDENTIFIER = "com.xhzwjc.hrtoolkit"
 ARCHITECTURES = {"universal2", "x86_64", "arm64"}
 SPREADSHEET_SUFFIXES = {".csv", ".tsv", ".xls", ".xlsb", ".xlsm", ".xlsx"}
+PROHIBITED_DATA_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+PROHIBITED_DATA_FILENAMES = {
+    "history.db-wal",
+    "history.db-shm",
+    "history.db-journal",
+    "history.db.bak",
+    "history.db.backup",
+    ".hrtoolkit-data-v1",
+    ".archive.lock",
+    ".manifest.lock",
+    ".database-access.lock",
+    ".database-recovery-pending.json",
+    ".project.lock",
+    "project-write.lock",
+}
 PROHIBITED_PATH_PARTS = {
     ".git",
     ".github",
     "__pycache__",
     "attachments",
     "outputs",
+    ".hrtoolkit",
+    "上传资料",
+    "处理结果",
+    "补充资料",
+    "共用资料",
     "tests",
     "testdata",
     "test_data",
@@ -137,6 +157,13 @@ def verify_packaged_resources(
             raise MacBundleVerificationError(f"Bundle 包含禁止目录 {sorted(prohibited)}：{path}")
         if path.suffix.lower() == ".log":
             raise MacBundleVerificationError(f"Bundle 包含日志：{path}")
+        if (
+            path.suffix.lower() in PROHIBITED_DATA_SUFFIXES
+            or path.name.lower() in PROHIBITED_DATA_FILENAMES
+            or path.name.lower().startswith("history.db")
+            or path.name.lower().startswith(".trash-move-")
+        ):
+            raise MacBundleVerificationError(f"Bundle 包含用户项目数据：{path}")
         if path.suffix.lower() in SPREADSHEET_SUFFIXES:
             packaged_spreadsheets.append(path)
         if path.name == "README.md" and _sha256(path) == _sha256(readme_path):

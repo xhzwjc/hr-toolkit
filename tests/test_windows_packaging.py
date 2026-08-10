@@ -12,6 +12,7 @@ from scripts import build_update_assets
 from scripts import build_windows
 from scripts import build_windows_installers
 from scripts import release_windows
+from scripts import verify_macos_bundle
 from hr_toolkit.runtime_checks import TEMPLATE_NAMES
 
 
@@ -86,11 +87,96 @@ class WindowsPackagingTests(unittest.TestCase):
                 build_windows.verify_windows_payload(app_dir)
             forbidden.unlink()
 
+            project_db = app_dir / "_internal" / "project.db"
+            project_db.write_bytes(b"private project index")
+            with self.assertRaisesRegex(RuntimeError, "用户项目数据"):
+                build_windows.verify_windows_payload(app_dir)
+            project_db.unlink()
+
+            project_metadata = app_dir / "_internal" / ".hrtoolkit"
+            for relative in (
+                Path("project.json"),
+                Path("index.db"),
+                Path("manifests") / "batch.json",
+                Path("project-write.lock"),
+            ):
+                project_artifact = project_metadata / relative
+                project_artifact.parent.mkdir(parents=True, exist_ok=True)
+                project_artifact.write_bytes(b"private project metadata")
+                with self.assertRaisesRegex(RuntimeError, "禁止目录"):
+                    build_windows.verify_windows_payload(app_dir)
+                project_artifact.unlink()
+
+            uploaded_zip = app_dir / "_internal" / "上传资料" / "薪酬管理" / "工资表拆分" / "8月工资" / "工资.zip"
+            uploaded_zip.parent.mkdir(parents=True)
+            uploaded_zip.write_bytes(b"private upload")
+            with self.assertRaisesRegex(RuntimeError, "禁止目录或缓存"):
+                build_windows.verify_windows_payload(app_dir)
+            uploaded_zip.unlink()
+
+            result_pdf = app_dir / "_internal" / "处理结果" / "社保与保险" / "保险台账" / "8月" / "结果.pdf"
+            result_pdf.parent.mkdir(parents=True)
+            result_pdf.write_bytes(b"private result")
+            with self.assertRaisesRegex(RuntimeError, "禁止目录或缓存"):
+                build_windows.verify_windows_payload(app_dir)
+            result_pdf.unlink()
+
+            supplement = app_dir / "_internal" / "补充资料" / "人员与档案" / "说明.docx"
+            supplement.parent.mkdir(parents=True)
+            supplement.write_bytes(b"private supplement")
+            with self.assertRaisesRegex(RuntimeError, "禁止目录或缓存"):
+                build_windows.verify_windows_payload(app_dir)
+            supplement.unlink()
+
+            common_file = app_dir / "_internal" / "共用资料" / "员工花名册.xlsx"
+            common_file.parent.mkdir(parents=True)
+            common_file.write_bytes(b"private common material")
+            with self.assertRaisesRegex(RuntimeError, "禁止目录或缓存"):
+                build_windows.verify_windows_payload(app_dir)
+            common_file.unlink()
+
+            # 一般依赖可以合法使用这些通用名称；只有项目专用
+            # `.hrtoolkit` 和可见的上传/结果目录才是数据泄漏信号。
+            dependency_manifest = app_dir / "_internal" / "dependency" / "records" / "trash" / "manifest.json"
+            dependency_manifest.parent.mkdir(parents=True)
+            dependency_manifest.write_text("{}", encoding="utf-8")
+            build_windows.verify_windows_payload(app_dir)
+            dependency_manifest.unlink()
+
             cache = app_dir / "_internal" / "__pycache__" / "module.pyc"
             cache.parent.mkdir()
             cache.write_bytes(b"cache")
             with self.assertRaisesRegex(RuntimeError, "禁止目录或缓存"):
                 build_windows.verify_windows_payload(app_dir)
+
+    def test_macos_resource_verifier_rejects_project_metadata_without_blocking_generic_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = Path(tmp) / "HRToolkit.app"
+            resources = app_dir / "Contents" / "Resources"
+            templates = resources / "hr_toolkit" / "templates"
+            templates.mkdir(parents=True)
+            for template in verify_macos_bundle.DEFAULT_TEMPLATE_DIR.glob("*.xlsx"):
+                (templates / template.name).write_bytes(template.read_bytes())
+            (resources / "README.md").write_bytes(verify_macos_bundle.DEFAULT_README.read_bytes())
+
+            dependency_manifest = resources / "dependency" / "records" / "trash" / "manifest.json"
+            dependency_manifest.parent.mkdir(parents=True)
+            dependency_manifest.write_text("{}", encoding="utf-8")
+            verify_macos_bundle.verify_packaged_resources(app_dir)
+
+            project_marker = resources / ".hrtoolkit" / "project.json"
+            project_marker.parent.mkdir()
+            project_marker.write_text("private", encoding="utf-8")
+            with self.assertRaisesRegex(verify_macos_bundle.MacBundleVerificationError, "禁止目录"):
+                verify_macos_bundle.verify_packaged_resources(app_dir)
+
+            project_marker.unlink()
+            project_marker.parent.rmdir()
+            common_file = resources / "共用资料" / "员工花名册.xlsx"
+            common_file.parent.mkdir()
+            common_file.write_text("private", encoding="utf-8")
+            with self.assertRaisesRegex(verify_macos_bundle.MacBundleVerificationError, "禁止目录"):
+                verify_macos_bundle.verify_packaged_resources(app_dir)
 
     def test_pe_machine_verification_requires_amd64(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

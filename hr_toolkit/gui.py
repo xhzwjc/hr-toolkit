@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import calendar
+import errno
+import importlib
+import inspect
+import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox
-from tkinter import Tk, StringVar, Text
+from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox, simpledialog
+from tkinter import Tk, StringVar, Text, TkVersion
 from tkinter import font as tkfont
 from tkinter import ttk
 
@@ -23,6 +28,13 @@ from hr_toolkit.app_update import (
     launch_update_replacement,
     resolve_download_url,
     update_check_enabled,
+)
+from hr_toolkit.history_store import (
+    HISTORY_PAGE_SIZE,
+    HistoryStore,
+    HistoryStoreError,
+    SourceSpec,
+    TaskDetail,
 )
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
@@ -97,6 +109,51 @@ MULTI_INPUT_TOOLS = {
     "personnel_change_merge",
     "archive_import",
 }
+HISTORY_STATUS_LABELS = {
+    "running": "处理中",
+    "success": "已完成",
+    "failed": "处理失败",
+    "stopped": "未完成",
+}
+HISTORY_TOOL_FILTER_ALL = "全部功能"
+HISTORY_DATE_FILTER_ALL = "全部时间"
+HISTORY_DATE_FILTERS = (HISTORY_DATE_FILTER_ALL, "今天", "最近7天", "最近30天", "今年")
+HISTORY_PRIMARY_PATH_ARGUMENTS = {"input_path", "input_dir", "summary_input", "summary_path"}
+HISTORY_SUPPORTING_PATH_ARGUMENTS = {
+    "roster_path",
+    "report_staff_path",
+    "existing_summary_path",
+    "template_path",
+    "analysis_template_path",
+    "target_path",
+    "existing_archive_path",
+}
+HISTORY_PATH_ARGUMENTS = HISTORY_PRIMARY_PATH_ARGUMENTS | HISTORY_SUPPORTING_PATH_ARGUMENTS
+
+WORKSPACE_DEFAULT_WIDTH = 320
+WORKSPACE_MIN_WIDTH = 270
+WORKSPACE_MAX_WIDTH = 430
+WORKSPACE_COLLAPSED_WIDTH = 46
+WORKSPACE_DRAWER_BREAKPOINT = 980
+WORKSPACE_SEARCH_LIMIT = 500
+WORKSPACE_DUMMY_TAG = "__workspace_dummy__"
+WORKSPACE_SCOPE_ALL = "all"
+WORKSPACE_SCOPE_TOOL = "tool"
+WORKSPACE_TOOL_PATHS = {
+    "social_security": ("社保与保险", "社保明细与汇总"),
+    "insurance_ledger": ("社保与保险", "保险台账与预警"),
+    "data_statistics": ("考勤与统计", "考勤与周月报"),
+    "salary_split": ("薪酬管理", "工资表拆分"),
+    "salary_merge": ("薪酬管理", "多月工资合并"),
+    "folder_rename": ("人员与档案", "资料文件夹改名"),
+}
+WORKSPACE_HIDDEN_NAMES = {
+    ".hrtoolkit",
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+}
+WORKSPACE_HIDDEN_SUFFIXES = (".partial", ".tmp", ".temp", ".lock")
 
 # “从容舒适 · Notion / macOS 风”暖纸色系：暖纸底色、深青主色、
 # 白色卡片分区、时间线式日志（对应设计稿方案 1b）。
@@ -123,6 +180,7 @@ COLOR_SUCCESS = "#1F7A52"
 COLOR_SUCCESS_DOT = "#2E9E6B"
 COLOR_WARNING = "#A05E12"
 COLOR_WARNING_DOT = "#D9A441"
+COLOR_WARNING_SOFT = "#F8EBD2"
 COLOR_DANGER = "#B0352B"
 COLOR_LOG_BG = "#ffffff"
 COLOR_LOG_TEXT = "#292825"
@@ -264,14 +322,190 @@ def _configure_tk_font_scaling(root: Tk, ui_scale: float) -> None:
 def _font_size(size: int) -> int:
     """把设计字号（Windows 96dpi 基准）换算成当前平台的 Tk 字号。
 
-    macOS 的 aqua 后端把“点”直接按像素渲染（72dpi 假设），且完全忽略
-    tk scaling 设置，同样的数值在 Mac 上只有 Windows 上的 3/4 大，
-    造成“布局一致、字明显偏小”。这里放大 4/3 对齐设计基准；
-    Windows/Linux 走 tk scaling 机制，原值返回。
+    Tk 8.6 的 macOS aqua 后端把“点”直接按像素渲染，同样的数值只有
+    Windows 96dpi 基准的 3/4 大，因此需要放大 4/3。Tk 8.7 起已修复
+    这个历史行为，继续补偿会造成二次放大；Windows/Linux 原值返回。
     """
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and TkVersion < 8.7:
         return max(1, round(size * 4 / 3))
     return size
+
+
+def _default_workspace_project_name(today_value: date | None = None) -> str:
+    current = today_value or date.today()
+    return f"{current.year}年{current.month}月人事月度工作"
+
+
+def _workspace_project_name_error(value: str) -> str | None:
+    # 创建项目时以后端校验为最终标准，避免界面显示“可以创建”，提交后却因
+    # Windows 保留名、隐藏元数据目录或长度等规则再次失败。动态加载保留了
+    # 项目后端缺失时 GUI 仍可启动的既有边界。
+    try:
+        module = importlib.import_module("hr_toolkit.project_store")
+        validator = getattr(module, "validate_project_name", None)
+        validation_error = getattr(module, "ProjectStoreError", None)
+    except Exception:
+        validator = None
+        validation_error = None
+    if callable(validator) and isinstance(validation_error, type):
+        try:
+            validator(value)
+        except validation_error as exc:
+            return str(exc)
+        return None
+
+    # 后端模块不可用时，新建入口本身会被禁用；这里仍保留同规则兜底，保证
+    # 已打开的弹窗不会因模块异常而接受不安全名称。
+    project_name = str(value).strip()
+    if not project_name:
+        return "项目名称不能为空。"
+    if len(project_name) > 120:
+        return "项目名称不能超过 120 个字。"
+    if project_name in {".", ".."}:
+        return "项目名称不能使用英文句点。"
+    if project_name.endswith("."):
+        return "项目名称末尾不能使用句点。"
+    if any(ord(character) < 32 for character in project_name):
+        return "项目名称不能包含换行或控制字符。"
+    if any(character in '<>:"/\\|?*' for character in project_name):
+        return '项目名称不能包含 \\ / : * ? " < > |。'
+    if project_name.casefold() == ".hrtoolkit":
+        return "该名称是项目保留名称，请换一个名称。"
+    portable_base = project_name.split(".", 1)[0].casefold()
+    windows_reserved = {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+    }
+    if portable_base in windows_reserved:
+        return "该名称是 Windows 系统保留名称，请换一个名称。"
+    return None
+
+
+def _workspace_project_creation_target(parent_value: str, name_value: str) -> tuple[Path | None, str | None]:
+    name_error = _workspace_project_name_error(name_value)
+    parent_text = str(parent_value).strip()
+    if not parent_text:
+        return None, name_error or "请选择保存位置。"
+
+    parent_dir = Path(parent_text).expanduser().absolute()
+    project_name = str(name_value).strip()
+    project_root = parent_dir / project_name if project_name else None
+    if name_error:
+        return project_root, name_error
+    try:
+        if not parent_dir.is_dir():
+            return project_root, "保存位置已不可用，请重新选择。"
+        if project_root is not None and project_root.exists():
+            if not project_root.is_dir():
+                return project_root, "同名位置已被文件占用，请修改项目名称。"
+            if next(project_root.iterdir(), None) is not None:
+                return project_root, "这里已有同名文件夹，请修改项目名称；如需继续以前的工作，请打开已有项目。"
+    except OSError:
+        return project_root, "暂时无法读取这个保存位置，请重新选择。"
+    return project_root, None
+
+
+def _workspace_project_create_error_message(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "没有权限在这里创建项目，请选择“文档”等本机文件夹。"
+    if isinstance(exc, FileNotFoundError):
+        return "保存位置已不可用，请重新选择。"
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
+        return "磁盘空间不足，无法创建项目。"
+    detail = str(exc).strip()
+    return detail or "暂时无法在这里创建项目，请检查磁盘连接或写入权限。"
+
+
+def _workspace_trash_period_label(value: str) -> str:
+    text = str(value or "").strip()
+    try:
+        year_text, month_text = text.split("-", 1)
+        year = int(year_text)
+        month = int(month_text)
+    except (TypeError, ValueError):
+        return text
+    if 1 <= month <= 12 and 1900 <= year <= 9999:
+        return f"{year}年{month}月"
+    return text
+
+
+def _workspace_trash_title(detail) -> str:
+    summary = getattr(detail, "summary", None)
+    period = _workspace_trash_period_label(getattr(summary, "business_period", ""))
+    description = str(getattr(summary, "business_description", "") or "").strip()
+    directory_name = str(getattr(summary, "directory_name", "") or "").strip()
+    return description or period or directory_name or "处理记录"
+
+
+def _workspace_trash_group_tool(detail, *, separator: str = " · ") -> str:
+    summary = getattr(detail, "summary", None)
+    group_name = str(getattr(summary, "group_name", "") or "").strip()
+    tool_name = str(getattr(summary, "tool_name", "") or "").strip()
+    return separator.join(value for value in (group_name, tool_name) if value) or "功能信息待确认"
+
+
+def _workspace_trash_restore_location(detail) -> str:
+    summary = getattr(detail, "summary", None)
+    group_name = str(getattr(summary, "group_name", "") or "").strip()
+    tool_name = str(getattr(summary, "tool_name", "") or "").strip()
+    # 旧项目若缺少分组或功能名称，只取原位置前两级作为兜底；批次目录通常
+    # 含机器时间戳，不能把它暴露给人事用户。
+    original_parts = [
+        part.strip()
+        for part in str(getattr(detail, "original_relative_path", "") or "").replace("\\", "/").split("/")
+        if part.strip()
+    ]
+    if not group_name and original_parts:
+        group_name = original_parts[0]
+    if not tool_name and len(original_parts) >= 2:
+        tool_name = original_parts[1]
+    return " / ".join(value for value in (group_name, tool_name) if value) or "原业务位置"
+
+
+def _workspace_trash_dialog_height(preferred: int, required: int, maximum: int) -> int:
+    preferred_height = max(1, int(preferred))
+    required_height = max(1, int(required))
+    maximum_height = max(1, int(maximum))
+    return min(max(preferred_height, required_height), maximum_height)
+
+
+def _workspace_trash_ignore_enter(_event=None) -> str:
+    return "break"
+
+
+def _workspace_trash_matches(detail, query: str) -> bool:
+    normalized = str(query or "").strip().casefold()
+    if not normalized:
+        return True
+    summary = getattr(detail, "summary", None)
+    values = (
+        getattr(summary, "business_period", ""),
+        getattr(summary, "business_description", ""),
+        getattr(summary, "group_name", ""),
+        getattr(summary, "tool_name", ""),
+        getattr(summary, "directory_name", ""),
+        getattr(detail, "original_relative_path", ""),
+        _workspace_trash_title(detail),
+        _workspace_trash_group_tool(detail),
+    )
+    return any(normalized in str(value or "").casefold() for value in values)
+
+
+def _workspace_trash_deleted_text(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "移入时间未知"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return raw
 
 
 def _widget_ui_scale(widget) -> float:
@@ -684,19 +918,20 @@ class HRToolkitApp:
         self.root = root
         self.ui_scale = _detect_ui_scale(root)
         setattr(self.root, "_hr_ui_scale", self.ui_scale)
-        # Windows 依赖 tk scaling 把“点”字号按 DPI 转像素；
-        # macOS 的 aqua 后端忽略 tk scaling，字号统一走 _font_size() 换算
+        # Windows 依赖 tk scaling 把“点”字号按 DPI 转像素；macOS 的字体
+        # 差异由 _font_size() 按 Tk 版本处理，强制缩放仍需配置 Tk。
         if sys.platform.startswith("win") or _forced_ui_scale() is not None:
             _configure_tk_font_scaling(self.root, self.ui_scale)
 
         self.root.title(f"{APP_DISPLAY_NAME} v{__version__}")
-        initial_width, initial_height = self._window_size(1180, 760)
+        initial_width, initial_height = self._window_size(1400, 780)
         min_width, min_height = self._window_size(1020, 680)
         self.root.geometry(f"{initial_width}x{initial_height}")
         self.root.minsize(min_width, min_height)
         self.root.configure(bg=COLOR_BG)
 
         self.current_tool = "social_security"
+        self.current_view = "tool"
         self.nav_buttons: dict[str, SidebarItem] = {}
         self.tool_title = StringVar()
         self.tool_description = StringVar()
@@ -709,6 +944,47 @@ class HRToolkitApp:
         self.summary_button_text = StringVar()
         self.last_run_text = StringVar()
         self.last_run_state = StringVar()
+        self.history_search = StringVar()
+        self.history_tool_filter = StringVar(value=HISTORY_TOOL_FILTER_ALL)
+        self.history_date_filter = StringVar(value=HISTORY_DATE_FILTER_ALL)
+        self.history_detail_title = StringVar(value="选择一条记录查看详情")
+        self.history_detail_text = StringVar(value="这里用于查看升级前由旧版本保存的处理记录。")
+        self.history_page_text = StringVar(value="第 1 页")
+        self.history_message = StringVar()
+        self.workspace_project_name = StringVar(value="未打开工作项目")
+        self.workspace_project_path = StringVar(value="新建或打开项目后，资料会显示在这里")
+        self.sidebar_project_summary = StringVar(value="新建或打开项目后开始处理")
+        self.workspace_search = StringVar()
+        self.workspace_scope = StringVar(value=WORKSPACE_SCOPE_ALL)
+        self.workspace_detail_title = StringVar(value="选择文件查看详情")
+        self.workspace_detail_text = StringVar(value="项目内的上传资料和处理结果会集中显示在这里。")
+        self.workspace_empty_text = StringVar(value="先新建或打开一个工作项目")
+        self.current_project_path: Path | None = None
+        self._workspace_project_read_only = False
+        self._workspace_tree_paths: dict[str, Path] = {}
+        self._workspace_search_job: str | None = None
+        self._workspace_search_generation = 0
+        self._workspace_project_generation = 0
+        self._workspace_queue: queue.Queue[tuple[str, int, object]] = queue.Queue()
+        self._workspace_write_token = 0
+        self._workspace_write_tasks: dict[int, tuple[threading.Event, object]] = {}
+        # 复制进度由后台线程覆盖“最新快照”，主线程定时读取；不把每个文件块
+        # 都塞进 Tk 队列，避免大文件产生数万条待处理消息。
+        self._workspace_write_progress: dict[int, object] = {}
+        self._workspace_write_progress_lock = threading.Lock()
+        self._workspace_write_callbacks: dict[int, tuple[object | None, object | None, object | None]] = {}
+        self._workspace_recovery_blocked = False
+        self._workspace_recovery_error: str | None = None
+        self._workspace_close_requested = False
+        self._workspace_recent_projects: list[tuple[str, Path]] = []
+        self._workspace_width_units = WORKSPACE_DEFAULT_WIDTH
+        self._workspace_preferred_expanded = True
+        self._workspace_small = False
+        self._workspace_drawer_open = False
+        self._workspace_resize_origin: tuple[int, int] | None = None
+        self._project_store_error: str | None = None
+        self.project_store = self._initialize_project_store()
+        self._load_workspace_preferences()
         # 每个工具（含子模式）本次会话内的最近一次运行结果：(时间, 成功/失败)
         self._last_run_results: dict[str, tuple[str, str]] = {}
         # 合并后的上传入口：当前工具可用的文件/文件夹选择动作与提示文案
@@ -717,6 +993,54 @@ class HRToolkitApp:
         self._input_drop_title = ""
         self._input_allow_multi = True
         self._tutorial_window: Toplevel | None = None
+        self._project_create_window: Toplevel | None = None
+        self._project_create_busy = False
+        self._project_create_name_var: StringVar | None = None
+        self._project_create_parent_var: StringVar | None = None
+        self._project_create_preview_var: StringVar | None = None
+        self._project_create_status_var: StringVar | None = None
+        self._project_create_trace_ids: list[tuple[StringVar, str]] = []
+        self._project_create_name_entry = None
+        self._project_create_location_button: CodexButton | None = None
+        self._project_create_cancel_button: CodexButton | None = None
+        self._project_create_submit_button: CodexButton | None = None
+        self._project_create_status_label: Label | None = None
+        self._workspace_trash_window: Toplevel | None = None
+        self._workspace_trash_search_var: StringVar | None = None
+        self._workspace_trash_status_var: StringVar | None = None
+        self._workspace_trash_restore_path_var: StringVar | None = None
+        self._workspace_trash_project_var: StringVar | None = None
+        self._workspace_trash_notice_var: StringVar | None = None
+        self._workspace_trash_search_trace: str | None = None
+        self._workspace_trash_details: tuple[object, ...] = ()
+        self._workspace_trash_selected_id: str | None = None
+        self._workspace_trash_restore_in_progress = False
+        self._workspace_trash_card_widgets: dict[str, tuple[Frame, tuple[object, ...]]] = {}
+        self._workspace_trash_list_body: Frame | None = None
+        self._workspace_trash_empty_label: Label | None = None
+        self._workspace_trash_detail_title: Label | None = None
+        self._workspace_trash_restore_button: CodexButton | None = None
+        self._workspace_import_window: Toplevel | None = None
+        self._workspace_import_token: int | None = None
+        self._workspace_import_started_at: float | None = None
+        self._workspace_import_phase = "checking"
+        self._workspace_import_animation_job: str | None = None
+        self._workspace_import_success_job: str | None = None
+        self._workspace_import_animation_offset = 0.0
+        self._workspace_import_progress_canvas: Canvas | None = None
+        self._workspace_import_progress_width = self._px(548)
+        self._workspace_import_title_var: StringVar | None = None
+        self._workspace_import_subtitle_var: StringVar | None = None
+        self._workspace_import_target_var: StringVar | None = None
+        self._workspace_import_state_var: StringVar | None = None
+        self._workspace_import_name_var: StringVar | None = None
+        self._workspace_import_left_var: StringVar | None = None
+        self._workspace_import_middle_var: StringVar | None = None
+        self._workspace_import_elapsed_var: StringVar | None = None
+        self._workspace_import_safety_title_var: StringVar | None = None
+        self._workspace_import_safety_text_var: StringVar | None = None
+        self._workspace_import_stage_labels: list[Label] = []
+        self._workspace_import_cancel_button: CodexButton | None = None
         self.change_mode = "merge"
         self.change_form_state: dict[str, tuple[str, str, list[Path] | None]] = {
             "merge": ("", "", None),
@@ -741,12 +1065,16 @@ class HRToolkitApp:
         self.stats_week_end = StringVar()
         # 考勤统计表备注中加班/调休的展示单位：day 按天（默认）/ hour 按小时
         self.stats_remark_unit = StringVar(value="day")
-        self.output_dir = StringVar(value=str(default_output_parent_dir(self.current_tool)))
-        self.output_dir_user_selected = False
+        # 正式结果只写入当前工作项目。这个变量保留给现有工具表单，实际运行时
+        # 会被替换为本次批次的“处理结果”目录。
+        self.output_dir = StringVar(value="")
+        self.output_display_path = StringVar(value="请先新建或打开工作项目")
+        self.output_dir_user_selected = True
         self.change_input_paths: list[Path] | None = None
         # (状态, 运行编号, 载荷)；运行编号用于丢弃已停止任务的结果
         self.status_queue: queue.Queue[tuple[str, int, object | None]] = queue.Queue()
         self.update_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
+        self.history_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.last_output_dir: Path | None = None
         self.pending_update: UpdateInfo | None = None
         self.update_window: Toplevel | None = None
@@ -763,6 +1091,19 @@ class HRToolkitApp:
         self._tool_run_token = 0
         self._tool_running = False
         self._idle_run_button_text = ""
+        self._history_page = 0
+        self._history_total = 0
+        self._history_selected_task: TaskDetail | None = None
+        self._history_task_by_token: dict[int, str] = {}
+        self._project_batch_by_token: dict[int, str] = {}
+        self._run_cancel_events: dict[int, threading.Event] = {}
+        self._history_init_error: str | None = None
+        try:
+            self.history_store: HistoryStore | None = HistoryStore()
+        except Exception as exc:
+            self.history_store = None
+            self._history_init_error = str(exc)
+            runlog.log_exception("历史资料库初始化失败", exc)
 
         try:
             tk_scaling = float(self.root.tk.call("tk", "scaling"))
@@ -780,8 +1121,13 @@ class HRToolkitApp:
         self._configure_style()
         self._set_tool_texts()
         self._build_layout()
+        self._update_project_output_controls()
+        self.root.protocol("WM_DELETE_WINDOW", self._request_close)
         self._poll_status_queue()
         self._poll_update_queue()
+        self._poll_history_queue()
+        self._poll_workspace_queue()
+        self.root.after_idle(self._restore_workspace_project)
         self.root.after(600, self._check_updates_on_startup)
         # 清理历史更新遗留的临时文件（下载包、解压目录），后台低优先执行
         threading.Thread(target=cleanup_stale_update_files, daemon=True).start()
@@ -791,6 +1137,107 @@ class HRToolkitApp:
         import traceback as traceback_module
 
         traceback_module.print_exception(exc_type, exc_value, exc_tb)
+
+    def _initialize_project_store(self):
+        """Load the optional project backend without making GUI startup depend on it."""
+        self._project_store_class = None
+        try:
+            module = importlib.import_module("hr_toolkit.project_store")
+        except ModuleNotFoundError as exc:
+            if exc.name == "hr_toolkit.project_store":
+                return None
+            self._project_store_error = str(exc)
+            runlog.log_exception("工作项目模块加载失败", exc)
+            return None
+        except Exception as exc:
+            self._project_store_error = str(exc)
+            runlog.log_exception("工作项目模块加载失败", exc)
+            return None
+        store_class = getattr(module, "ProjectStore", None)
+        if store_class is None:
+            self._project_store_error = "未找到 ProjectStore。"
+            return None
+        self._project_store_class = store_class
+        return None
+
+    @staticmethod
+    def _workspace_settings_path() -> Path:
+        if sys.platform.startswith("win"):
+            base = Path(os.environ.get("LOCALAPPDATA", "").strip() or (Path.home() / "AppData" / "Local"))
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME", "").strip() or (Path.home() / ".config"))
+        return base / "HRToolkit" / "workspace-ui.json"
+
+    def _load_workspace_preferences(self) -> None:
+        self._workspace_last_project_path: Path | None = None
+        settings_path = self._workspace_settings_path()
+        try:
+            if settings_path.is_symlink() or not settings_path.is_file():
+                return
+            state = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            runlog.log_exception("读取项目界面设置失败", exc)
+            return
+        if not isinstance(state, dict):
+            return
+        try:
+            width = int(state.get("project_panel_width", WORKSPACE_DEFAULT_WIDTH))
+        except (AttributeError, TypeError, ValueError):
+            width = WORKSPACE_DEFAULT_WIDTH
+        self._workspace_width_units = max(WORKSPACE_MIN_WIDTH, min(WORKSPACE_MAX_WIDTH, width))
+        try:
+            self._workspace_preferred_expanded = bool(state.get("project_panel_expanded", True))
+        except AttributeError:
+            self._workspace_preferred_expanded = True
+        recent: list[tuple[str, Path]] = []
+        raw_recent = state.get("recent_projects", [])
+        if isinstance(raw_recent, list):
+            for raw_path in raw_recent:
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    continue
+                path = Path(raw_path).expanduser().absolute()
+                if any(existing_path == path for _name, existing_path in recent):
+                    continue
+                recent.append((path.name or "工作项目", path))
+                if len(recent) >= 8:
+                    break
+        self._workspace_recent_projects = recent
+        raw_current = state.get("current_project")
+        if isinstance(raw_current, str) and raw_current.strip():
+            self._workspace_last_project_path = Path(raw_current).expanduser().absolute()
+
+    def _save_workspace_preferences(self) -> None:
+        settings_path = self._workspace_settings_path()
+        payload = {
+            "version": 1,
+            "project_panel_width": int(self._workspace_width_units),
+            "project_panel_expanded": bool(self._workspace_preferred_expanded),
+            "current_project": str(self.current_project_path) if self.current_project_path is not None else None,
+            "recent_projects": [str(path) for _name, path in self._workspace_recent_projects[:8]],
+        }
+        temp_path = settings_path.with_name(
+            f".{settings_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            if settings_path.parent.is_symlink() or settings_path.is_symlink():
+                raise OSError("设置目录不是安全的普通目录。")
+            # 独占创建临时文件，避免可预测文件名被链接替换后写到项目外。
+            with temp_path.open("x", encoding="utf-8") as temp_file:
+                temp_file.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            try:
+                temp_path.chmod(0o600)
+            except OSError:
+                pass
+            temp_path.replace(settings_path)
+        except Exception as exc:
+            runlog.log_exception("保存项目界面设置失败", exc)
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _apply_app_icon(self) -> None:
         # 替换标题栏/任务栏默认的 Tk 羽毛图标；iconphoto(True, ...) 会同时
@@ -871,6 +1318,122 @@ class HRToolkitApp:
             return self._px(236)
         return self._px(248)
 
+    def _scrollbar_thumb_image(self, color: str) -> PhotoImage:
+        size = self._px(12)
+        inset = self._px(2)
+        image = PhotoImage(master=self.root, width=size, height=size)
+        low = inset
+        high = size - inset - 1
+        center = (low + high) / 2
+        radius = (high - low + 1) / 2 - 0.1
+        radius_squared = radius * radius
+        for y in range(size):
+            for x in range(size):
+                if (x - center) ** 2 + (y - center) ** 2 <= radius_squared:
+                    image.put(color, (x, y))
+        return image
+
+    def _configure_scrollbar_style(self, style: ttk.Style) -> None:
+        thumb_element = "HRToolkit.Scrollbar.thumb"
+        arrow_elements = {
+            "up": "HRToolkit.Vertical.Scrollbar.uparrow",
+            "down": "HRToolkit.Vertical.Scrollbar.downarrow",
+            "left": "HRToolkit.Horizontal.Scrollbar.leftarrow",
+            "right": "HRToolkit.Horizontal.Scrollbar.rightarrow",
+        }
+        existing_elements = set(style.element_names())
+        image_refs: list[PhotoImage] = []
+        if thumb_element not in existing_elements:
+            thumb_images = (
+                self._scrollbar_thumb_image("#EAEAEB"),
+                self._scrollbar_thumb_image("#DCDCDD"),
+                self._scrollbar_thumb_image("#CCCCCE"),
+            )
+            image_refs.extend(thumb_images)
+            style.element_create(
+                thumb_element,
+                "image",
+                thumb_images[0],
+                ("pressed", thumb_images[2]),
+                ("active", thumb_images[1]),
+                border=self._px(5),
+                sticky="nswe",
+            )
+
+        missing_arrows = [
+            element for element in arrow_elements.values() if element not in existing_elements
+        ]
+        if missing_arrows:
+            transparent_arrow = PhotoImage(
+                master=self.root,
+                width=self._px(12),
+                height=self._px(12),
+            )
+            image_refs.append(transparent_arrow)
+            # 箭头区域继续参与 ttk 原有的逐行滚动绑定，只把图像设为透明。
+            for arrow_element in missing_arrows:
+                style.element_create(
+                    arrow_element,
+                    "image",
+                    transparent_arrow,
+                    sticky="nswe",
+                )
+
+        if image_refs:
+            stored_images = getattr(self.root, "_hr_scrollbar_images", ())
+            if not isinstance(stored_images, tuple):
+                stored_images = ()
+            images = (*stored_images, *image_refs)
+            self._scrollbar_images = images
+            setattr(self.root, "_hr_scrollbar_images", images)
+
+        style.layout(
+            "Vertical.TScrollbar",
+            [
+                (
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "sticky": "ns",
+                        "children": [
+                            (arrow_elements["up"], {"side": "top", "sticky": ""}),
+                            (arrow_elements["down"], {"side": "bottom", "sticky": ""}),
+                            (thumb_element, {"sticky": "nswe"}),
+                        ],
+                    },
+                )
+            ],
+        )
+        style.layout(
+            "Horizontal.TScrollbar",
+            [
+                (
+                    "Horizontal.Scrollbar.trough",
+                    {
+                        "sticky": "ew",
+                        "children": [
+                            (arrow_elements["left"], {"side": "left", "sticky": ""}),
+                            (arrow_elements["right"], {"side": "right", "sticky": ""}),
+                            (thumb_element, {"sticky": "nswe"}),
+                        ],
+                    },
+                )
+            ],
+        )
+        for style_name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            style.configure(
+                style_name,
+                arrowsize=self._px(12),
+                background=COLOR_SURFACE,
+                troughcolor=COLOR_SURFACE,
+                bordercolor=COLOR_SURFACE,
+                lightcolor=COLOR_SURFACE,
+                darkcolor=COLOR_SURFACE,
+                relief="flat",
+                borderwidth=0,
+                gripcount=0,
+                gripsize=0,
+            )
+
     def _configure_style(self) -> None:
         if sys.platform == "darwin":
             family = "PingFang SC"
@@ -893,6 +1456,7 @@ class HRToolkitApp:
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
+        self._configure_scrollbar_style(style)
 
         style.configure(".", font=self.base_font, background=COLOR_BG, foreground=COLOR_TEXT)
         style.configure("App.TFrame", background=COLOR_BG)
@@ -973,6 +1537,55 @@ class HRToolkitApp:
             "Change.TNotebook.Tab",
             background=[("selected", COLOR_SURFACE)],
             foreground=[("selected", COLOR_PRIMARY)],
+        )
+        style.configure(
+            "History.Treeview",
+            background=COLOR_SURFACE,
+            fieldbackground=COLOR_SURFACE,
+            foreground=COLOR_TEXT,
+            rowheight=self._px(34),
+            borderwidth=0,
+        )
+        style.configure(
+            "History.Treeview.Heading",
+            background=COLOR_SURFACE_ALT,
+            foreground=COLOR_MUTED,
+            font=(self.base_font[0], _font_size(9), "bold"),
+            padding=self._pad(8, 7),
+            relief="flat",
+        )
+        style.map(
+            "History.Treeview",
+            background=[("selected", COLOR_PRIMARY_SOFT)],
+            foreground=[("selected", COLOR_TEXT)],
+        )
+        style.configure("Workspace.TFrame", background=COLOR_SURFACE)
+        style.configure("WorkspaceRail.TFrame", background=COLOR_SURFACE_ALT)
+        style.configure(
+            "WorkspaceTitle.TLabel",
+            background=COLOR_SURFACE,
+            foreground=COLOR_TEXT,
+            font=(self.base_font[0], _font_size(12), "bold"),
+        )
+        style.configure(
+            "WorkspaceProject.TLabel",
+            background=COLOR_SURFACE,
+            foreground=COLOR_PRIMARY,
+            font=(self.base_font[0], _font_size(9), "bold"),
+        )
+        style.configure("WorkspaceMuted.TLabel", background=COLOR_SURFACE, foreground=COLOR_FAINT, font=self.small_font)
+        style.configure(
+            "Workspace.Treeview",
+            background=COLOR_SURFACE,
+            fieldbackground=COLOR_SURFACE,
+            foreground=COLOR_TEXT,
+            rowheight=self._px(29),
+            borderwidth=0,
+        )
+        style.map(
+            "Workspace.Treeview",
+            background=[("selected", COLOR_PRIMARY_SOFT)],
+            foreground=[("selected", COLOR_TEXT)],
         )
 
     def _build_layout(self) -> None:
@@ -1119,6 +1732,60 @@ class HRToolkitApp:
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")
         ttk.Label(brand_text, text=APP_SUBTITLE, style="SidebarMuted.TLabel").pack(anchor="w")
 
+        ttk.Label(left_content, text="工作项目", style="SidebarSection.TLabel").pack(
+            anchor="w", padx=self._pad(9), pady=self._pad(0, 6)
+        )
+        project_card = ttk.Frame(left_content, padding=self._pad(10, 9), style="Card.TFrame")
+        project_card.pack(fill="x", padx=self._pad(3))
+        self.sidebar_project_name_label = Label(
+            project_card,
+            textvariable=self.workspace_project_name,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.section_font,
+            anchor="w",
+            justify="left",
+        )
+        self.sidebar_project_name_label.pack(fill="x")
+        self.sidebar_project_path_label = Label(
+            project_card,
+            textvariable=self.sidebar_project_summary,
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.tiny_font,
+            anchor="w",
+            justify="left",
+        )
+        self.sidebar_project_path_label.pack(fill="x", pady=self._pad(3, 0))
+        project_buttons = ttk.Frame(left_content, style="Sidebar.TFrame")
+        project_buttons.pack(fill="x", padx=self._pad(3), pady=self._pad(7, 2))
+        CodexButton(
+            project_buttons,
+            text="新建项目",
+            command=self._create_workspace_project,
+            width=88,
+            min_width=78,
+            height=30,
+        ).pack(side=LEFT)
+        CodexButton(
+            project_buttons,
+            text="打开项目",
+            command=self._open_workspace_project,
+            width=88,
+            min_width=78,
+            height=30,
+        ).pack(side=LEFT, padx=self._pad(6, 0))
+        self.sidebar_recent_project_button = CodexButton(
+            left_content,
+            text="最近项目",
+            command=self._show_recent_projects_menu,
+            variant="link",
+            width=88,
+            min_width=78,
+            height=25,
+        )
+        self.sidebar_recent_project_button.pack(anchor="w", padx=self._pad(4), pady=self._pad(1, 2))
+
         nav_frame = ttk.Frame(left_content, style="Sidebar.TFrame")
         nav_frame.pack(fill="x")
         for group_label, group_tools in NAV_GROUPS:
@@ -1136,6 +1803,13 @@ class HRToolkitApp:
 
         sidebar_footer = ttk.Frame(left_content, style="Sidebar.TFrame")
         sidebar_footer.pack(side="bottom", fill="x")
+        self.history_nav_item = SidebarItem(
+            sidebar_footer,
+            text="旧版记录",
+            icon_id="clock",
+            command=self._show_history_view,
+        )
+        self.history_nav_item.pack(fill="x", pady=self._pad(0, 2))
         tutorial_item = SidebarItem(
             sidebar_footer,
             text="使用教程",
@@ -1163,10 +1837,19 @@ class HRToolkitApp:
 
         ttk.Frame(root_frame, width=self._px(1), style="Separator.TFrame").pack(side=LEFT, fill=Y)
 
+        self._workspace_main_area = ttk.Frame(root_frame, style="Content.TFrame")
+        self._workspace_main_area.pack(side=LEFT, fill=BOTH, expand=True)
+        self._workspace_main_area.grid_rowconfigure(0, weight=1)
+        self._workspace_main_area.grid_columnconfigure(0, weight=1, minsize=self._px(470))
+        self._main_view_host = ttk.Frame(self._workspace_main_area, style="Content.TFrame")
+        self._main_view_host.grid(row=0, column=0, sticky="nsew")
+        self._build_workspace_panel(self._workspace_main_area)
+
         # Scrollable right panel: Canvas acts as the viewport; right_frame is
         # the inner content frame that all existing children are placed into.
-        right_outer = ttk.Frame(root_frame, style="Content.TFrame")
+        right_outer = ttk.Frame(self._main_view_host, style="Content.TFrame")
         right_outer.pack(side=RIGHT, fill=BOTH, expand=True)
+        self._tool_view = right_outer
 
         right_vscroll = ttk.Scrollbar(right_outer, orient=VERTICAL)
         right_vscroll.pack(side=RIGHT, fill=Y)
@@ -1666,7 +2349,11 @@ class HRToolkitApp:
             _refresh_picker_button_bar(button_bar)
 
         def _apply_form_layout() -> None:
-            form.columnconfigure(0, weight=1 if self._form_compact_layout else 0)
+            form.columnconfigure(
+                0,
+                weight=1 if self._form_compact_layout else 0,
+                minsize=0 if self._form_compact_layout else self._px(116),
+            )
             form.columnconfigure(1, weight=0 if self._form_compact_layout else 1)
             visible_keys = []
             if self._summary_row_visible:
@@ -1742,7 +2429,7 @@ class HRToolkitApp:
                 self._form_padding = form_padding
                 self.form_card.set_padding(form_padding)
             canvas_width = self._right_canvas.winfo_width()
-            compact = canvas_width > 1 and (canvas_width / max(self.ui_scale, 1.0)) < 560
+            compact = canvas_width > 1 and (canvas_width / max(self.ui_scale, 1.0)) < 700
             if compact != self._form_compact_layout:
                 self._form_compact_layout = compact
             _apply_form_layout()
@@ -1902,8 +2589,3636 @@ class HRToolkitApp:
         self._write_log(self._initial_log_text())
         self.root.update_idletasks()
         _sync_right_canvas_window()
+
+        self._build_history_view(self._main_view_host)
         self.root.update_idletasks()
         _sync_right_canvas_window()
+
+    def _build_workspace_panel(self, main_area) -> None:
+        self._workspace_resize_handle = Canvas(
+            main_area,
+            width=self._px(4),
+            bg=COLOR_SIDEBAR_BORDER,
+            highlightthickness=0,
+            bd=0,
+            cursor="sb_h_double_arrow",
+        )
+        self._workspace_resize_handle.grid(row=0, column=1, sticky="ns")
+        self._workspace_resize_handle.bind("<ButtonPress-1>", self._start_workspace_resize)
+        self._workspace_resize_handle.bind("<B1-Motion>", self._resize_workspace_panel)
+        self._workspace_resize_handle.bind("<ButtonRelease-1>", self._finish_workspace_resize)
+
+        self._workspace_panel = ttk.Frame(
+            main_area,
+            width=self._px(self._workspace_width_units),
+            style="Workspace.TFrame",
+        )
+        self._workspace_panel.grid(row=0, column=2, sticky="nsew")
+        self._workspace_panel.pack_propagate(False)
+
+        self._workspace_expanded_body = ttk.Frame(
+            self._workspace_panel,
+            padding=self._pad(16, 18, 16, 14),
+            style="Workspace.TFrame",
+        )
+        self._workspace_expanded_body.pack(fill=BOTH, expand=True)
+
+        header = ttk.Frame(self._workspace_expanded_body, style="Workspace.TFrame")
+        header.pack(fill="x")
+        ttk.Label(header, text="项目文件", style="WorkspaceTitle.TLabel").pack(side=LEFT)
+        self.workspace_collapse_button = CodexButton(
+            header,
+            text="收起",
+            command=self._toggle_workspace_panel,
+            variant="link",
+            width=56,
+            min_width=48,
+            height=26,
+        )
+        self.workspace_collapse_button.pack(side=RIGHT)
+        self.workspace_trash_button = CodexButton(
+            header,
+            text="回收站",
+            command=self._open_workspace_trash_dialog,
+            variant="link",
+            width=62,
+            min_width=56,
+            height=26,
+        )
+        self.workspace_trash_button.pack(side=RIGHT, padx=self._pad(0, 3))
+
+        self.workspace_project_name_label = Label(
+            self._workspace_expanded_body,
+            textvariable=self.workspace_project_name,
+            bg=COLOR_SURFACE,
+            fg=COLOR_PRIMARY,
+            font=(self.base_font[0], _font_size(9), "bold"),
+            anchor="w",
+            justify="left",
+        )
+        self.workspace_project_name_label.pack(fill="x", pady=self._pad(11, 0))
+        self.workspace_project_path_label = Label(
+            self._workspace_expanded_body,
+            textvariable=self.workspace_project_path,
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.tiny_font,
+            anchor="w",
+            justify="left",
+        )
+        self.workspace_project_path_label.pack(fill="x", pady=self._pad(3, 10))
+
+        project_actions = ttk.Frame(self._workspace_expanded_body, style="Workspace.TFrame")
+        project_actions.pack(fill="x", pady=self._pad(0, 12))
+        self.workspace_switch_button = CodexButton(
+            project_actions,
+            text="切换项目",
+            command=self._show_workspace_project_menu,
+            width=92,
+            min_width=82,
+            height=31,
+        )
+        self.workspace_switch_button.pack(side=LEFT)
+        self.workspace_open_project_button = CodexButton(
+            project_actions,
+            text="打开文件夹",
+            command=self._open_workspace_root,
+            width=100,
+            min_width=88,
+            height=31,
+        )
+        self.workspace_open_project_button.pack(side=LEFT, padx=self._pad(7, 0))
+
+        scope_frame = ttk.Frame(self._workspace_expanded_body, style="Workspace.TFrame")
+        scope_frame.pack(fill="x", pady=self._pad(0, 9))
+        self.workspace_scope_all_button = CodexButton(
+            scope_frame,
+            text="全部文件",
+            command=lambda: self._set_workspace_scope(WORKSPACE_SCOPE_ALL),
+            variant="tonal",
+            min_width=92,
+            height=30,
+        )
+        self.workspace_scope_all_button.pack(side=LEFT, fill="x", expand=True)
+        self.workspace_scope_tool_button = CodexButton(
+            scope_frame,
+            text="当前功能",
+            command=lambda: self._set_workspace_scope(WORKSPACE_SCOPE_TOOL),
+            min_width=92,
+            height=30,
+        )
+        self.workspace_scope_tool_button.pack(side=LEFT, fill="x", expand=True, padx=self._pad(6, 0))
+
+        ttk.Label(
+            self._workspace_expanded_body,
+            text="按文件名查找",
+            style="WorkspaceMuted.TLabel",
+        ).pack(anchor="w", pady=self._pad(0, 4))
+        self.workspace_search_entry = ttk.Entry(
+            self._workspace_expanded_body,
+            textvariable=self.workspace_search,
+            style="App.TEntry",
+        )
+        self.workspace_search_entry.pack(fill="x")
+
+        file_actions = ttk.Frame(self._workspace_expanded_body, style="Workspace.TFrame")
+        file_actions.pack(fill="x", pady=self._pad(10, 9))
+        self.workspace_add_button = CodexButton(
+            file_actions,
+            text="添加",
+            command=self._show_workspace_add_menu,
+            variant="tonal",
+            width=78,
+            min_width=70,
+            height=31,
+        )
+        self.workspace_add_button.pack(side=LEFT)
+        self.workspace_refresh_button = CodexButton(
+            file_actions,
+            text="刷新",
+            command=self._refresh_workspace_tree,
+            variant="link",
+            width=58,
+            min_width=52,
+            height=30,
+        )
+        self.workspace_refresh_button.pack(side=RIGHT)
+
+        ttk.Frame(self._workspace_expanded_body, height=self._px(1), style="CardSeparator.TFrame").pack(fill="x")
+
+        tree_frame = ttk.Frame(self._workspace_expanded_body, style="Workspace.TFrame")
+        tree_frame.pack(fill=BOTH, expand=True, pady=self._pad(9, 8))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        self.workspace_tree = ttk.Treeview(
+            tree_frame,
+            show="tree",
+            selectmode="browse",
+            style="Workspace.Treeview",
+        )
+        workspace_tree_scroll = ttk.Scrollbar(tree_frame, orient=VERTICAL, command=self.workspace_tree.yview)
+        self.workspace_tree.configure(yscrollcommand=workspace_tree_scroll.set)
+        self.workspace_tree.grid(row=0, column=0, sticky="nsew")
+        workspace_tree_scroll.grid(row=0, column=1, sticky="ns")
+        self.workspace_tree.tag_configure("muted", foreground=COLOR_FAINT)
+        self.workspace_tree.tag_configure("result", foreground=COLOR_PRIMARY)
+        self.workspace_tree.bind("<<TreeviewOpen>>", self._on_workspace_tree_open)
+        self.workspace_tree.bind("<<TreeviewSelect>>", self._on_workspace_tree_selected)
+        self.workspace_tree.bind("<Double-1>", self._open_selected_workspace_item)
+
+        self.workspace_empty_label = Label(
+            tree_frame,
+            textvariable=self.workspace_empty_text,
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            justify="center",
+            anchor="center",
+        )
+
+        detail = ttk.Frame(
+            self._workspace_expanded_body,
+            padding=self._pad(10, 9),
+            style="Card.TFrame",
+        )
+        detail.pack(fill="x")
+        self.workspace_detail_title_label = Label(
+            detail,
+            textvariable=self.workspace_detail_title,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.section_font,
+            anchor="w",
+        )
+        self.workspace_detail_title_label.pack(fill="x")
+        self.workspace_detail_text_label = Label(
+            detail,
+            textvariable=self.workspace_detail_text,
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=self.tiny_font,
+            justify="left",
+            anchor="w",
+        )
+        self.workspace_detail_text_label.pack(fill="x", pady=self._pad(3, 7))
+        detail_actions = ttk.Frame(detail, style="InputWrap.TFrame")
+        detail_actions.pack(fill="x")
+        self.workspace_open_item_button = CodexButton(
+            detail_actions,
+            text="打开",
+            command=self._open_selected_workspace_item,
+            variant="link",
+            width=52,
+            min_width=46,
+            height=25,
+        )
+        self.workspace_open_item_button.pack(side=LEFT)
+        self.workspace_reveal_item_button = CodexButton(
+            detail_actions,
+            text="定位",
+            command=self._reveal_selected_workspace_item,
+            variant="link",
+            width=52,
+            min_width=46,
+            height=25,
+        )
+        self.workspace_reveal_item_button.pack(side=LEFT, padx=self._pad(4, 0))
+        self.workspace_move_to_trash_button = CodexButton(
+            detail_actions,
+            text="移到回收站",
+            command=self._move_selected_workspace_batch_to_trash,
+            variant="link",
+            width=88,
+            min_width=82,
+            height=25,
+        )
+
+        self._workspace_collapsed_body = ttk.Frame(
+            self._workspace_panel,
+            style="WorkspaceRail.TFrame",
+        )
+        workspace_rail_label = Label(
+            self._workspace_collapsed_body,
+            text="项\n目\n文\n件",
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_PRIMARY,
+            font=(self.base_font[0], _font_size(9), "bold"),
+            cursor="hand2",
+            justify="center",
+            takefocus=True,
+        )
+        workspace_rail_label.pack(fill=BOTH, expand=True, pady=self._pad(17, 0))
+        workspace_rail_label.bind("<Button-1>", lambda _event: self._toggle_workspace_panel())
+        workspace_rail_label.bind("<Return>", lambda _event: self._toggle_workspace_panel())
+        workspace_rail_label.bind("<space>", lambda _event: self._toggle_workspace_panel())
+
+        self.workspace_search.trace_add("write", lambda *_args: self._schedule_workspace_search())
+        self._workspace_expanded_body.bind("<Configure>", self._update_workspace_text_wraps, add="+")
+        main_area.bind("<Configure>", self._on_workspace_area_resize, add="+")
+        self.root.bind("<Escape>", self._close_workspace_drawer, add="+")
+        self._set_workspace_detail(None)
+        self.root.after_idle(self._apply_workspace_panel_mode)
+
+    def _on_workspace_area_resize(self, _event=None) -> None:
+        try:
+            logical_width = self._workspace_main_area.winfo_width() / max(self.ui_scale, 1.0)
+        except Exception:
+            logical_width = WORKSPACE_DRAWER_BREAKPOINT
+        small = logical_width < WORKSPACE_DRAWER_BREAKPOINT
+        if small != self._workspace_small:
+            self._workspace_small = small
+            self._workspace_drawer_open = False
+        self._apply_workspace_panel_mode()
+
+    def _apply_workspace_panel_mode(self) -> None:
+        if not hasattr(self, "_workspace_panel"):
+            return
+        self._workspace_panel.place_forget()
+        self._workspace_panel.grid_remove()
+        self._workspace_resize_handle.grid_remove()
+        self._workspace_expanded_body.pack_forget()
+        self._workspace_collapsed_body.pack_forget()
+
+        expanded = self._workspace_drawer_open if self._workspace_small else self._workspace_preferred_expanded
+        if self._workspace_small and expanded:
+            self._workspace_panel.configure(width=self._px(self._workspace_width_units))
+            self._workspace_panel.place(
+                in_=self._workspace_main_area,
+                relx=1.0,
+                y=0,
+                relheight=1.0,
+                width=self._px(self._workspace_width_units),
+                anchor="ne",
+            )
+            self._workspace_expanded_body.pack(fill=BOTH, expand=True)
+            self._workspace_panel.lift()
+        else:
+            width_units = self._workspace_width_units if expanded else WORKSPACE_COLLAPSED_WIDTH
+            self._workspace_panel.configure(width=self._px(width_units))
+            self._workspace_panel.grid(row=0, column=2, sticky="nsew")
+            if expanded:
+                self._workspace_resize_handle.grid(row=0, column=1, sticky="ns")
+                self._workspace_expanded_body.pack(fill=BOTH, expand=True)
+            else:
+                self._workspace_collapsed_body.pack(fill=BOTH, expand=True)
+        self.root.after_idle(self._update_workspace_text_wraps)
+
+    def _toggle_workspace_panel(self) -> None:
+        if self._workspace_small:
+            self._workspace_drawer_open = not self._workspace_drawer_open
+        else:
+            self._workspace_preferred_expanded = not self._workspace_preferred_expanded
+            self._save_workspace_preferences()
+        self._apply_workspace_panel_mode()
+
+    def _close_workspace_drawer(self, _event=None) -> None:
+        if self._workspace_small and self._workspace_drawer_open:
+            self._workspace_drawer_open = False
+            self._apply_workspace_panel_mode()
+
+    def _start_workspace_resize(self, event) -> None:
+        if self._workspace_small or not self._workspace_preferred_expanded:
+            return
+        self._workspace_resize_origin = (int(event.x_root), int(self._workspace_width_units))
+
+    def _resize_workspace_panel(self, event) -> None:
+        if self._workspace_resize_origin is None:
+            return
+        start_x, start_width = self._workspace_resize_origin
+        logical_delta = (start_x - int(event.x_root)) / max(self.ui_scale, 1.0)
+        next_width = int(round(start_width + logical_delta))
+        self._workspace_width_units = max(WORKSPACE_MIN_WIDTH, min(WORKSPACE_MAX_WIDTH, next_width))
+        self._workspace_panel.configure(width=self._px(self._workspace_width_units))
+        self._update_workspace_text_wraps()
+
+    def _finish_workspace_resize(self, _event=None) -> None:
+        if self._workspace_resize_origin is None:
+            return
+        self._workspace_resize_origin = None
+        self._save_workspace_preferences()
+
+    def _update_workspace_text_wraps(self, _event=None) -> None:
+        if not hasattr(self, "_workspace_panel"):
+            return
+        width = max(self._workspace_panel.winfo_width() - self._px(36), self._px(190))
+        for label in (
+            getattr(self, "workspace_project_name_label", None),
+            getattr(self, "workspace_project_path_label", None),
+            getattr(self, "workspace_detail_text_label", None),
+        ):
+            if label is not None:
+                label.configure(wraplength=width)
+        sidebar_width = max(self._responsive_sidebar_width() - self._px(48), self._px(120))
+        if hasattr(self, "sidebar_project_name_label"):
+            self.sidebar_project_name_label.configure(wraplength=sidebar_width)
+        if hasattr(self, "sidebar_project_path_label"):
+            self.sidebar_project_path_label.configure(wraplength=sidebar_width)
+
+    @staticmethod
+    def _workspace_project_identity(value) -> tuple[str, Path] | None:
+        if value is None:
+            return None
+        if isinstance(value, (str, Path)):
+            path = Path(value).expanduser()
+            return path.name or "工作项目", path
+        if isinstance(value, dict):
+            raw_path = value.get("path") or value.get("root") or value.get("root_dir")
+            if not raw_path:
+                return None
+            path = Path(raw_path).expanduser()
+            return str(value.get("name") or path.name or "工作项目"), path
+        workspace = getattr(value, "workspace", None)
+        if workspace is not None:
+            raw_path = getattr(workspace, "root", None)
+            if raw_path is not None:
+                path = Path(raw_path).expanduser()
+                return str(getattr(workspace, "name", None) or path.name or "工作项目"), path
+        raw_path = getattr(value, "path", None) or getattr(value, "root", None) or getattr(value, "root_dir", None)
+        if raw_path is None:
+            return None
+        path = Path(raw_path).expanduser()
+        return str(getattr(value, "name", None) or path.name or "工作项目"), path
+
+    def _restore_workspace_project(self) -> None:
+        # after_idle 可能和自动化测试或极快的用户操作交错；已有项目时不要
+        # 再打开第二份只读实例，也不要覆盖刚刚切换完成的界面状态。
+        if self.current_project_path is not None:
+            self._refresh_workspace_tree()
+            return
+        last_path = getattr(self, "_workspace_last_project_path", None)
+        if last_path is not None and last_path.is_dir():
+            self._open_workspace_project_path(last_path, quiet=True)
+        else:
+            self._refresh_workspace_tree()
+
+    def _reload_recent_workspace_projects(self) -> None:
+        refreshed: list[tuple[str, Path]] = []
+        for name, path in self._workspace_recent_projects:
+            if path.is_dir() and all(existing_path != path for _existing_name, existing_path in refreshed):
+                refreshed.append((name or path.name or "工作项目", path))
+        self._workspace_recent_projects = refreshed[:8]
+
+    def _show_workspace_project_menu(self) -> None:
+        menu = Menu(self.root, tearoff=0, font=self.base_font)
+        menu.add_command(label="新建工作项目", command=self._create_workspace_project)
+        menu.add_command(label="打开已有项目", command=self._open_workspace_project)
+        self._reload_recent_workspace_projects()
+        if self._workspace_recent_projects:
+            menu.add_separator()
+            for name, path in self._workspace_recent_projects:
+                menu.add_command(
+                    label=name,
+                    command=lambda project_path=path: self._open_workspace_project_path(project_path),
+                )
+        self._popup_workspace_menu(menu, self.workspace_switch_button)
+
+    def _show_recent_projects_menu(self) -> None:
+        self._reload_recent_workspace_projects()
+        menu = Menu(self.root, tearoff=0, font=self.base_font)
+        if self._workspace_recent_projects:
+            for name, path in self._workspace_recent_projects:
+                menu.add_command(
+                    label=name,
+                    command=lambda project_path=path: self._open_workspace_project_path(project_path),
+                )
+        else:
+            menu.add_command(label="还没有最近项目", state="disabled")
+        self._popup_workspace_menu(menu, self.sidebar_recent_project_button)
+
+    @staticmethod
+    def _popup_workspace_menu(menu: Menu, anchor_widget) -> None:
+        try:
+            menu.tk_popup(anchor_widget.winfo_rootx(), anchor_widget.winfo_rooty() + anchor_widget.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _workspace_write_in_progress(self) -> bool:
+        return bool(getattr(self, "_workspace_write_tasks", {}))
+
+    def _project_change_is_blocked(self) -> bool:
+        return bool(
+            self._tool_running
+            or self._project_batch_by_token
+            or self._workspace_write_in_progress()
+            or getattr(self, "_workspace_recovery_blocked", False)
+        )
+
+    def _create_workspace_project(self) -> None:
+        if self._project_change_is_blocked():
+            messagebox.showwarning(
+                "处理尚未结束",
+                "请等待当前处理或资料导入安全结束后，再切换工作项目。",
+                parent=self.root,
+            )
+            return
+        store_class = getattr(self, "_project_store_class", None)
+        if store_class is None:
+            messagebox.showinfo(
+                "项目功能准备中",
+                "工作项目管理模块尚未连接。当前版本仍可打开已有文件夹查看，但暂不能安全创建项目。",
+                parent=self.root,
+            )
+            return
+        self._open_workspace_project_create_dialog()
+
+    def _default_workspace_project_parent(self) -> Path:
+        self._reload_recent_workspace_projects()
+        if self._workspace_recent_projects:
+            recent_parent = self._workspace_recent_projects[0][1].parent
+            if recent_parent.is_dir():
+                return recent_parent
+        documents = Path.home() / "Documents"
+        return documents if documents.is_dir() else Path.home()
+
+    def _open_workspace_project_create_dialog(self) -> None:
+        existing = getattr(self, "_project_create_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+
+        dialog_width, _ = self._update_dialog_size(600, 0)
+        window = Toplevel(self.root)
+        self._project_create_window = window
+        self._project_create_busy = False
+        setattr(window, "_hr_ui_scale", self.ui_scale)
+        window.withdraw()
+        window.title("新建工作项目")
+        window.configure(bg=COLOR_SURFACE)
+        window.resizable(False, True)
+        window.transient(self.root)
+
+        self._project_create_name_var = StringVar(
+            master=window,
+            value=_default_workspace_project_name(),
+        )
+        self._project_create_parent_var = StringVar(
+            master=window,
+            value=str(self._default_workspace_project_parent()),
+        )
+        self._project_create_preview_var = StringVar(master=window)
+        self._project_create_status_var = StringVar(master=window)
+        self._project_create_trace_ids = []
+
+        shell = Frame(window, bg=COLOR_SURFACE)
+        shell.pack(fill=BOTH, expand=True)
+        scroll = ttk.Scrollbar(shell, orient=VERTICAL)
+        scroll.pack(side=RIGHT, fill=Y)
+        canvas = Canvas(
+            shell,
+            bg=COLOR_SURFACE,
+            highlightthickness=0,
+            bd=0,
+            yscrollcommand=scroll.set,
+        )
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.configure(command=canvas.yview)
+
+        content = Frame(canvas, bg=COLOR_SURFACE)
+        content_window = canvas.create_window(0, 0, window=content, anchor="nw")
+
+        def sync_scroll_region(_event=None) -> None:
+            canvas.itemconfigure(content_window, width=max(canvas.winfo_width(), 1))
+            bounds = canvas.bbox("all")
+            if bounds is not None:
+                canvas.configure(scrollregion=bounds)
+
+        content.bind("<Configure>", sync_scroll_region)
+        canvas.bind("<Configure>", sync_scroll_region)
+
+        pad = self._px(32)
+        wrap_width = max(dialog_width - self._px(76), self._px(320))
+
+        Label(
+            content,
+            text="新建工作项目",
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=(self.base_font[0], _font_size(16), "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=pad, pady=self._pad(28, 2))
+        Label(
+            content,
+            text="项目是一套可随时打开、完整留存资料的工作文件夹。",
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=self.base_font,
+            anchor="w",
+        ).pack(fill="x", padx=pad, pady=self._pad(0, 20))
+
+        Label(
+            content,
+            text="项目名称",
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.section_font,
+            anchor="w",
+        ).pack(fill="x", padx=pad, pady=self._pad(0, 6))
+        name_entry = ttk.Entry(
+            content,
+            textvariable=self._project_create_name_var,
+            style="App.TEntry",
+        )
+        name_entry.pack(fill="x", padx=pad)
+        self._project_create_name_entry = name_entry
+        Label(
+            content,
+            text="建议按月份、地区或业务事项命名，方便以后查找。",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=pad, pady=self._pad(5, 14))
+
+        Label(
+            content,
+            text="保存位置",
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.section_font,
+            anchor="w",
+        ).pack(fill="x", padx=pad, pady=self._pad(0, 6))
+        location_wrap = Frame(
+            content,
+            bg=COLOR_SURFACE,
+            highlightbackground=COLOR_BORDER,
+            highlightcolor=COLOR_PRIMARY,
+            highlightthickness=self._px(1),
+            bd=0,
+        )
+        location_wrap.pack(fill="x", padx=pad)
+        location_label = Label(
+            location_wrap,
+            textvariable=self._project_create_parent_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.base_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(wrap_width - self._px(150), self._px(160)),
+        )
+        location_label.pack(side=LEFT, fill="x", expand=True, padx=self._pad(12, 8), pady=self._pad(9))
+        location_button = CodexButton(
+            location_wrap,
+            text="选择其他位置",
+            command=self._choose_workspace_project_parent,
+            width=116,
+            min_width=108,
+            height=34,
+        )
+        location_button.pack(side=RIGHT, padx=self._pad(0, 4), pady=self._pad(4))
+        self._project_create_location_button = location_button
+        Label(
+            content,
+            text="不建议选择整个桌面、磁盘根目录或个人主目录。",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=pad, pady=self._pad(5, 14))
+
+        preview_card = Frame(content, bg=COLOR_PRIMARY_SOFT)
+        preview_card.pack(fill="x", padx=pad, pady=self._pad(0, 14))
+        Label(
+            preview_card,
+            text="项目最终位置",
+            bg=COLOR_PRIMARY_SOFT,
+            fg=COLOR_PRIMARY,
+            font=(self.base_font[0], _font_size(9), "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(11, 2))
+        Label(
+            preview_card,
+            textvariable=self._project_create_preview_var,
+            bg=COLOR_PRIMARY_SOFT,
+            fg=COLOR_PRIMARY,
+            font=self.base_font,
+            anchor="w",
+            justify="left",
+            wraplength=wrap_width,
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(0, 11))
+
+        retention_card = Frame(content, bg=COLOR_SURFACE_ALT)
+        retention_card.pack(fill="x", padx=pad, pady=self._pad(0, 14))
+        Label(
+            retention_card,
+            text="建立后会自动做到",
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_TEXT,
+            font=self.section_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(11, 4))
+        Label(
+            retention_card,
+            text="上传资料复制进项目，外部原件不动\n处理结果直接保存在项目里，右侧随时可查\n整个项目文件夹可以备份、迁移和交接",
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_MUTED,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+            wraplength=wrap_width,
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(0, 11))
+
+        warning_card = Frame(content, bg=COLOR_WARNING_SOFT)
+        warning_card.pack(fill="x", padx=pad)
+        Label(
+            warning_card,
+            text="若保存到网盘或共享盘，项目资料可能被同步或被其他人访问。",
+            bg=COLOR_WARNING_SOFT,
+            fg=COLOR_WARNING,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+            wraplength=wrap_width,
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(11))
+
+        status_label = Label(
+            content,
+            textvariable=self._project_create_status_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_DANGER,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+            wraplength=wrap_width,
+        )
+        status_label.pack(fill="x", padx=pad, pady=self._pad(8, 0))
+        self._project_create_status_label = status_label
+
+        button_row = Frame(content, bg=COLOR_SURFACE)
+        button_row.pack(fill="x", padx=pad, pady=self._pad(14, 24))
+        submit_button = CodexButton(
+            button_row,
+            text="创建并打开",
+            command=self._submit_workspace_project_create,
+            variant="primary",
+            width=106,
+            min_width=98,
+            height=38,
+        )
+        submit_button.pack(side=RIGHT)
+        self._project_create_submit_button = submit_button
+        cancel_button = CodexButton(
+            button_row,
+            text="取消",
+            command=self._close_workspace_project_create_dialog,
+            width=70,
+            min_width=64,
+            height=38,
+        )
+        cancel_button.pack(side=RIGHT, padx=self._pad(0, 9))
+        self._project_create_cancel_button = cancel_button
+
+        def bind_keyboard_button(button: CodexButton) -> None:
+            button.configure(takefocus=1)
+
+            def activate(_event=None):
+                button._on_click()
+                return "break"
+
+            button.bind("<Return>", activate)
+            button.bind("<space>", activate)
+
+        for button in (location_button, cancel_button, submit_button):
+            bind_keyboard_button(button)
+
+        for variable in (self._project_create_name_var, self._project_create_parent_var):
+            trace_id = variable.trace_add("write", lambda *_args: self._refresh_workspace_project_create_form())
+            self._project_create_trace_ids.append((variable, trace_id))
+
+        def scroll_dialog(event) -> str | None:
+            if content.winfo_reqheight() <= canvas.winfo_height():
+                return None
+            if getattr(event, "num", None) == 4:
+                direction = -1
+            elif getattr(event, "num", None) == 5:
+                direction = 1
+            else:
+                delta = getattr(event, "delta", 0)
+                direction = -1 if delta > 0 else 1
+            canvas.yview_scroll(direction, "units")
+            return "break"
+
+        window.bind("<MouseWheel>", scroll_dialog)
+        window.bind("<Button-4>", scroll_dialog)
+        window.bind("<Button-5>", scroll_dialog)
+        window.bind("<Return>", lambda _event: self._submit_workspace_project_create())
+        window.bind("<Escape>", lambda _event: self._close_workspace_project_create_dialog())
+        window.protocol("WM_DELETE_WINDOW", self._close_workspace_project_create_dialog)
+
+        self._refresh_workspace_project_create_form()
+        window.update_idletasks()
+        requested_height = content.winfo_reqheight()
+        max_height = max(self._px(420), self.root.winfo_screenheight() - self._px(72))
+        min_height = min(self._px(560), max_height)
+        dialog_height = max(min_height, min(requested_height, max_height))
+        self._center_window(window, dialog_width, dialog_height)
+        sync_scroll_region()
+        window.deiconify()
+        try:
+            window.grab_set()
+        except Exception:
+            pass
+        name_entry.focus_set()
+        name_entry.selection_range(0, END)
+
+    def _choose_workspace_project_parent(self) -> None:
+        if getattr(self, "_project_create_busy", False):
+            return
+        window = getattr(self, "_project_create_window", None)
+        parent_var = getattr(self, "_project_create_parent_var", None)
+        if window is None or parent_var is None:
+            return
+        initial = Path(parent_var.get()).expanduser()
+        if not initial.is_dir():
+            initial = self._default_workspace_project_parent()
+        selected = filedialog.askdirectory(
+            title="选择工作项目的保存位置",
+            initialdir=str(initial),
+            mustexist=True,
+            parent=window,
+        )
+        if selected:
+            parent_var.set(str(Path(selected).expanduser().absolute()))
+        try:
+            window.lift()
+            window.focus_force()
+        except Exception:
+            pass
+
+    def _refresh_workspace_project_create_form(self) -> None:
+        name_var = getattr(self, "_project_create_name_var", None)
+        parent_var = getattr(self, "_project_create_parent_var", None)
+        preview_var = getattr(self, "_project_create_preview_var", None)
+        status_var = getattr(self, "_project_create_status_var", None)
+        if name_var is None or parent_var is None or preview_var is None or status_var is None:
+            return
+        project_root, error = _workspace_project_creation_target(parent_var.get(), name_var.get())
+        preview_var.set(str(project_root) if project_root is not None else "请先填写项目名称并选择保存位置")
+        if getattr(self, "_project_create_busy", False):
+            return
+        status_var.set(error or "")
+        status_label = getattr(self, "_project_create_status_label", None)
+        if status_label is not None:
+            status_label.configure(fg=COLOR_DANGER)
+        submit_button = getattr(self, "_project_create_submit_button", None)
+        if submit_button is not None:
+            submit_button.configure(state="disabled" if error else "normal")
+
+    def _set_workspace_project_create_busy(self, busy: bool) -> None:
+        self._project_create_busy = bool(busy)
+        state = "disabled" if busy else "normal"
+        name_entry = getattr(self, "_project_create_name_entry", None)
+        if name_entry is not None:
+            name_entry.configure(state=state)
+        for attribute in ("_project_create_location_button", "_project_create_cancel_button"):
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.configure(state=state)
+        submit_button = getattr(self, "_project_create_submit_button", None)
+        if submit_button is not None:
+            submit_button.configure(state="disabled" if busy else "normal")
+        if not busy:
+            self._refresh_workspace_project_create_form()
+
+    def _set_workspace_project_create_status(self, message: str, *, error: bool) -> None:
+        status_var = getattr(self, "_project_create_status_var", None)
+        if status_var is not None:
+            status_var.set(message)
+        status_label = getattr(self, "_project_create_status_label", None)
+        if status_label is not None:
+            status_label.configure(fg=COLOR_DANGER if error else COLOR_PRIMARY)
+
+    def _submit_workspace_project_create(self) -> None:
+        if getattr(self, "_project_create_busy", False):
+            return
+        name_var = getattr(self, "_project_create_name_var", None)
+        parent_var = getattr(self, "_project_create_parent_var", None)
+        if name_var is None or parent_var is None:
+            return
+        project_name = name_var.get().strip()
+        project_root, error = _workspace_project_creation_target(parent_var.get(), project_name)
+        if error or project_root is None:
+            self._refresh_workspace_project_create_form()
+            return
+
+        store_class = getattr(self, "_project_store_class", None)
+        creator = getattr(store_class, "create", None) if store_class is not None else None
+        if not callable(creator):
+            self._set_workspace_project_create_status("工作项目管理模块暂时不可用。", error=True)
+            return
+
+        self._set_workspace_project_create_busy(True)
+        self._set_workspace_project_create_status("正在创建项目，请稍候…", error=False)
+        window = getattr(self, "_project_create_window", None)
+        if window is not None:
+            try:
+                window.update_idletasks()
+            except Exception:
+                pass
+        try:
+            project = creator(project_root, project_name)
+        except Exception as exc:
+            runlog.log_exception("新建工作项目失败", exc)
+            self._set_workspace_project_create_busy(False)
+            self._set_workspace_project_create_status(_workspace_project_create_error_message(exc), error=True)
+            return
+
+        identity = self._workspace_project_identity(project) or (project_name, project_root)
+        workspace = getattr(project, "workspace", None)
+        read_only = not bool(getattr(workspace, "writable", True))
+        try:
+            self._set_workspace_project(*identity, read_only=read_only, store=project)
+        except Exception as exc:
+            runlog.log_exception("新建项目后打开失败", exc)
+            closer = getattr(project, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
+            self._set_workspace_project_create_busy(False)
+            self._set_workspace_project_create_status(
+                "项目已经创建，但暂时无法打开。请取消后使用“打开项目”选择该文件夹。",
+                error=True,
+            )
+            return
+        self._close_workspace_project_create_dialog(force=True)
+
+    def _close_workspace_project_create_dialog(self, *, force: bool = False) -> None:
+        if getattr(self, "_project_create_busy", False) and not force:
+            return
+        window = getattr(self, "_project_create_window", None)
+        for variable, trace_id in getattr(self, "_project_create_trace_ids", []):
+            try:
+                variable.trace_remove("write", trace_id)
+            except Exception:
+                pass
+        self._project_create_trace_ids = []
+        self._project_create_window = None
+        self._project_create_busy = False
+        self._project_create_name_var = None
+        self._project_create_parent_var = None
+        self._project_create_preview_var = None
+        self._project_create_status_var = None
+        self._project_create_name_entry = None
+        self._project_create_location_button = None
+        self._project_create_cancel_button = None
+        self._project_create_submit_button = None
+        self._project_create_status_label = None
+        if window is not None:
+            try:
+                window.grab_release()
+            except Exception:
+                pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+    def _open_workspace_project(self) -> None:
+        if self._project_change_is_blocked():
+            messagebox.showwarning(
+                "处理尚未结束",
+                "请等待当前处理或资料导入安全结束后，再切换工作项目。",
+                parent=self.root,
+            )
+            return
+        directory = filedialog.askdirectory(title="打开已有工作项目")
+        if directory:
+            self._open_workspace_project_path(Path(directory))
+
+    def _open_workspace_project_path(self, path: Path, *, quiet: bool = False) -> None:
+        if self._project_change_is_blocked():
+            if not quiet:
+                messagebox.showwarning(
+                    "处理尚未结束",
+                    "请等待当前处理或资料导入安全结束后，再切换工作项目。",
+                    parent=self.root,
+                )
+            return
+        path = Path(path).expanduser().absolute()
+        if not path.is_dir():
+            if not quiet:
+                messagebox.showwarning("项目不存在", "这个工作项目可能已经移动，请重新选择项目文件夹。", parent=self.root)
+            return
+        if self.current_project_path is not None:
+            try:
+                is_current = path.samefile(self.current_project_path)
+            except OSError:
+                is_current = path == self.current_project_path
+            if is_current:
+                if self.project_store is not None:
+                    try:
+                        self.project_store.refresh()
+                    except Exception as exc:
+                        runlog.log_exception("刷新当前工作项目失败", exc)
+                self._refresh_workspace_tree()
+                self._update_sidebar_project_summary()
+                return
+        store_class = getattr(self, "_project_store_class", None)
+        opener = getattr(store_class, "open", None) if store_class is not None else None
+        if callable(opener):
+            try:
+                project = opener(path)
+            except Exception as exc:
+                runlog.log_exception("打开工作项目失败", exc)
+                if not quiet:
+                    messagebox.showerror("无法打开项目", f"这个文件夹无法作为工作项目打开。\n\n原因：{exc}", parent=self.root)
+                return
+            identity = self._workspace_project_identity(project) or (path.name or "工作项目", path)
+            workspace = getattr(project, "workspace", None)
+            read_only = not bool(getattr(workspace, "writable", True))
+            self._set_workspace_project(*identity, read_only=read_only, store=project)
+            return
+        # ProjectStore 尚未接入时保持只读，确保工作区外壳仍可启动和浏览。
+        self._set_workspace_project(path.name or "工作项目", path, read_only=True, store=None)
+
+    def _set_workspace_project(self, name: str, path: Path, *, read_only: bool, store=None) -> None:
+        old_store = self.project_store
+        old_path = self.current_project_path
+        new_path = Path(path).expanduser().absolute()
+        project_changed = old_path is not None and old_path != new_path
+        if project_changed:
+            self._close_workspace_trash_dialog()
+        if old_store is not None and old_store is not store:
+            closer = getattr(old_store, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception as exc:
+                    runlog.log_exception("关闭旧工作项目失败", exc)
+        self.project_store = store
+        self.current_project_path = new_path
+        self._workspace_project_generation += 1
+        if project_changed:
+            self.input_path.set("")
+            self.summary_path.set("")
+            self.change_input_paths = None
+            self.change_form_state = {
+                "merge": ("", "", None),
+                "roster": ("", "", None),
+            }
+            self.archive_form_state = {
+                "import": ("", "", None),
+                "export": ("", "", None),
+            }
+            self.last_output_dir = None
+            if hasattr(self, "upload_body"):
+                self._refresh_upload_card()
+        self._workspace_project_read_only = bool(read_only)
+        display_name = str(name or self.current_project_path.name or "工作项目")
+        self.workspace_project_name.set(display_name + (" · 只读" if read_only else ""))
+        workspace = getattr(store, "workspace", None)
+        read_only_reason = getattr(workspace, "read_only_reason", None) if workspace is not None else None
+        path_text = str(self.current_project_path)
+        if read_only_reason:
+            path_text = f"{path_text}\n{read_only_reason}"
+        self.workspace_project_path.set(path_text)
+        self.workspace_search.set("")
+        self._workspace_search_generation += 1
+        self._set_workspace_detail(None)
+        self._workspace_recent_projects = [
+            (display_name, self.current_project_path),
+            *((item_name, item_path) for item_name, item_path in self._workspace_recent_projects if item_path != self.current_project_path),
+        ][:8]
+        self._workspace_last_project_path = self.current_project_path
+        self._update_sidebar_project_summary()
+        self._save_workspace_preferences()
+        self._refresh_workspace_tree()
+        self._update_workspace_action_states()
+        self._update_project_output_controls()
+
+    def _update_sidebar_project_summary(self) -> None:
+        store = self.project_store
+        if self.current_project_path is None or store is None:
+            self.sidebar_project_summary.set("新建或打开项目后开始处理")
+            return
+        try:
+            batch_count = len(store.list_batches())
+        except Exception:
+            self.sidebar_project_summary.set("当前项目 · 资料可在右侧查看")
+            return
+        if batch_count:
+            self.sidebar_project_summary.set(f"当前项目 · {batch_count} 次处理")
+        else:
+            self.sidebar_project_summary.set("当前项目 · 尚无处理记录")
+
+    def _open_workspace_root(self) -> None:
+        project_path = self.current_project_path
+        if project_path is None:
+            messagebox.showinfo("还没有工作项目", "请先新建或打开一个工作项目。", parent=self.root)
+            return
+        try:
+            open_path(project_path)
+        except Exception as exc:
+            runlog.log_exception("打开项目文件夹失败", exc)
+            messagebox.showerror("无法打开文件夹", f"项目文件夹无法打开。\n\n原因：{exc}", parent=self.root)
+
+    def _show_workspace_backend_unavailable(self, action: str) -> None:
+        detail = f"\n\n原因：{self._project_store_error}" if self._project_store_error else ""
+        messagebox.showinfo(
+            "项目功能准备中",
+            f"“{action}”需要工作项目管理模块。模块连接完成后即可使用。{detail}",
+            parent=self.root,
+        )
+
+    def _set_workspace_scope(self, scope: str) -> None:
+        if scope not in {WORKSPACE_SCOPE_ALL, WORKSPACE_SCOPE_TOOL}:
+            return
+        self.workspace_scope.set(scope)
+        self.workspace_scope_all_button.configure(variant="tonal" if scope == WORKSPACE_SCOPE_ALL else "secondary")
+        self.workspace_scope_tool_button.configure(variant="tonal" if scope == WORKSPACE_SCOPE_TOOL else "secondary")
+        self._refresh_workspace_tree()
+
+    def _project_tool_identity(self) -> tuple[str, str]:
+        """Return the stable batch id and HR-facing folder name for the active sub-tool."""
+
+        if self.current_tool == "personnel_change_merge" and self.change_mode == "roster":
+            return "roster_update", "花名册更新"
+        if self.current_tool == "archive_import" and self.archive_mode == "export":
+            return "archive_export", "档案表生成"
+        return self.current_tool, TOOL_NAV_LABELS.get(self.current_tool, self._tool_log_label())
+
+    def _workspace_tool_parts(self) -> tuple[str, ...]:
+        _tool_id, tool_name = self._project_tool_identity()
+        group_name = TOOL_GROUP_LABELS.get(self.current_tool, "人员运营自动化")
+        return group_name, tool_name
+
+    def _workspace_scope_root(self) -> Path | None:
+        project_path = self.current_project_path
+        if project_path is None:
+            return None
+        if self.workspace_scope.get() != WORKSPACE_SCOPE_TOOL:
+            return project_path
+        # 项目目录的显示名称来自每次处理时的业务名称，不应只依赖界面里的
+        # 固定中文映射。优先从真实批次反查当前工具目录，老项目改名后也能找到。
+        store = self.project_store
+        if store is not None:
+            try:
+                project_tool_id, _tool_name = self._project_tool_identity()
+                summaries = store.list_batches(tool_id=project_tool_id)
+            except Exception as exc:
+                runlog.log_exception("读取当前功能项目目录失败", exc)
+            else:
+                for summary in summaries:
+                    try:
+                        detail = store.get_batch(summary.id)
+                    except Exception:
+                        continue
+                    if detail is None:
+                        continue
+                    for category in ("uploads", "supplements", "results"):
+                        directory = detail.directories.get(category)
+                        if directory is None:
+                            continue
+                        tool_root = directory.parent.parent
+                        try:
+                            tool_root.relative_to(project_path)
+                        except ValueError:
+                            continue
+                        if tool_root.is_dir():
+                            return tool_root
+        return project_path.joinpath(*self._workspace_tool_parts())
+
+    @staticmethod
+    def _workspace_should_hide_path(path: Path) -> bool:
+        name = path.name
+        if name in WORKSPACE_HIDDEN_NAMES or name.startswith("~$"):
+            return True
+        if name.startswith("."):
+            return True
+        lower_name = name.lower()
+        if any(lower_name.endswith(suffix) for suffix in WORKSPACE_HIDDEN_SUFFIXES):
+            return True
+        try:
+            return path.is_symlink()
+        except OSError:
+            return True
+
+    def _workspace_visible_children(self, path: Path) -> list[Path]:
+        try:
+            children = [child for child in path.iterdir() if not self._workspace_should_hide_path(child)]
+        except OSError:
+            return []
+        return sorted(children, key=lambda child: (not child.is_dir(), child.name.casefold()))
+
+    def _refresh_workspace_tree(self) -> None:
+        if not hasattr(self, "workspace_tree"):
+            return
+        self._workspace_search_generation += 1
+        generation = self._workspace_search_generation
+        for item in self.workspace_tree.get_children():
+            self.workspace_tree.delete(item)
+        self._workspace_tree_paths.clear()
+        self._set_workspace_detail(None)
+        root_path = self._workspace_scope_root()
+        if self.current_project_path is None:
+            self.workspace_empty_text.set("先新建或打开一个工作项目\n\n资料和结果会集中显示在这里")
+            self._show_workspace_empty(True)
+            self._update_workspace_action_states()
+            return
+        if root_path is None or not root_path.is_dir():
+            if self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL:
+                self.workspace_empty_text.set("当前功能还没有处理记录\n\n请在中间选择资料并开始处理")
+            else:
+                self.workspace_empty_text.set("项目里还没有资料\n\n点击“添加”导入文件或文件夹")
+            self._show_workspace_empty(True)
+            self._update_workspace_action_states()
+            return
+        query = self.workspace_search.get().strip().casefold()
+        if query:
+            self.workspace_empty_text.set("正在查找项目文件…")
+            self._show_workspace_empty(True)
+            threading.Thread(
+                target=self._search_workspace_files,
+                args=(generation, root_path, query),
+                daemon=True,
+            ).start()
+            self._update_workspace_action_states()
+            return
+        children = self._workspace_visible_children(root_path)
+        for child in children:
+            self._insert_workspace_tree_path("", child)
+        if children:
+            self._show_workspace_empty(False)
+        else:
+            label = "当前功能还没有项目文件" if self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL else "这个项目文件夹目前为空"
+            self.workspace_empty_text.set(f"{label}\n\n点击“添加”导入资料")
+            self._show_workspace_empty(True)
+        self._update_workspace_action_states()
+
+    def _insert_workspace_tree_path(self, parent: str, path: Path, *, search_result: bool = False) -> str:
+        text = path.name
+        if search_result and self.current_project_path is not None:
+            try:
+                parent_text = path.parent.relative_to(self.current_project_path).as_posix()
+            except ValueError:
+                parent_text = path.parent.name
+            if parent_text and parent_text != ".":
+                text = f"{path.name}   ·   {parent_text}"
+        tags: tuple[str, ...] = ()
+        try:
+            relative_parts = path.relative_to(self.current_project_path).parts if self.current_project_path else ()
+        except ValueError:
+            relative_parts = ()
+        if "处理结果" in relative_parts:
+            tags = ("result",)
+        item = self.workspace_tree.insert(parent, "end", text=text, open=False, tags=tags)
+        self._workspace_tree_paths[item] = path
+        if path.is_dir() and not search_result:
+            self.workspace_tree.insert(item, "end", text="", tags=(WORKSPACE_DUMMY_TAG,))
+        return item
+
+    def _on_workspace_tree_open(self, _event=None) -> None:
+        item = self.workspace_tree.focus()
+        path = self._workspace_tree_paths.get(item)
+        if path is None or not path.is_dir():
+            return
+        children = self.workspace_tree.get_children(item)
+        if len(children) != 1 or WORKSPACE_DUMMY_TAG not in self.workspace_tree.item(children[0], "tags"):
+            return
+        self.workspace_tree.delete(children[0])
+        for child in self._workspace_visible_children(path):
+            self._insert_workspace_tree_path(item, child)
+
+    def _on_workspace_tree_selected(self, _event=None) -> None:
+        selected = self.workspace_tree.selection()
+        path = self._workspace_tree_paths.get(selected[0]) if selected else None
+        self._set_workspace_detail(path)
+
+    def _selected_workspace_path(self) -> Path | None:
+        if not hasattr(self, "workspace_tree"):
+            return None
+        selected = self.workspace_tree.selection()
+        return self._workspace_tree_paths.get(selected[0]) if selected else None
+
+    def _workspace_batch_root_for_path(self, path: Path | None):
+        store = self.project_store
+        if path is None or store is None:
+            return None
+        try:
+            summaries = tuple(store.list_batches())
+        except Exception:
+            return None
+        for summary in summaries:
+            try:
+                detail = store.get_batch(summary.id)
+            except Exception:
+                continue
+            if detail is None:
+                continue
+            upload_dir = detail.directories.get("uploads")
+            if upload_dir is not None and Path(path) == Path(upload_dir).parent:
+                return summary, detail
+        return None
+
+    def _set_workspace_detail(self, path: Path | None) -> None:
+        if path is None or not path.exists():
+            self.workspace_detail_title.set("选择文件查看详情")
+            self.workspace_detail_text.set("双击可以打开文件；文件夹可展开查看。")
+            self._update_workspace_action_states()
+            return
+        self.workspace_detail_title.set(path.name)
+        try:
+            relative = path.relative_to(self.current_project_path).as_posix() if self.current_project_path else path.name
+        except ValueError:
+            relative = path.name
+        try:
+            modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            modified = "更新时间未知"
+        if path.is_dir():
+            detail = f"文件夹 · {relative}\n更新于 {modified}"
+        else:
+            detail = f"{self._format_file_size(path)} · 更新于 {modified}\n{relative}"
+        self.workspace_detail_text.set(detail)
+        self._update_workspace_action_states()
+
+    def _update_workspace_action_states(self) -> None:
+        if not hasattr(self, "workspace_add_button"):
+            return
+        has_project = self.current_project_path is not None
+        can_write = (
+            has_project
+            and not self._workspace_project_read_only
+            and self.project_store is not None
+            and not self._tool_running
+            and not self._project_batch_by_token
+            and not self._workspace_write_in_progress()
+            and not getattr(self, "_workspace_recovery_blocked", False)
+        )
+        self.workspace_add_button.configure(state="normal" if can_write else "disabled")
+        write_busy = self._workspace_write_in_progress()
+        self.workspace_refresh_button.configure(state="normal" if has_project and not write_busy else "disabled")
+        self.workspace_open_project_button.configure(state="normal" if has_project else "disabled")
+        if hasattr(self, "workspace_trash_button"):
+            self.workspace_trash_button.configure(
+                state="normal" if has_project and not write_busy else "disabled"
+            )
+        if hasattr(self, "workspace_switch_button"):
+            self.workspace_switch_button.configure(state="disabled" if self._project_change_is_blocked() else "normal")
+        if hasattr(self, "workspace_search_entry"):
+            self.workspace_search_entry.configure(state="disabled" if write_busy else "normal")
+        selected = self._selected_workspace_path()
+        selected_exists = selected is not None and selected.exists()
+        self.workspace_open_item_button.configure(state="normal" if selected_exists else "disabled")
+        self.workspace_reveal_item_button.configure(state="normal" if selected_exists else "disabled")
+        move_button = getattr(self, "workspace_move_to_trash_button", None)
+        if move_button is not None:
+            batch_root = self._workspace_batch_root_for_path(selected) if selected_exists else None
+            if batch_root is None:
+                if move_button.winfo_manager():
+                    move_button.pack_forget()
+            else:
+                if not move_button.winfo_manager():
+                    move_button.pack(side=RIGHT)
+                summary, _detail = batch_root
+                move_allowed = can_write and str(getattr(summary, "status", "")) != "running"
+                move_button.configure(state="normal" if move_allowed else "disabled")
+        self._update_workspace_trash_restore_state()
+
+    def _show_workspace_empty(self, visible: bool) -> None:
+        if visible:
+            self.workspace_empty_label.place(relx=0.5, rely=0.36, anchor="center")
+        else:
+            self.workspace_empty_label.place_forget()
+
+    def _schedule_workspace_search(self) -> None:
+        if self._workspace_search_job is not None:
+            try:
+                self.root.after_cancel(self._workspace_search_job)
+            except Exception:
+                pass
+        self._workspace_search_job = self.root.after(320, self._run_scheduled_workspace_search)
+
+    def _run_scheduled_workspace_search(self) -> None:
+        self._workspace_search_job = None
+        self._refresh_workspace_tree()
+
+    def _search_workspace_files(self, generation: int, root_path: Path, query: str) -> None:
+        results: list[Path] = []
+        truncated = False
+        error: str | None = None
+        try:
+            for current_root, dir_names, file_names in os.walk(root_path, followlinks=False):
+                current = Path(current_root)
+                dir_names[:] = [
+                    name
+                    for name in dir_names
+                    if not self._workspace_should_hide_path(current / name)
+                ]
+                for name in (*dir_names, *file_names):
+                    path = current / name
+                    if self._workspace_should_hide_path(path):
+                        continue
+                    if query in name.casefold():
+                        results.append(path)
+                        if len(results) >= WORKSPACE_SEARCH_LIMIT:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+        except OSError as exc:
+            error = str(exc)
+        self._workspace_queue.put(("search", generation, (results, truncated, error)))
+
+    def _render_workspace_search_results(self, results: list[Path], truncated: bool, error: str | None) -> None:
+        for item in self.workspace_tree.get_children():
+            self.workspace_tree.delete(item)
+        self._workspace_tree_paths.clear()
+        if error:
+            self.workspace_empty_text.set(f"项目文件暂时无法读取\n\n{error}")
+            self._show_workspace_empty(True)
+            return
+        for path in sorted(results, key=lambda item: (not item.is_dir(), item.name.casefold())):
+            self._insert_workspace_tree_path("", path, search_result=True)
+        if results:
+            self._show_workspace_empty(False)
+            if truncated:
+                self.workspace_detail_title.set("搜索结果较多")
+                self.workspace_detail_text.set(f"已显示前 {WORKSPACE_SEARCH_LIMIT} 项，请输入更完整的文件名。")
+        else:
+            self.workspace_empty_text.set("没有找到匹配的文件\n\n换一个文件名，或查看“全部文件”")
+            self._show_workspace_empty(True)
+
+    def _workspace_latest_progress(self, token: int):
+        """Return one worker-owned progress snapshot while holding its lock."""
+
+        progress_store = getattr(self, "_workspace_write_progress", {})
+        progress_lock = getattr(self, "_workspace_write_progress_lock", None)
+        if progress_lock is None:
+            return progress_store.get(token)
+        with progress_lock:
+            return progress_store.get(token)
+
+    def _poll_workspace_queue(self) -> None:
+        progress_store = getattr(self, "_workspace_write_progress", {})
+        progress_lock = getattr(self, "_workspace_write_progress_lock", None)
+        if progress_lock is None:
+            progress_items = tuple(progress_store.items())
+        else:
+            with progress_lock:
+                progress_items = tuple(progress_store.items())
+        for token, snapshot in progress_items:
+            self._render_workspace_import_progress(token, snapshot)
+        try:
+            while True:
+                status, generation, payload = self._workspace_queue.get_nowait()
+                if status == "search":
+                    if generation != self._workspace_search_generation:
+                        continue
+                    results, truncated, error = payload
+                    self._render_workspace_search_results(results, truncated, error)
+                elif status in {
+                    "write_changed",
+                    "write_cancelled",
+                    "write_error",
+                    "write_recovered",
+                    "write_recovery_blocked",
+                }:
+                    token, store, *details = payload
+                    tracked = self._workspace_write_tasks.get(token)
+                    if tracked is None or tracked[1] is not store:
+                        continue
+                    # The terminal queue item and the latest progress snapshot are
+                    # stored separately.  Re-read under the progress lock so a fast
+                    # import cannot jump from "copying" straight to a closed dialog.
+                    latest = self._workspace_latest_progress(token)
+                    if latest is not None:
+                        self._render_workspace_import_progress(token, latest)
+                    self._workspace_write_tasks.pop(token, None)
+                    callbacks = getattr(self, "_workspace_write_callbacks", {}).pop(
+                        token,
+                        (None, None, None),
+                    )
+                    if progress_lock is None:
+                        progress_store.pop(token, None)
+                    else:
+                        with progress_lock:
+                            progress_store.pop(token, None)
+                    is_current = (
+                        store is self.project_store
+                        and generation == self._workspace_project_generation
+                    )
+                    if status == "write_recovery_blocked":
+                        action, exc, recovery_exc = details
+                        self._workspace_recovery_blocked = True
+                        self._workspace_recovery_error = str(recovery_exc)
+                        self._close_workspace_import_progress(token=token, force=True)
+                        runlog.log_exception(f"{action}失败", exc)
+                        runlog.log_exception("项目自动恢复失败", recovery_exc)
+                        if is_current and not self._workspace_close_requested:
+                            if callable(callbacks[2]):
+                                callbacks[2](exc)
+                            messagebox.showerror(
+                                "项目需要恢复",
+                                "资料在最后保存时没有完成，项目已暂停继续写入，以避免覆盖或遗漏资料。\n\n"
+                                "请关闭工具后重新打开当前项目。程序会再次尝试安全恢复。\n\n"
+                                f"原因：{recovery_exc}",
+                                parent=self.root,
+                            )
+                    elif status == "write_error":
+                        action, exc = details
+                        self._close_workspace_import_progress(token=token, force=True)
+                        runlog.log_exception(f"{action}失败", exc)
+                        if is_current and not self._workspace_close_requested:
+                            if callable(callbacks[2]):
+                                callbacks[2](exc)
+                            else:
+                                messagebox.showerror(
+                                    f"无法{action}",
+                                    f"操作没有完成。\n\n原因：{exc}",
+                                    parent=self.root,
+                                )
+                    elif status == "write_recovered":
+                        action, exc = details
+                        self._close_workspace_import_progress(token=token, force=True)
+                        runlog.log_exception(f"{action}最后保存时出现异常", exc)
+                        runlog.log_line(f"{action}已自动恢复到安全状态")
+                        if is_current and not self._workspace_close_requested:
+                            self._refresh_workspace_tree()
+                            self._update_sidebar_project_summary()
+                            messagebox.showwarning(
+                                "项目已恢复到安全状态",
+                                "最后保存时出现异常，程序已完成安全恢复。资料可能已经保存成功。\n\n"
+                                "请先检查右侧是否已出现资料，再决定是否重试。\n\n"
+                                f"原始原因：{exc}",
+                                parent=self.root,
+                            )
+                    elif status == "write_cancelled":
+                        self._close_workspace_import_progress(token=token, force=True)
+                        runlog.log_line(f"{details[0]}已由用户安全停止")
+                        if is_current and not self._workspace_close_requested and callable(callbacks[1]):
+                            callbacks[1]()
+                    elif is_current and not self._workspace_close_requested:
+                        self._show_workspace_import_success(token)
+                        self._refresh_workspace_tree()
+                        self._update_sidebar_project_summary()
+                        if callable(callbacks[0]):
+                            result = details[0] if details else None
+                            callbacks[0](result)
+                    else:
+                        self._close_workspace_import_progress(token=token, force=True)
+                    self._update_workspace_action_states()
+        except queue.Empty:
+            pass
+        if self._workspace_close_requested and not self._workspace_write_in_progress():
+            self._finish_app_close()
+            return
+        self.root.after(180, self._poll_workspace_queue)
+
+    def _open_selected_workspace_item(self, event=None) -> None:
+        path = self._selected_workspace_path()
+        if path is None or not path.exists():
+            return
+        if event is not None and path.is_dir():
+            item = self.workspace_tree.selection()[0]
+            self.workspace_tree.item(item, open=not bool(self.workspace_tree.item(item, "open")))
+            if self.workspace_tree.item(item, "open"):
+                self._on_workspace_tree_open()
+            return
+        try:
+            open_path(path)
+        except Exception as exc:
+            runlog.log_exception("打开项目文件失败", exc)
+            messagebox.showerror("无法打开", f"这个项目文件无法打开。\n\n原因：{exc}", parent=self.root)
+
+    def _reveal_selected_workspace_item(self) -> None:
+        path = self._selected_workspace_path()
+        if path is None or not path.exists():
+            return
+        try:
+            if path.is_dir():
+                open_path(path)
+            elif sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", "/select,", str(path)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)])
+            else:
+                open_path(path.parent)
+        except Exception as exc:
+            runlog.log_exception("定位项目文件失败", exc)
+            messagebox.showerror("无法定位", f"暂时无法在文件夹中定位这个文件。\n\n原因：{exc}", parent=self.root)
+
+    def _open_workspace_trash_dialog(self) -> None:
+        if self.current_project_path is None or self.project_store is None:
+            messagebox.showinfo("还没有工作项目", "请先新建或打开一个工作项目。", parent=self.root)
+            return
+        existing = getattr(self, "_workspace_trash_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+
+        dialog_width, preferred_dialog_height = self._update_dialog_size(760, 487)
+        window = Toplevel(self.root)
+        self._workspace_trash_window = window
+        self._workspace_trash_restore_in_progress = False
+        setattr(window, "_hr_ui_scale", self.ui_scale)
+        window.withdraw()
+        window.title("项目回收站")
+        window.configure(bg=COLOR_SURFACE)
+        window.resizable(False, False)
+        window.transient(self.root)
+
+        self._workspace_trash_search_var = StringVar(master=window)
+        self._workspace_trash_status_var = StringVar(master=window)
+        self._workspace_trash_restore_path_var = StringVar(master=window, value="请选择左侧处理记录")
+        self._workspace_trash_project_var = StringVar(master=window)
+        self._workspace_trash_notice_var = StringVar(
+            master=window,
+            value="恢复时不会覆盖项目中的现有资料。",
+        )
+        self._workspace_trash_card_widgets = {}
+
+        body = Frame(window, bg=COLOR_SURFACE)
+        body.pack(fill=BOTH, expand=True, padx=self._pad(28), pady=self._pad(22, 20))
+        Label(
+            body,
+            text="项目回收站",
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=(self.base_font[0], _font_size(16), "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        Label(
+            body,
+            text="这里保存从当前项目移走的处理批次，可以恢复，不会立即永久删除。",
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=self.base_font,
+            anchor="w",
+        ).pack(fill="x", pady=self._pad(2, 12))
+
+        search_shell = Frame(body, bg=COLOR_SURFACE)
+        search_shell.pack(fill="x", pady=self._pad(0, 12))
+        search_entry = ttk.Entry(
+            search_shell,
+            textvariable=self._workspace_trash_search_var,
+            style="App.TEntry",
+        )
+        search_entry.pack(fill="x")
+        search_placeholder = Label(
+            search_shell,
+            text="查找已移除的批次",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.base_font,
+            anchor="w",
+            cursor="xterm",
+            takefocus=0,
+        )
+
+        def sync_search_placeholder() -> None:
+            if self._workspace_trash_search_var is not None and self._workspace_trash_search_var.get():
+                search_placeholder.place_forget()
+                return
+            search_placeholder.place(x=self._px(13), rely=0.5, anchor="w")
+
+        search_placeholder.bind("<Button-1>", lambda _event: search_entry.focus_set())
+        search_entry.bind("<Return>", _workspace_trash_ignore_enter)
+        search_entry.bind("<KP_Enter>", _workspace_trash_ignore_enter)
+        sync_search_placeholder()
+
+        # 底部操作区先占位，再让中间双栏填充剩余空间。这样即使屏幕高度不足，
+        # 也只会缩小可滚动的中间区，不会把“关闭/恢复”按钮裁掉。
+        button_row = Frame(body, bg=COLOR_SURFACE)
+        button_row.pack(side="bottom", fill="x", pady=self._pad(14, 0))
+        restore_button = CodexButton(
+            button_row,
+            text="恢复到项目",
+            command=self._restore_selected_workspace_trash,
+            variant="primary",
+            width=104,
+            min_width=96,
+            height=36,
+        )
+        restore_button.pack(side=RIGHT)
+        self._workspace_trash_restore_button = restore_button
+        close_button = CodexButton(
+            button_row,
+            text="关闭",
+            command=self._close_workspace_trash_dialog,
+            width=70,
+            min_width=64,
+            height=36,
+        )
+        close_button.pack(side=RIGHT, padx=self._pad(0, 9))
+        for button in (close_button, restore_button):
+            button.configure(takefocus=1)
+
+            def activate(_event=None, target=button):
+                target._on_click()
+                return "break"
+
+            button.bind("<Return>", activate)
+            button.bind("<space>", activate)
+
+        columns = Frame(body, bg=COLOR_SURFACE)
+        columns.pack(fill=BOTH, expand=True)
+        left = Frame(
+            columns,
+            width=self._px(322),
+            bg=COLOR_SURFACE_ALT,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=self._px(1),
+            bd=0,
+        )
+        left.pack(side=LEFT, fill=BOTH)
+        left.pack_propagate(False)
+        Label(
+            left,
+            text="已移入的处理记录",
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_MUTED,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(12), pady=self._pad(10, 6))
+        list_shell = Frame(left, bg=COLOR_SURFACE_ALT)
+        list_shell.pack(fill=BOTH, expand=True, padx=self._pad(6), pady=self._pad(0, 6))
+        list_scroll = ttk.Scrollbar(list_shell, orient=VERTICAL)
+        list_scroll.pack(side=RIGHT, fill=Y)
+        list_canvas = Canvas(
+            list_shell,
+            bg=COLOR_SURFACE_ALT,
+            highlightthickness=0,
+            bd=0,
+            yscrollcommand=list_scroll.set,
+        )
+        list_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        list_scroll.configure(command=list_canvas.yview)
+        list_body = Frame(list_canvas, bg=COLOR_SURFACE_ALT)
+        self._workspace_trash_list_body = list_body
+        list_window = list_canvas.create_window(0, 0, window=list_body, anchor="nw")
+
+        def sync_trash_list(_event=None) -> None:
+            list_canvas.itemconfigure(list_window, width=max(list_canvas.winfo_width(), 1))
+            bounds = list_canvas.bbox("all")
+            if bounds is not None:
+                list_canvas.configure(scrollregion=bounds)
+
+        list_body.bind("<Configure>", sync_trash_list)
+        list_canvas.bind("<Configure>", sync_trash_list)
+
+        def scroll_trash_list(event) -> str | None:
+            if list_body.winfo_reqheight() <= list_canvas.winfo_height():
+                return None
+            if getattr(event, "num", None) == 4:
+                direction = -1
+            elif getattr(event, "num", None) == 5:
+                direction = 1
+            else:
+                direction = -1 if getattr(event, "delta", 0) > 0 else 1
+            list_canvas.yview_scroll(direction, "units")
+            return "break"
+
+        list_canvas.bind("<MouseWheel>", scroll_trash_list)
+        list_canvas.bind("<Button-4>", scroll_trash_list)
+        list_canvas.bind("<Button-5>", scroll_trash_list)
+        window.bind("<MouseWheel>", scroll_trash_list)
+        window.bind("<Button-4>", scroll_trash_list)
+        window.bind("<Button-5>", scroll_trash_list)
+        self._workspace_trash_empty_label = None
+
+        right = Frame(
+            columns,
+            bg=COLOR_SURFACE,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=self._px(1),
+            bd=0,
+        )
+        right.pack(side=LEFT, fill=BOTH, expand=True, padx=self._pad(12, 0))
+        detail_title = Label(
+            right,
+            text="选择一条记录查看恢复位置",
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.card_title_font,
+            anchor="w",
+            justify="left",
+            wraplength=self._px(320),
+        )
+        detail_title.pack(fill="x", padx=self._pad(16), pady=self._pad(14, 10))
+        self._workspace_trash_detail_title = detail_title
+        Label(
+            right,
+            text="恢复位置",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(16))
+        Label(
+            right,
+            textvariable=self._workspace_trash_restore_path_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_PRIMARY,
+            font=self.section_font,
+            anchor="w",
+            justify="left",
+            wraplength=self._px(320),
+        ).pack(fill="x", padx=self._pad(16), pady=self._pad(3, 10))
+        Label(
+            right,
+            text="当前项目",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(16))
+        Label(
+            right,
+            textvariable=self._workspace_trash_project_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=self.base_font,
+            anchor="w",
+            justify="left",
+            wraplength=self._px(320),
+        ).pack(fill="x", padx=self._pad(16), pady=self._pad(3, 10))
+        notice_card = Frame(right, bg=COLOR_WARNING_SOFT)
+        notice_card.pack(fill="x", padx=self._pad(16), pady=self._pad(0, 8))
+        Label(
+            notice_card,
+            textvariable=self._workspace_trash_notice_var,
+            bg=COLOR_WARNING_SOFT,
+            fg=COLOR_WARNING,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+            wraplength=self._px(288),
+        ).pack(fill="x", padx=self._pad(12), pady=self._pad(10))
+        Label(
+            right,
+            textvariable=self._workspace_trash_status_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_DANGER,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+            wraplength=self._px(320),
+        ).pack(fill="x", padx=self._pad(16), pady=self._pad(0, 6))
+
+        def search_changed(*_args) -> None:
+            sync_search_placeholder()
+            self._render_workspace_trash_cards()
+
+        self._workspace_trash_search_trace = self._workspace_trash_search_var.trace_add(
+            "write",
+            search_changed,
+        )
+        window.protocol("WM_DELETE_WINDOW", self._close_workspace_trash_dialog)
+        window.bind("<Escape>", lambda _event: self._close_workspace_trash_dialog())
+
+        self._reload_workspace_trash_details()
+        window.update_idletasks()
+        try:
+            available_height = max(1, window.winfo_screenheight() - self._px(72))
+        except Exception:
+            available_height = max(preferred_dialog_height, window.winfo_reqheight())
+        dialog_height = _workspace_trash_dialog_height(
+            preferred_dialog_height,
+            window.winfo_reqheight(),
+            available_height,
+        )
+        self._center_window(window, dialog_width, dialog_height)
+        window.deiconify()
+        try:
+            window.grab_set()
+        except Exception:
+            pass
+        search_entry.focus_set()
+
+    def _reload_workspace_trash_details(self) -> None:
+        store = self.project_store
+        if store is None:
+            return
+        loader = getattr(store, "list_trash_details", None)
+        if not callable(loader):
+            status_var = getattr(self, "_workspace_trash_status_var", None)
+            if status_var is not None:
+                status_var.set("当前版本暂时无法读取项目回收站。")
+            self._render_workspace_trash_cards()
+            return
+        try:
+            details = tuple(loader())
+        except Exception as exc:
+            runlog.log_exception("读取项目回收站失败", exc)
+            if self._workspace_trash_status_var is not None:
+                self._workspace_trash_status_var.set(f"回收站暂时无法读取：{exc}")
+            self._render_workspace_trash_cards()
+            return
+        self._workspace_trash_details = details
+        available_ids = {str(getattr(item.summary, "id", "")) for item in details}
+        if self._workspace_trash_selected_id not in available_ids:
+            self._workspace_trash_selected_id = str(details[0].summary.id) if details else None
+        if self._workspace_trash_status_var is not None:
+            self._workspace_trash_status_var.set("")
+        self._render_workspace_trash_cards()
+
+    def _render_workspace_trash_cards(self) -> None:
+        list_body = getattr(self, "_workspace_trash_list_body", None)
+        if list_body is None:
+            return
+        for child in list_body.winfo_children():
+            child.destroy()
+        self._workspace_trash_card_widgets = {}
+        query_var = getattr(self, "_workspace_trash_search_var", None)
+        query = query_var.get() if query_var is not None else ""
+        filtered = [item for item in self._workspace_trash_details if _workspace_trash_matches(item, query)]
+        if not filtered:
+            empty = Label(
+                list_body,
+                text=(
+                    "没有找到匹配的处理记录。"
+                    if self._workspace_trash_details
+                    else "回收站是空的。\n\n从项目中移走的处理批次会暂时保存在这里。"
+                ),
+                bg=COLOR_SURFACE_ALT,
+                fg=COLOR_FAINT,
+                font=self.small_font,
+                justify="center",
+                anchor="center",
+                wraplength=self._px(250),
+            )
+            self._workspace_trash_empty_label = empty
+            empty.pack(fill=BOTH, expand=True, padx=self._pad(16), pady=self._pad(42))
+            self._render_workspace_trash_detail(None)
+            return
+        self._workspace_trash_empty_label = None
+
+        filtered_ids = {str(item.summary.id) for item in filtered}
+        if self._workspace_trash_selected_id not in filtered_ids:
+            self._workspace_trash_selected_id = str(filtered[0].summary.id)
+        for detail in filtered:
+            batch_id = str(detail.summary.id)
+            selected = batch_id == self._workspace_trash_selected_id
+            background = COLOR_PRIMARY_SOFT if selected else COLOR_SURFACE
+            card = Frame(
+                list_body,
+                bg=background,
+                highlightbackground=COLOR_PRIMARY if selected else COLOR_BORDER,
+                highlightthickness=self._px(1),
+                bd=0,
+                takefocus=True,
+                cursor="hand2",
+            )
+            card.pack(fill="x", padx=self._pad(4), pady=self._pad(0, 7))
+            title_row = Frame(card, bg=background)
+            title_row.pack(fill="x", padx=self._pad(11), pady=self._pad(9, 2))
+            title = Label(
+                title_row,
+                text=_workspace_trash_title(detail),
+                bg=background,
+                fg=COLOR_TEXT,
+                font=self.section_font,
+                anchor="w",
+                justify="left",
+                wraplength=self._px(195),
+            )
+            title.pack(side=LEFT, fill="x", expand=True)
+            status = HISTORY_STATUS_LABELS.get(str(detail.summary.status), "未开始")
+            status_label = Label(
+                title_row,
+                text=status,
+                bg=COLOR_PRIMARY_SOFT,
+                fg=COLOR_PRIMARY,
+                font=(self.base_font[0], _font_size(8), "bold"),
+                highlightbackground=COLOR_PRIMARY,
+                highlightthickness=self._px(1),
+                anchor="center",
+                padx=self._px(5),
+                pady=self._px(2),
+            )
+            status_label.pack(side=RIGHT, padx=self._pad(8, 0))
+            group_tool = Label(
+                card,
+                text=_workspace_trash_group_tool(detail),
+                bg=background,
+                fg=COLOR_MUTED,
+                font=self.tiny_font,
+                anchor="w",
+                justify="left",
+                wraplength=self._px(260),
+            )
+            group_tool.pack(fill="x", padx=self._pad(11), pady=self._pad(0, 3))
+            meta = Label(
+                card,
+                text=f"移入时间：{_workspace_trash_deleted_text(detail.summary.deleted_at)}",
+                bg=background,
+                fg=COLOR_MUTED,
+                font=self.tiny_font,
+                anchor="w",
+            )
+            meta.pack(fill="x", padx=self._pad(11))
+            counts = (
+                f"上传资料 {detail.upload_count} 个 · 处理结果 {detail.result_count} 个 · "
+                f"补充资料 {detail.supplement_count} 个 · {self._format_history_size(detail.total_size_bytes)}"
+            )
+            count_label = Label(
+                card,
+                text=counts,
+                bg=background,
+                fg=COLOR_FAINT,
+                font=self.tiny_font,
+                anchor="w",
+                justify="left",
+                wraplength=self._px(260),
+            )
+            count_label.pack(fill="x", padx=self._pad(11), pady=self._pad(3, 9))
+            background_widgets = (title_row, title, group_tool, meta, count_label)
+            self._workspace_trash_card_widgets[batch_id] = (card, background_widgets)
+
+            def select(_event=None, selected_id=batch_id):
+                self._select_workspace_trash_detail(selected_id)
+                return "break"
+
+            for widget in (card, *background_widgets, status_label):
+                widget.bind("<Button-1>", select)
+            card.bind("<Return>", select)
+            card.bind("<space>", select)
+
+        self._select_workspace_trash_detail(self._workspace_trash_selected_id)
+
+    def _workspace_trash_current_detail(self):
+        selected_id = self._workspace_trash_selected_id
+        if selected_id is None:
+            return None
+        query_var = getattr(self, "_workspace_trash_search_var", None)
+        query = query_var.get() if query_var is not None else ""
+        return next(
+            (
+                item
+                for item in self._workspace_trash_details
+                if str(item.summary.id) == selected_id and _workspace_trash_matches(item, query)
+            ),
+            None,
+        )
+
+    def _select_workspace_trash_detail(self, batch_id: str | None) -> None:
+        self._workspace_trash_selected_id = str(batch_id) if batch_id else None
+        for item_id, (card, background_widgets) in self._workspace_trash_card_widgets.items():
+            selected = item_id == self._workspace_trash_selected_id
+            background = COLOR_PRIMARY_SOFT if selected else COLOR_SURFACE
+            card.configure(
+                bg=background,
+                highlightbackground=COLOR_PRIMARY if selected else COLOR_BORDER,
+            )
+            for widget in background_widgets:
+                widget.configure(bg=background)
+        self._render_workspace_trash_detail(self._workspace_trash_current_detail())
+
+    def _render_workspace_trash_detail(self, detail) -> None:
+        title_label = getattr(self, "_workspace_trash_detail_title", None)
+        restore_path_var = getattr(self, "_workspace_trash_restore_path_var", None)
+        project_var = getattr(self, "_workspace_trash_project_var", None)
+        notice_var = getattr(self, "_workspace_trash_notice_var", None)
+        if detail is None:
+            if title_label is not None:
+                title_label.configure(text="选择一条记录查看恢复位置")
+            if restore_path_var is not None:
+                restore_path_var.set("请选择左侧处理记录")
+            if project_var is not None:
+                project_var.set(self.workspace_project_name.get())
+            if notice_var is not None:
+                notice_var.set("恢复时不会覆盖项目中的现有资料。")
+            self._update_workspace_trash_restore_state()
+            return
+
+        if title_label is not None:
+            title_label.configure(text=_workspace_trash_title(detail))
+        if restore_path_var is not None:
+            restore_path_var.set(_workspace_trash_restore_location(detail))
+        workspace = getattr(self.project_store, "workspace", None)
+        project_name = str(getattr(workspace, "name", "") or self.workspace_project_name.get())
+        if project_var is not None:
+            project_var.set(project_name + (" · 只读" if self._workspace_project_read_only else ""))
+        if notice_var is not None:
+            notice_var.set("不会覆盖现有资料。若已有同名批次，系统会自动使用新名称恢复。")
+        if self._workspace_trash_status_var is not None and not self._workspace_trash_restore_in_progress:
+            self._workspace_trash_status_var.set(
+                "当前项目为只读，只能查看回收站。" if self._workspace_project_read_only else ""
+            )
+        self._update_workspace_trash_restore_state()
+
+    def _update_workspace_trash_restore_state(self) -> None:
+        button = getattr(self, "_workspace_trash_restore_button", None)
+        if button is None:
+            return
+        detail = self._workspace_trash_current_detail()
+        busy = self._workspace_write_in_progress()
+        can_restore = bool(
+            detail is not None
+            and self.current_project_path is not None
+            and self.project_store is not None
+            and not self._workspace_project_read_only
+            and not self._tool_running
+            and not self._project_batch_by_token
+            and not self._workspace_recovery_blocked
+            and not busy
+            and not self._workspace_trash_restore_in_progress
+        )
+        button.configure(
+            text="正在恢复…" if self._workspace_trash_restore_in_progress else "恢复到项目",
+            state="normal" if can_restore else "disabled",
+        )
+
+    def _restore_selected_workspace_trash(self) -> None:
+        detail = self._workspace_trash_current_detail()
+        store = self.project_store
+        if detail is None or store is None or self._workspace_trash_restore_in_progress:
+            return
+        if self._workspace_project_read_only:
+            if self._workspace_trash_status_var is not None:
+                self._workspace_trash_status_var.set("当前项目为只读，只能查看回收站。")
+            self._update_workspace_trash_restore_state()
+            return
+        if self._workspace_recovery_blocked:
+            if self._workspace_trash_status_var is not None:
+                self._workspace_trash_status_var.set("当前项目需要重新打开并完成恢复后，才能恢复回收站资料。")
+            self._update_workspace_trash_restore_state()
+            return
+        if self._tool_running or self._project_batch_by_token or self._workspace_write_in_progress():
+            if self._workspace_trash_status_var is not None:
+                self._workspace_trash_status_var.set("请等待当前处理或资料保存完成后再恢复。")
+            self._update_workspace_trash_restore_state()
+            return
+
+        batch_id = str(detail.summary.id)
+        self._workspace_trash_restore_in_progress = True
+        if self._workspace_trash_status_var is not None:
+            self._workspace_trash_status_var.set("正在恢复到当前项目，请稍候…")
+        self._update_workspace_trash_restore_state()
+
+        def restored(_result) -> None:
+            self._workspace_trash_restore_in_progress = False
+            restore_location = _workspace_trash_restore_location(detail)
+            self._close_workspace_trash_dialog(force=True)
+            messagebox.showinfo(
+                "已恢复到项目",
+                f"处理批次已恢复到：\n当前项目 / {restore_location}\n\n现有资料没有被覆盖。",
+                parent=self.root,
+            )
+
+        def restore_failed(exc: Exception) -> None:
+            self._workspace_trash_restore_in_progress = False
+            if self._workspace_trash_status_var is not None:
+                self._workspace_trash_status_var.set(f"恢复没有完成：{exc}")
+            self._update_workspace_trash_restore_state()
+
+        self._workspace_run_write(
+            "恢复项目资料",
+            lambda _cancelled: store.restore_from_trash(batch_id),
+            on_success=restored,
+            on_error=restore_failed,
+        )
+
+    def _close_workspace_trash_dialog(self, *, force: bool = False) -> None:
+        if getattr(self, "_workspace_trash_restore_in_progress", False) and not force:
+            return
+        search_var = getattr(self, "_workspace_trash_search_var", None)
+        trace_id = getattr(self, "_workspace_trash_search_trace", None)
+        if search_var is not None and trace_id:
+            try:
+                search_var.trace_remove("write", trace_id)
+            except Exception:
+                pass
+        window = getattr(self, "_workspace_trash_window", None)
+        self._workspace_trash_window = None
+        self._workspace_trash_search_var = None
+        self._workspace_trash_status_var = None
+        self._workspace_trash_restore_path_var = None
+        self._workspace_trash_project_var = None
+        self._workspace_trash_notice_var = None
+        self._workspace_trash_search_trace = None
+        self._workspace_trash_details = ()
+        self._workspace_trash_selected_id = None
+        self._workspace_trash_restore_in_progress = False
+        self._workspace_trash_card_widgets = {}
+        self._workspace_trash_list_body = None
+        self._workspace_trash_empty_label = None
+        self._workspace_trash_detail_title = None
+        self._workspace_trash_restore_button = None
+        if window is not None:
+            try:
+                window.grab_release()
+            except Exception:
+                pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+    def _move_selected_workspace_batch_to_trash(self) -> None:
+        selected = self._selected_workspace_path()
+        batch_root = self._workspace_batch_root_for_path(selected)
+        store = self.project_store
+        if batch_root is None or store is None:
+            return
+        summary, _detail = batch_root
+        if (
+            self._workspace_project_read_only
+            or self._tool_running
+            or self._project_batch_by_token
+            or self._workspace_write_in_progress()
+            or str(summary.status) == "running"
+        ):
+            messagebox.showinfo(
+                "暂时不能移到回收站",
+                "请等待当前处理或资料保存完成，并确认项目不是只读状态。",
+                parent=self.root,
+            )
+            return
+        display_name = str(summary.business_description or summary.business_period or summary.directory_name)
+        if not messagebox.askyesno(
+            "移到项目回收站",
+            f"“{display_name}”的上传资料、处理结果和补充资料会一起移到当前项目回收站。\n\n"
+            "不会永久删除，之后可以从“回收站”恢复。是否继续？",
+            parent=self.root,
+        ):
+            return
+        batch_id = str(summary.id)
+
+        def moved(_result) -> None:
+            messagebox.showinfo(
+                "已移到项目回收站",
+                "完整处理批次已移到当前项目回收站，之后可以恢复。",
+                parent=self.root,
+            )
+
+        def move_failed(exc: Exception) -> None:
+            messagebox.showerror(
+                "无法移到回收站",
+                f"处理批次没有被移走。\n\n原因：{exc}",
+                parent=self.root,
+            )
+
+        self._workspace_run_write(
+            "移到项目回收站",
+            lambda _cancelled: store.move_to_trash(batch_id),
+            on_success=moved,
+            on_error=move_failed,
+        )
+
+    def _show_workspace_add_menu(self) -> None:
+        can_write = (
+            self.current_project_path is not None
+            and not self._workspace_project_read_only
+            and self.project_store is not None
+            and not self._tool_running
+            and not self._project_batch_by_token
+            and not self._workspace_write_in_progress()
+        )
+        state = "normal" if can_write else "disabled"
+        menu = Menu(self.root, tearoff=0, font=self.base_font)
+        menu.add_command(label="导入文件", command=self._import_workspace_files, state=state)
+        menu.add_command(label="导入文件夹", command=self._import_workspace_folder, state=state)
+        menu.add_separator()
+        menu.add_command(label="新建文件夹", command=self._create_workspace_folder, state=state)
+        self._popup_workspace_menu(menu, self.workspace_add_button)
+
+    def _workspace_selected_target(self) -> Path | None:
+        selected = self._selected_workspace_path()
+        if selected is None and self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL:
+            messagebox.showinfo(
+                "请先选择保存位置",
+                "请先展开并选择某次处理的“上传资料”或“补充资料”。\n\n"
+                "如果只是提前存放资料，请切换到“全部文件”，再放入“共用资料”。",
+                parent=self.root,
+            )
+            return None
+        if selected is not None and selected.exists():
+            target = selected if selected.is_dir() else selected.parent
+        else:
+            target = self._workspace_scope_root() or self.current_project_path
+        if target is None:
+            return None
+        store = self.project_store
+        workspace = getattr(store, "workspace", None) if store is not None else None
+        common_root = getattr(workspace, "common_root", None)
+        if target == self.current_project_path or not target.is_dir():
+            if isinstance(common_root, Path) and common_root.is_dir():
+                target = common_root
+        relative_parts: tuple[str, ...] = ()
+        try:
+            relative_parts = target.relative_to(self.current_project_path).parts
+        except ValueError:
+            pass
+        if target.name == "处理结果" or "处理结果" in relative_parts:
+            result_parent = target
+            while result_parent != self.current_project_path and result_parent.name != "处理结果":
+                result_parent = result_parent.parent
+            supplement_target = result_parent.parent / "补充资料"
+            if result_parent.name == "处理结果":
+                if not messagebox.askyesno(
+                    "改存到补充资料",
+                    "“处理结果”只保存工具生成的正式文件。是否改为添加到同一批次的“补充资料”？",
+                    parent=self.root,
+                ):
+                    return None
+                target = supplement_target
+        elif (target / "上传资料").is_dir():
+            target = target / "上传资料"
+        else:
+            # 业务分组和工具目录由系统维护，人工资料只进入“共用资料”或
+            # 某次批次的上传/补充资料，避免出现无法追溯的散落文件。
+            batch_target = self._workspace_batch_for_target(target)
+            in_common = False
+            if isinstance(common_root, Path):
+                try:
+                    target.relative_to(common_root)
+                    in_common = True
+                except ValueError:
+                    pass
+            if batch_target is None and not in_common and isinstance(common_root, Path):
+                target = common_root
+        batch_target = self._workspace_batch_for_target(target)
+        if batch_target is not None and batch_target[1] == "uploads":
+            batch_id, _category = batch_target
+            try:
+                detail = self.project_store.get_batch(batch_id)
+            except Exception:
+                detail = None
+            if detail is not None and detail.summary.status != "draft":
+                if not messagebox.askyesno(
+                    "改存到补充资料",
+                    "已开始或已完成的“上传资料”需要保持原样，方便追溯。是否改为添加到本批次的“补充资料”？",
+                    parent=self.root,
+                ):
+                    return None
+                target = detail.directories["supplements"]
+        return target
+
+    def _workspace_batch_for_target(self, target: Path) -> tuple[str, str] | None:
+        store = self.project_store
+        if store is None:
+            return None
+        try:
+            batches = store.list_batches()
+        except Exception as exc:
+            runlog.log_exception("读取项目批次失败", exc)
+            return None
+        for summary in batches:
+            try:
+                detail = store.get_batch(summary.id)
+            except Exception:
+                continue
+            if detail is None:
+                continue
+            for category in ("uploads", "supplements"):
+                directory = detail.directories.get(category)
+                if directory is None:
+                    continue
+                try:
+                    target.relative_to(directory)
+                except ValueError:
+                    continue
+                return summary.id, category
+        return None
+
+    def _workspace_import_target_text(self, target: Path) -> str:
+        try:
+            relative = Path(target).relative_to(self.current_project_path)
+        except (TypeError, ValueError):
+            return "当前项目"
+        parts = ["当前项目", *relative.parts]
+        return " / ".join(parts)
+
+    def _open_workspace_import_progress(self, token: int, target: Path) -> None:
+        self._close_workspace_import_progress(force=True)
+        dialog_width, dialog_height = self._update_dialog_size(640, 510)
+        window = Toplevel(self.root)
+        self._workspace_import_window = window
+        self._workspace_import_token = token
+        self._workspace_import_started_at = time.monotonic()
+        self._workspace_import_phase = "checking"
+        setattr(window, "_hr_ui_scale", self.ui_scale)
+        window.withdraw()
+        window.title("正在把资料保存到项目")
+        window.configure(bg=COLOR_SURFACE)
+        window.resizable(False, False)
+        window.transient(self.root)
+
+        self._workspace_import_title_var = StringVar(master=window, value="正在检查所选资料…")
+        self._workspace_import_subtitle_var = StringVar(
+            master=window,
+            value="正在确认文件数量、大小和可用空间，资料还没有开始保存。",
+        )
+        self._workspace_import_target_var = StringVar(
+            master=window,
+            value=self._workspace_import_target_text(target),
+        )
+        self._workspace_import_state_var = StringVar(master=window, value="正在扫描")
+        self._workspace_import_name_var = StringVar(master=window, value="正在读取所选资料…")
+        self._workspace_import_left_var = StringVar(master=window, value="已发现 0 个文件")
+        self._workspace_import_middle_var = StringVar(master=window, value="正在计算总大小")
+        self._workspace_import_elapsed_var = StringVar(master=window, value="已用时 00:00")
+        self._workspace_import_safety_title_var = StringVar(master=window, value="检查完成后开始保存")
+        self._workspace_import_safety_text_var = StringVar(
+            master=window,
+            value="现在取消不会写入项目；外部原文件不会被移动或修改。",
+        )
+
+        body = Frame(window, bg=COLOR_SURFACE)
+        body.pack(fill=BOTH, expand=True, padx=self._pad(32), pady=self._pad(28, 24))
+        Label(
+            body,
+            textvariable=self._workspace_import_title_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_TEXT,
+            font=(self.base_font[0], _font_size(16), "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        Label(
+            body,
+            textvariable=self._workspace_import_subtitle_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=self.base_font,
+            anchor="w",
+        ).pack(fill="x", pady=self._pad(3, 14))
+
+        stage_row = Frame(body, bg=COLOR_SURFACE)
+        stage_row.pack(fill="x", pady=self._pad(0, 16))
+        self._workspace_import_stage_labels = []
+        for text_value in ("1  检查资料", "2  复制并校验", "3  完成保存"):
+            stage = Label(
+                stage_row,
+                text=text_value,
+                bg=COLOR_SURFACE_PRESSED,
+                fg=COLOR_MUTED,
+                font=self.small_font,
+                padx=self._px(12),
+                pady=self._px(6),
+            )
+            stage.pack(side=LEFT, padx=self._pad(0, 8))
+            self._workspace_import_stage_labels.append(stage)
+
+        target_card = Frame(
+            body,
+            bg=COLOR_SURFACE,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=self._px(1),
+            bd=0,
+        )
+        target_card.pack(fill="x")
+        Label(
+            target_card,
+            text="保存到",
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(10, 2))
+        Label(
+            target_card,
+            textvariable=self._workspace_import_target_var,
+            bg=COLOR_SURFACE,
+            fg=COLOR_PRIMARY,
+            font=self.section_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(0, 10))
+
+        progress_card = Frame(body, bg=COLOR_SURFACE_ALT)
+        progress_card.pack(fill="x", pady=self._pad(16, 0))
+        Label(
+            progress_card,
+            textvariable=self._workspace_import_state_var,
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(11, 3))
+        Label(
+            progress_card,
+            textvariable=self._workspace_import_name_var,
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_TEXT,
+            font=self.section_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14))
+        self._workspace_import_progress_width = max(self._px(220), dialog_width - self._px(92))
+        self._workspace_import_progress_canvas = Canvas(
+            progress_card,
+            width=self._workspace_import_progress_width,
+            height=self._px(10),
+            bg=COLOR_SURFACE_ALT,
+            highlightthickness=0,
+            bd=0,
+        )
+        self._workspace_import_progress_canvas.pack(fill="x", padx=self._pad(14), pady=self._pad(7, 5))
+        stats = Frame(progress_card, bg=COLOR_SURFACE_ALT)
+        stats.pack(fill="x", padx=self._pad(14), pady=self._pad(0, 11))
+        Label(
+            stats,
+            textvariable=self._workspace_import_left_var,
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_TEXT,
+            font=self.small_font,
+        ).pack(side=LEFT)
+        Label(
+            stats,
+            textvariable=self._workspace_import_elapsed_var,
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_MUTED,
+            font=self.small_font,
+        ).pack(side=RIGHT)
+        Label(
+            stats,
+            textvariable=self._workspace_import_middle_var,
+            bg=COLOR_SURFACE_ALT,
+            fg=COLOR_MUTED,
+            font=self.small_font,
+        ).pack(side=RIGHT, padx=self._pad(0, 14))
+
+        safety = Frame(body, bg=COLOR_PRIMARY_SOFT)
+        safety.pack(fill="x", pady=self._pad(16, 0))
+        Label(
+            safety,
+            textvariable=self._workspace_import_safety_title_var,
+            bg=COLOR_PRIMARY_SOFT,
+            fg=COLOR_PRIMARY,
+            font=self.section_font,
+            anchor="w",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(11, 2))
+        Label(
+            safety,
+            textvariable=self._workspace_import_safety_text_var,
+            bg=COLOR_PRIMARY_SOFT,
+            fg=COLOR_PRIMARY,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", padx=self._pad(14), pady=self._pad(0, 11))
+
+        button_row = Frame(body, bg=COLOR_SURFACE)
+        button_row.pack(fill="x", pady=self._pad(17, 0))
+        cancel_button = CodexButton(
+            button_row,
+            text="取消导入",
+            command=self._cancel_workspace_import,
+            width=92,
+            min_width=86,
+            height=38,
+        )
+        cancel_button.pack(side=RIGHT)
+        self._workspace_import_cancel_button = cancel_button
+        window.protocol("WM_DELETE_WINDOW", self._cancel_workspace_import)
+        window.bind("<Escape>", lambda _event: self._cancel_workspace_import())
+
+        self._set_workspace_import_stage("checking")
+        window.update_idletasks()
+        self._center_window(window, dialog_width, dialog_height)
+        window.deiconify()
+        try:
+            window.grab_set()
+        except Exception:
+            pass
+        window.focus_set()
+
+    def _set_workspace_import_stage(self, phase: str) -> None:
+        self._workspace_import_phase = phase
+        active_index = {"checking": 0, "copying": 1, "finalizing": 2}.get(phase, 0)
+        for index, label in enumerate(getattr(self, "_workspace_import_stage_labels", [])):
+            if index < active_index:
+                label.configure(bg=COLOR_PRIMARY_SOFT, fg=COLOR_PRIMARY)
+            elif index == active_index:
+                label.configure(bg=COLOR_PRIMARY, fg="#ffffff")
+            else:
+                label.configure(bg=COLOR_SURFACE_PRESSED, fg=COLOR_MUTED)
+        cancel_button = getattr(self, "_workspace_import_cancel_button", None)
+        if cancel_button is not None and phase == "finalizing":
+            cancel_button.configure(text="正在完成…", state="disabled")
+
+    def _draw_workspace_import_progress(self, fraction: float | None) -> None:
+        canvas = getattr(self, "_workspace_import_progress_canvas", None)
+        if canvas is None:
+            return
+        try:
+            width = max(canvas.winfo_width(), self._workspace_import_progress_width)
+        except Exception:
+            width = self._workspace_import_progress_width
+        height = self._pxf(8)
+        canvas.delete("all")
+        CodexButton._draw_round_rect(
+            canvas,
+            0,
+            self._pxf(1),
+            width,
+            height,
+            self._pxf(4),
+            fill="#E2E0DA",
+            outline="",
+        )
+        if fraction is None:
+            segment = min(self._pxf(164), width * 0.30)
+            visible = _indeterminate_progress_segment(width, self._workspace_import_animation_offset, segment)
+            if visible is None:
+                return
+            start, end = visible
+        else:
+            start, end = 0.0, width * max(0.0, min(float(fraction), 1.0))
+            if end <= 0:
+                return
+        CodexButton._draw_round_rect(
+            canvas,
+            start,
+            self._pxf(1),
+            end,
+            height,
+            self._pxf(4),
+            fill=COLOR_PRIMARY if self._workspace_import_phase != "checking" else "#87B7A8",
+            outline="",
+        )
+
+    def _tick_workspace_import_animation(self) -> None:
+        if self._workspace_import_window is None or self._workspace_import_phase != "checking":
+            self._workspace_import_animation_job = None
+            return
+        width = max(float(self._workspace_import_progress_width), 1.0)
+        self._workspace_import_animation_offset = (self._workspace_import_animation_offset + self._pxf(9)) % (
+            width + self._pxf(164)
+        )
+        self._draw_workspace_import_progress(None)
+        self._workspace_import_animation_job = self.root.after(40, self._tick_workspace_import_animation)
+
+    @staticmethod
+    def _workspace_progress_field(progress, name: str, default=None):
+        return getattr(progress, name, default)
+
+    def _render_workspace_import_progress(self, token: int, progress) -> None:
+        if token != getattr(self, "_workspace_import_token", None) or progress is None:
+            return
+        phase = str(self._workspace_progress_field(progress, "phase", "checking"))
+        if phase not in {"checking", "copying", "finalizing"}:
+            return
+        if phase != self._workspace_import_phase:
+            self._set_workspace_import_stage(phase)
+        current_name = str(self._workspace_progress_field(progress, "current_name", "") or "")
+        scanned = max(0, int(self._workspace_progress_field(progress, "files_scanned", 0) or 0))
+        completed = max(0, int(self._workspace_progress_field(progress, "files_completed", 0) or 0))
+        total = self._workspace_progress_field(progress, "files_total", None)
+        total = None if total is None else max(0, int(total))
+        copied = max(0, int(self._workspace_progress_field(progress, "bytes_copied", 0) or 0))
+        total_bytes = self._workspace_progress_field(progress, "bytes_total", None)
+        total_bytes = None if total_bytes is None else max(0, int(total_bytes))
+
+        if self._workspace_import_name_var is not None:
+            self._workspace_import_name_var.set(current_name or ("正在核对项目清单" if phase == "finalizing" else "正在读取所选资料…"))
+        if phase == "checking":
+            self._workspace_import_title_var.set("正在检查所选资料…")
+            self._workspace_import_subtitle_var.set("正在确认文件数量、大小和可用空间，资料还没有开始保存。")
+            self._workspace_import_state_var.set("正在扫描")
+            self._workspace_import_left_var.set(f"已发现 {scanned} 个文件")
+            self._workspace_import_middle_var.set(
+                f"共 {self._format_history_size(total_bytes)}" if total_bytes is not None else "正在计算总大小"
+            )
+            self._workspace_import_safety_title_var.set("检查完成后开始保存")
+            self._workspace_import_safety_text_var.set("现在取消不会写入项目；外部原文件不会被移动或修改。")
+            if self._workspace_import_animation_job is None:
+                self._tick_workspace_import_animation()
+        elif phase == "copying":
+            self._workspace_import_title_var.set("正在把资料保存到项目")
+            self._workspace_import_subtitle_var.set("外部原文件不会被移动或修改。")
+            self._workspace_import_state_var.set("正在处理")
+            total_text = str(total) if total is not None else "?"
+            self._workspace_import_left_var.set(f"已完成 {completed} / {total_text} 个文件")
+            if total_bytes is not None:
+                self._workspace_import_middle_var.set(
+                    f"{self._format_history_size(copied)} / {self._format_history_size(total_bytes)}"
+                )
+            else:
+                self._workspace_import_middle_var.set(self._format_history_size(copied))
+            self._workspace_import_safety_title_var.set("完成后才会显示在项目中")
+            self._workspace_import_safety_text_var.set(
+                "全部复制并校验完成后，资料才会加入项目。取消后，本次尚未完成的资料不会加入项目。"
+            )
+            fraction = copied / total_bytes if total_bytes else (completed / total if total else 0.0)
+            self._draw_workspace_import_progress(fraction)
+        else:
+            self._workspace_import_title_var.set("正在完成保存")
+            self._workspace_import_subtitle_var.set("正在完成安全保存，暂时无法取消。")
+            self._workspace_import_state_var.set("正在完成")
+            total_value = total if total is not None else completed
+            self._workspace_import_left_var.set(f"{completed} / {total_value} 个文件")
+            if total_bytes is not None:
+                self._workspace_import_middle_var.set(
+                    f"{self._format_history_size(copied)} / {self._format_history_size(total_bytes)}"
+                )
+            else:
+                self._workspace_import_middle_var.set("正在登记")
+            self._workspace_import_safety_title_var.set("正在进行最后的安全登记")
+            self._workspace_import_safety_text_var.set(
+                "请保持工具打开；如电脑意外中断，下次打开项目时会自动恢复。"
+            )
+            self._draw_workspace_import_progress(1.0)
+        started = self._workspace_import_started_at
+        if started is not None and self._workspace_import_elapsed_var is not None:
+            elapsed = max(0, int(time.monotonic() - started))
+            self._workspace_import_elapsed_var.set(f"已用时 {elapsed // 60:02d}:{elapsed % 60:02d}")
+
+    def _cancel_workspace_import(self) -> None:
+        token = getattr(self, "_workspace_import_token", None)
+        if token is None:
+            return
+        latest = self._workspace_latest_progress(token)
+        latest_phase = str(self._workspace_progress_field(latest, "phase", "")) if latest is not None else ""
+        if latest_phase == "finalizing":
+            # The worker may have crossed the non-cancellable boundary since
+            # Tk last painted the dialog.  Reflect that boundary before return.
+            if getattr(self, "_workspace_import_phase", "") != "finalizing":
+                self._set_workspace_import_stage("finalizing")
+            return
+        if getattr(self, "_workspace_import_phase", "") == "finalizing":
+            return
+        tracked = getattr(self, "_workspace_write_tasks", {}).get(token)
+        if tracked is None:
+            return
+        tracked[0].set()
+        if self._workspace_import_title_var is not None:
+            self._workspace_import_title_var.set("正在安全停止…")
+        if self._workspace_import_subtitle_var is not None:
+            self._workspace_import_subtitle_var.set("正在清理尚未加入项目的临时文件，请稍候。")
+        cancel_button = getattr(self, "_workspace_import_cancel_button", None)
+        if cancel_button is not None:
+            cancel_button.configure(text="正在停止…", state="disabled")
+
+    def _show_workspace_import_success(self, token: int) -> None:
+        if token != getattr(self, "_workspace_import_token", None):
+            return
+        self._set_workspace_import_stage("finalizing")
+        values = (
+            ("_workspace_import_title_var", "完成保存"),
+            ("_workspace_import_subtitle_var", "资料已安全保存到项目。"),
+            ("_workspace_import_state_var", "已完成"),
+            ("_workspace_import_name_var", "项目文件已更新"),
+            ("_workspace_import_safety_title_var", "资料已安全保存"),
+            ("_workspace_import_safety_text_var", "现在可以继续使用项目中的资料。"),
+        )
+        for attribute, value in values:
+            variable = getattr(self, attribute, None)
+            if variable is not None:
+                variable.set(value)
+        cancel_button = getattr(self, "_workspace_import_cancel_button", None)
+        if cancel_button is not None:
+            cancel_button.configure(text="已完成", state="disabled")
+        self._draw_workspace_import_progress(1.0)
+
+        previous_job = getattr(self, "_workspace_import_success_job", None)
+        if previous_job is not None:
+            try:
+                self.root.after_cancel(previous_job)
+            except Exception:
+                pass
+
+        def close_after_success() -> None:
+            self._workspace_import_success_job = None
+            self._close_workspace_import_progress(token=token, force=True)
+
+        self._workspace_import_success_job = self.root.after(700, close_after_success)
+
+    def _close_workspace_import_progress(self, *, token: int | None = None, force: bool = False) -> None:
+        if token is not None and token != getattr(self, "_workspace_import_token", None):
+            return
+        if not force and getattr(self, "_workspace_import_phase", "") == "finalizing":
+            return
+        success_job = getattr(self, "_workspace_import_success_job", None)
+        if success_job is not None:
+            try:
+                self.root.after_cancel(success_job)
+            except Exception:
+                pass
+        self._workspace_import_success_job = None
+        job = getattr(self, "_workspace_import_animation_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._workspace_import_animation_job = None
+        window = getattr(self, "_workspace_import_window", None)
+        self._workspace_import_window = None
+        self._workspace_import_token = None
+        self._workspace_import_started_at = None
+        self._workspace_import_progress_canvas = None
+        self._workspace_import_stage_labels = []
+        self._workspace_import_cancel_button = None
+        if window is not None:
+            try:
+                window.grab_release()
+            except Exception:
+                pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _workspace_import_cancelled_exception(exc: Exception) -> bool:
+        """Match the backend cancellation type without making it a GUI import dependency."""
+
+        try:
+            module = importlib.import_module("hr_toolkit.project_store")
+        except Exception:
+            return False
+        cancelled_type = getattr(module, "ImportCancelled", None)
+        return isinstance(cancelled_type, type) and isinstance(exc, cancelled_type)
+
+    def _workspace_run_write(
+        self,
+        action: str,
+        callback,
+        *,
+        progress_target: Path | None = None,
+        on_success=None,
+        on_cancelled=None,
+        on_error=None,
+    ) -> None:
+        if getattr(self, "_workspace_recovery_blocked", False):
+            messagebox.showerror(
+                "项目需要恢复",
+                "上次资料保存没有完成安全恢复。为避免覆盖或遗漏资料，请关闭工具后重新打开当前项目，"
+                "再继续操作。",
+                parent=self.root,
+            )
+            return
+        if self._workspace_write_in_progress():
+            messagebox.showinfo(
+                "资料正在保存",
+                "请等待当前资料保存完成后再继续。",
+                parent=self.root,
+            )
+            return
+        store = self.project_store
+        if store is None:
+            return
+        self._workspace_write_token += 1
+        token = self._workspace_write_token
+        generation = self._workspace_project_generation
+        cancel_event = threading.Event()
+        self._workspace_write_tasks[token] = (cancel_event, store)
+        if not hasattr(self, "_workspace_write_progress"):
+            self._workspace_write_progress = {}
+        if not hasattr(self, "_workspace_write_callbacks"):
+            self._workspace_write_callbacks = {}
+        self._workspace_write_callbacks[token] = (on_success, on_cancelled, on_error)
+        self._update_workspace_action_states()
+        if progress_target is not None:
+            self._open_workspace_import_progress(token, progress_target)
+
+        def report_progress(snapshot) -> None:
+            tracked = self._workspace_write_tasks.get(token)
+            if tracked is None or tracked[1] is not store:
+                return
+            lock = getattr(self, "_workspace_write_progress_lock", None)
+            if lock is None:
+                self._workspace_write_progress[token] = snapshot
+                return
+            with lock:
+                self._workspace_write_progress[token] = snapshot
+
+        def worker() -> None:
+            try:
+                if progress_target is None:
+                    result = callback(cancel_event.is_set)
+                else:
+                    result = callback(cancel_event.is_set, report_progress)
+            except Exception as exc:
+                if self._workspace_import_cancelled_exception(exc):
+                    self._workspace_queue.put(
+                        ("write_cancelled", generation, (token, store, action, exc))
+                    )
+                    return
+                latest = self._workspace_latest_progress(token)
+                phase = str(self._workspace_progress_field(latest, "phase", "")) if latest is not None else ""
+                if phase == "finalizing":
+                    try:
+                        store.refresh()
+                    except Exception as recovery_exc:
+                        self._workspace_queue.put(
+                            (
+                                "write_recovery_blocked",
+                                generation,
+                                (token, store, action, exc, recovery_exc),
+                            )
+                        )
+                        return
+                    self._workspace_queue.put(
+                        ("write_recovered", generation, (token, store, action, exc))
+                    )
+                    return
+                self._workspace_queue.put(
+                    ("write_error", generation, (token, store, action, exc))
+                )
+                return
+            self._workspace_queue.put(("write_changed", generation, (token, store, result)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _import_workspace_files(self) -> None:
+        target = self._workspace_selected_target()
+        store = self.project_store
+        if target is None or self.current_project_path is None or store is None:
+            return
+        batch_target = self._workspace_batch_for_target(target)
+        selected = filedialog.askopenfilenames(title="选择要导入项目的文件")
+        if not selected:
+            return
+        paths = [Path(path) for path in selected]
+        if batch_target is not None:
+            batch_id, category = batch_target
+            callback = lambda cancelled, on_progress: store.import_sources(
+                batch_id,
+                paths,
+                category=category,
+                role="workspace",
+                cancelled=cancelled,
+                on_progress=on_progress,
+            )
+        else:
+            callback = lambda cancelled, on_progress: store.import_to_directory(
+                target,
+                paths,
+                cancelled=cancelled,
+                on_progress=on_progress,
+            )
+        self._workspace_run_write("导入文件", callback, progress_target=target)
+
+    def _import_workspace_folder(self) -> None:
+        target = self._workspace_selected_target()
+        store = self.project_store
+        if target is None or self.current_project_path is None or store is None:
+            return
+        batch_target = self._workspace_batch_for_target(target)
+        selected = filedialog.askdirectory(title="选择要导入项目的文件夹")
+        if not selected:
+            return
+        source_dir = Path(selected)
+        if batch_target is not None:
+            batch_id, category = batch_target
+            callback = lambda cancelled, on_progress: store.import_sources(
+                batch_id,
+                [source_dir],
+                category=category,
+                role="workspace",
+                cancelled=cancelled,
+                on_progress=on_progress,
+            )
+        else:
+            callback = lambda cancelled, on_progress: store.import_to_directory(
+                target,
+                [source_dir],
+                cancelled=cancelled,
+                on_progress=on_progress,
+            )
+        self._workspace_run_write("导入文件夹", callback, progress_target=target)
+
+    def _create_workspace_folder(self) -> None:
+        target = self._workspace_selected_target()
+        store = self.project_store
+        if target is None or store is None:
+            return
+        name = simpledialog.askstring(
+            "新建文件夹",
+            "文件夹名称",
+            parent=self.root,
+        )
+        if name is None or not name.strip():
+            return
+        self._workspace_run_write(
+            "新建文件夹",
+            lambda _cancelled: store.new_folder(target, name.strip()),
+        )
+
+    def _build_history_view(self, root_frame) -> None:
+        self._history_view = ttk.Frame(root_frame, style="Content.TFrame")
+        history_vscroll = ttk.Scrollbar(self._history_view, orient=VERTICAL)
+        history_vscroll.pack(side=RIGHT, fill=Y)
+        self._history_canvas = Canvas(
+            self._history_view,
+            bg=COLOR_BG,
+            highlightthickness=0,
+            bd=0,
+            yscrollcommand=history_vscroll.set,
+        )
+        self._history_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        history_vscroll.configure(command=self._history_canvas.yview)
+        content = ttk.Frame(
+            self._history_canvas,
+            padding=self._responsive_content_padding(),
+            style="Content.TFrame",
+        )
+        self._history_canvas_window = self._history_canvas.create_window(
+            (0, 0),
+            window=content,
+            anchor="nw",
+        )
+
+        def _sync_history_canvas(_event=None) -> None:
+            self._history_canvas.configure(scrollregion=self._history_canvas.bbox("all"))
+            viewport_width = self._history_canvas.winfo_width()
+            if viewport_width > 1:
+                self._history_canvas.itemconfigure(self._history_canvas_window, width=viewport_width)
+
+        content.bind("<Configure>", _sync_history_canvas, add="+")
+        self._history_canvas.bind("<Configure>", _sync_history_canvas, add="+")
+
+        header = ttk.Frame(content, style="Content.TFrame")
+        header.pack(fill="x")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="资料追溯", style="Eyebrow.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="旧版记录", style="Title.TLabel").grid(row=1, column=0, sticky="w", pady=self._pad(5, 0))
+        header_actions = ttk.Frame(header, style="Content.TFrame")
+        header_actions.grid(row=0, column=1, rowspan=2, sticky="ne")
+        self.history_rebuild_button = CodexButton(
+            header_actions,
+            text="重新整理记录",
+            command=self._rebuild_history_index,
+            variant="link",
+            width=112,
+        )
+        self.history_rebuild_button.pack(side=LEFT, padx=self._pad(0, 6))
+        CodexButton(
+            header_actions,
+            text="打开全部归档资料",
+            command=self._open_history_root,
+            width=150,
+        ).pack(side=LEFT)
+        Label(
+            content,
+            text="这里保留升级前的历史资料；新处理的资料和结果请直接在右侧“项目文件”中查看。",
+            bg=COLOR_BG,
+            fg=COLOR_MUTED,
+            font=self.base_font,
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", pady=self._pad(8, 16))
+
+        filter_card = RoundedCard(content, padding=(18, 14, 18, 14))
+        filter_card.pack(fill="x")
+        filters = filter_card.inner
+        filters.columnconfigure(1, weight=1)
+        ttk.Label(filters, text="查找文件名", style="App.TLabel").grid(row=0, column=0, sticky="w")
+        search_entry = ttk.Entry(filters, textvariable=self.history_search, style="App.TEntry")
+        search_entry.grid(row=0, column=1, sticky="ew", padx=self._pad(10, 12))
+        search_entry.bind("<Return>", lambda _event: self._apply_history_filters())
+        self.history_tool_combo = ttk.Combobox(
+            filters,
+            textvariable=self.history_tool_filter,
+            values=(HISTORY_TOOL_FILTER_ALL, *(label for _tool_id, label in TOOL_NAV_ITEMS)),
+            state="readonly",
+            width=16,
+            style="App.TCombobox",
+        )
+        self.history_tool_combo.grid(row=0, column=2, padx=self._pad(0, 10))
+        self.history_tool_combo.bind("<<ComboboxSelected>>", lambda _event: self._apply_history_filters())
+        self.history_date_combo = ttk.Combobox(
+            filters,
+            textvariable=self.history_date_filter,
+            values=HISTORY_DATE_FILTERS,
+            state="readonly",
+            width=10,
+            style="App.TCombobox",
+        )
+        self.history_date_combo.grid(row=0, column=3, padx=self._pad(0, 10))
+        self.history_date_combo.bind("<<ComboboxSelected>>", lambda _event: self._apply_history_filters())
+        CodexButton(
+            filters,
+            text="查找",
+            command=self._apply_history_filters,
+            variant="tonal",
+            width=70,
+            min_width=64,
+        ).grid(row=0, column=4)
+
+        list_card = RoundedCard(content, padding=(14, 12, 14, 10), fill_height=True, min_height=285)
+        list_card.pack(fill=BOTH, expand=True, pady=self._pad(14, 0))
+        list_body = list_card.inner
+        list_body.grid_rowconfigure(1, weight=1)
+        list_body.grid_columnconfigure(0, weight=1)
+        self.history_message_label = Label(
+            list_body,
+            textvariable=self.history_message,
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=self.small_font,
+            anchor="w",
+        )
+        self.history_message_label.grid(row=0, column=0, sticky="ew", pady=self._pad(0, 8))
+
+        tree_frame = ttk.Frame(list_body, style="InputWrap.TFrame")
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        columns = ("time", "tool", "status", "inputs", "outputs")
+        self.history_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="History.Treeview",
+            height=9,
+        )
+        headings = {
+            "time": "处理时间",
+            "tool": "功能",
+            "status": "状态",
+            "inputs": "上传资料",
+            "outputs": "结果",
+        }
+        for column, title in headings.items():
+            self.history_tree.heading(column, text=title, anchor="w")
+        self.history_tree.column("time", width=148, minwidth=138, stretch=False, anchor="w")
+        self.history_tree.column("tool", width=142, minwidth=110, stretch=False, anchor="w")
+        self.history_tree.column("status", width=82, minwidth=72, stretch=False, anchor="w")
+        self.history_tree.column("inputs", width=220, minwidth=135, stretch=True, anchor="w")
+        self.history_tree.column("outputs", width=190, minwidth=135, stretch=True, anchor="w")
+        self.history_tree.tag_configure("success", foreground=COLOR_SUCCESS)
+        self.history_tree.tag_configure("failed", foreground=COLOR_DANGER)
+        self.history_tree.tag_configure("stopped", foreground=COLOR_WARNING)
+        self.history_tree.tag_configure("running", foreground=COLOR_PRIMARY)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=VERTICAL, command=self.history_tree.yview)
+        tree_hscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.history_tree.xview)
+        self.history_tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=tree_hscroll.set)
+        self.history_tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll.grid(row=0, column=1, sticky="ns")
+        tree_hscroll.grid(row=1, column=0, sticky="ew")
+        self.history_tree.bind("<<TreeviewSelect>>", self._on_history_selected)
+        self.history_tree.bind("<Double-1>", lambda _event: self._open_selected_history_output())
+
+        pager = ttk.Frame(list_body, style="InputWrap.TFrame")
+        pager.grid(row=2, column=0, sticky="ew", pady=self._pad(9, 0))
+        self.history_previous_button = CodexButton(
+            pager,
+            text="上一页",
+            command=lambda: self._change_history_page(-1),
+            variant="link",
+            width=64,
+            min_width=56,
+            height=26,
+        )
+        self.history_previous_button.pack(side=LEFT)
+        Label(
+            pager,
+            textvariable=self.history_page_text,
+            bg=COLOR_SURFACE,
+            fg=COLOR_FAINT,
+            font=self.small_font,
+        ).pack(side=LEFT, padx=self._pad(8, 8))
+        self.history_next_button = CodexButton(
+            pager,
+            text="下一页",
+            command=lambda: self._change_history_page(1),
+            variant="link",
+            width=64,
+            min_width=56,
+            height=26,
+        )
+        self.history_next_button.pack(side=LEFT)
+        CodexButton(
+            pager,
+            text="打开回收站",
+            command=self._open_history_trash,
+            variant="link",
+            width=92,
+            min_width=82,
+            height=26,
+        ).pack(side=RIGHT)
+
+        detail_card = RoundedCard(content, padding=(18, 13, 18, 14))
+        detail_card.pack(fill="x", pady=self._pad(14, 0))
+        detail_header = ttk.Frame(detail_card.inner, style="InputWrap.TFrame")
+        detail_header.pack(fill="x")
+        ttk.Label(detail_header, textvariable=self.history_detail_title, style="CardTitle.TLabel").pack(side=LEFT)
+        self.history_delete_button = CodexButton(
+            detail_header,
+            text="移到回收站",
+            command=self._move_selected_history_to_trash,
+            variant="link",
+            width=92,
+            min_width=82,
+            height=26,
+        )
+        self.history_delete_button.pack(side=RIGHT)
+        self.history_detail_label = Label(
+            detail_card.inner,
+            textvariable=self.history_detail_text,
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=self.small_font,
+            anchor="w",
+            justify="left",
+            wraplength=self._px(720),
+        )
+        self.history_detail_label.pack(fill="x", pady=self._pad(7, 10))
+        detail_actions = ttk.Frame(detail_card.inner, style="InputWrap.TFrame")
+        detail_actions.pack(fill="x")
+        self.history_open_output_button = CodexButton(
+            detail_actions,
+            text="打开结果文件夹",
+            command=self._open_selected_history_output,
+            variant="primary",
+            width=138,
+        )
+        self.history_open_output_button.pack(side=LEFT)
+        self.history_open_input_button = CodexButton(
+            detail_actions,
+            text="查看上传资料",
+            command=self._open_selected_history_input,
+            width=124,
+        )
+        self.history_open_input_button.pack(side=LEFT, padx=self._pad(10, 0))
+        self.history_reuse_button = CodexButton(
+            detail_actions,
+            text="再次使用这些资料",
+            command=self._reuse_selected_history,
+            width=150,
+        )
+        self.history_reuse_button.pack(side=LEFT, padx=self._pad(10, 0))
+        self._set_history_detail_buttons(False, False, False, False)
+
+        def _resize_history(_event=None) -> None:
+            width = max(content.winfo_width(), self._px(640))
+            self.history_detail_label.configure(wraplength=max(self._px(320), width - self._px(80)))
+
+        content.bind("<Configure>", _resize_history, add="+")
+
+        history_scroll_tag = f"HRToolkitHistoryScroll{id(self)}"
+
+        def _history_scroll_units(event) -> int:
+            if getattr(event, "num", None) == 4:
+                return -3
+            if getattr(event, "num", None) == 5:
+                return 3
+            delta = getattr(event, "delta", 0)
+            if not delta:
+                return 0
+            return -max(1, int(abs(delta) / 120)) if delta > 0 else max(1, int(abs(delta) / 120))
+
+        def _on_history_scroll(event):
+            units = _history_scroll_units(event)
+            if not units:
+                return None
+            if event.widget is self.history_tree:
+                top, bottom = self.history_tree.yview()
+                can_scroll_tree = (units < 0 and top > 0) or (units > 0 and bottom < 1.0)
+                if can_scroll_tree:
+                    self.history_tree.yview_scroll(units, "units")
+                    return "break"
+            self._history_canvas.yview_scroll(units, "units")
+            return "break"
+
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            try:
+                self._history_canvas.bind_class(history_scroll_tag, sequence, _on_history_scroll)
+            except Exception:
+                pass
+
+        def _apply_history_scroll_tag(widget) -> None:
+            try:
+                tags = list(widget.bindtags())
+                if history_scroll_tag not in tags:
+                    if widget is self.history_tree:
+                        widget.bindtags((history_scroll_tag, *tags))
+                    else:
+                        widget.bindtags((*tags, history_scroll_tag))
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                _apply_history_scroll_tag(child)
+
+        _apply_history_scroll_tag(self._history_canvas)
+        _apply_history_scroll_tag(content)
+        self.root.after_idle(_sync_history_canvas)
+
+    def _show_history_view(self) -> None:
+        if self.current_view == "history":
+            self._refresh_history()
+            return
+        self.current_view = "history"
+        self._tool_view.pack_forget()
+        self._history_view.pack(side=RIGHT, fill=BOTH, expand=True)
+        self._refresh_nav_buttons()
+        self._refresh_history()
+
+    def _show_tool_view(self) -> None:
+        if self.current_view == "tool":
+            return
+        self.current_view = "tool"
+        self._history_view.pack_forget()
+        self._tool_view.pack(side=RIGHT, fill=BOTH, expand=True)
+        self._refresh_nav_buttons()
+        if hasattr(self, "_sync_right_canvas_window"):
+            self.root.after_idle(self._sync_right_canvas_window)
+
+    def _apply_history_filters(self) -> None:
+        self._history_page = 0
+        self._refresh_history()
+
+    def _change_history_page(self, delta: int) -> None:
+        next_page = max(0, self._history_page + delta)
+        if next_page * HISTORY_PAGE_SIZE >= self._history_total and delta > 0:
+            return
+        self._history_page = next_page
+        self._refresh_history()
+
+    def _refresh_history(self) -> None:
+        if not hasattr(self, "history_tree"):
+            return
+        selected_id = self._history_selected_task.summary.id if self._history_selected_task is not None else None
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        self._history_selected_task = None
+        self._reset_history_detail()
+        store = self.history_store
+        if store is None:
+            self.history_message.set("历史记录暂时无法读取，您的原文件和已有结果不会被删除。")
+            if self._history_init_error:
+                self.history_detail_text.set(f"请联系管理员检查资料库位置。原因：{self._history_init_error}")
+            self._history_total = 0
+            self._update_history_pager()
+            return
+        try:
+            tool_label = self.history_tool_filter.get().strip()
+            tool_id = next((key for key, label in TOOL_NAV_ITEMS if label == tool_label), None)
+            tasks, total = store.list_tasks(
+                search=self.history_search.get(),
+                tool_id=tool_id,
+                started_after=self._history_started_after(),
+                limit=HISTORY_PAGE_SIZE,
+                offset=self._history_page * HISTORY_PAGE_SIZE,
+            )
+        except Exception as exc:
+            runlog.log_exception("读取历史记录失败", exc)
+            self.history_message.set("历史记录暂时无法读取，资料仍保存在本机。可以点击“重新整理记录”。")
+            self.history_detail_text.set(str(exc))
+            self._history_total = 0
+            self._update_history_pager()
+            return
+        self._history_total = total
+        if not tasks:
+            if self.history_search.get().strip() or self.history_tool_filter.get() != HISTORY_TOOL_FILTER_ALL or self.history_date_filter.get() != HISTORY_DATE_FILTER_ALL:
+                self.history_message.set("没有找到相关记录，可以清除查找内容或更换时间范围。")
+            else:
+                self.history_message.set("没有找到旧版记录。新处理的资料和结果请在右侧“项目文件”中查看。")
+            self._update_history_pager()
+            return
+        try:
+            storage = store.storage_stats()
+            storage_text = (
+                f" · 已留存 {self._format_history_size(storage['total_bytes'])}"
+                f" · 磁盘可用 {self._format_history_size(storage['free_bytes'])}"
+            )
+            if storage["trash_bytes"]:
+                storage_text += f"（回收站 {self._format_history_size(storage['trash_bytes'])}）"
+        except Exception:
+            storage_text = ""
+        self.history_message.set(f"共找到 {total} 次处理记录{storage_text}")
+        for task in tasks:
+            self.history_tree.insert(
+                "",
+                END,
+                iid=task.id,
+                values=(
+                    self._format_history_list_time(task.started_at),
+                    task.tool_name,
+                    HISTORY_STATUS_LABELS.get(task.status, task.status),
+                    self._history_names_text(task.input_names, empty="未归档上传资料"),
+                    self._history_names_text(task.output_names, empty="暂无完整结果"),
+                ),
+                tags=(task.status,),
+            )
+        children = self.history_tree.get_children()
+        target = selected_id if selected_id in children else children[0]
+        self.history_tree.selection_set(target)
+        self.history_tree.focus(target)
+        self.history_tree.see(target)
+        self._load_history_detail(target)
+        self._update_history_pager()
+
+    def _update_history_pager(self) -> None:
+        pages = max(1, (self._history_total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+        self._history_page = min(self._history_page, pages - 1)
+        self.history_page_text.set(f"第 {self._history_page + 1} / {pages} 页")
+        self.history_previous_button.config(state="normal" if self._history_page > 0 else "disabled")
+        has_next = (self._history_page + 1) * HISTORY_PAGE_SIZE < self._history_total
+        self.history_next_button.config(state="normal" if has_next else "disabled")
+
+    def _on_history_selected(self, _event=None) -> None:
+        selection = self.history_tree.selection()
+        if selection:
+            self._load_history_detail(selection[0])
+
+    def _load_history_detail(self, task_id: str) -> None:
+        if self.history_store is None:
+            return
+        try:
+            detail = self.history_store.get_task(task_id)
+        except Exception as exc:
+            self.history_detail_title.set("这条记录暂时无法读取")
+            self.history_detail_text.set(str(exc))
+            self._set_history_detail_buttons(False, False, False, False)
+            return
+        if detail is None:
+            self._reset_history_detail()
+            return
+        self._history_selected_task = detail
+        status = HISTORY_STATUS_LABELS.get(detail.summary.status, detail.summary.status)
+        self.history_detail_title.set(f"{detail.summary.tool_name} · {status}")
+        input_text = self._history_names_text(detail.summary.input_names, empty="未归档上传资料", full=True)
+        output_text = self._history_names_text(detail.summary.output_names, empty="未生成完整结果", full=True)
+        lines = [
+            f"处理时间：{self._format_history_time(detail.summary.started_at)}",
+            f"上传资料：{input_text}",
+            f"处理结果：{output_text}",
+        ]
+        if detail.summary.status == "failed":
+            lines.append("说明：上传资料已保存，但本次没有正常生成完整结果。")
+        elif detail.summary.status == "stopped":
+            lines.append("说明：这次处理没有正常完成，可以再次使用已保存的资料。")
+        if detail.summary.error_message and detail.summary.status in {"failed", "stopped"}:
+            lines.append(f"原因：{detail.summary.error_message}")
+        self.history_detail_text.set("\n".join(lines))
+        can_reuse = detail.summary.tool_id != "folder_rename" and bool(detail.inputs)
+        still_finishing = detail.summary.id in self._history_task_by_token.values()
+        self._set_history_detail_buttons(
+            bool(detail.outputs) and not still_finishing,
+            bool(detail.inputs) and detail.summary.status != "running" and not still_finishing,
+            can_reuse and detail.summary.status != "running" and not still_finishing,
+            detail.summary.status != "running" and not still_finishing,
+        )
+
+    def _reset_history_detail(self) -> None:
+        self.history_detail_title.set("选择一条记录查看详情")
+        self.history_detail_text.set("这里用于查看升级前由旧版本保存的处理记录。")
+        if hasattr(self, "history_open_output_button"):
+            self._set_history_detail_buttons(False, False, False, False)
+
+    def _set_history_detail_buttons(self, output: bool, inputs: bool, reuse: bool, delete: bool) -> None:
+        self.history_open_output_button.config(state="normal" if output else "disabled")
+        self.history_open_input_button.config(state="normal" if inputs else "disabled")
+        self.history_reuse_button.config(state="normal" if reuse else "disabled")
+        self.history_delete_button.config(state="normal" if delete else "disabled")
+
+    def _open_selected_history_output(self) -> None:
+        detail = self._history_selected_task
+        if detail is None or not detail.outputs:
+            return
+        if not detail.output_dir.is_dir() or not any(item.archived_path.is_file() for item in detail.outputs):
+            messagebox.showwarning(
+                "结果资料已被移动",
+                "这次处理的结果资料已被移动或删除，请联系管理员检查历史资料库。",
+                parent=self.root,
+            )
+            return
+        try:
+            open_path(detail.output_dir)
+        except Exception as exc:
+            messagebox.showerror("无法打开结果", str(exc), parent=self.root)
+
+    def _open_selected_history_input(self) -> None:
+        detail = self._history_selected_task
+        if detail is None or not detail.inputs:
+            return
+        if not detail.input_dir.is_dir() or not any(item.archived_path.is_file() for item in detail.inputs):
+            messagebox.showwarning(
+                "上传资料已被移动",
+                "这次处理的上传资料已被移动或删除，请联系管理员检查历史资料库。",
+                parent=self.root,
+            )
+            return
+        try:
+            open_path(detail.input_dir)
+        except Exception as exc:
+            messagebox.showerror("无法打开资料", str(exc), parent=self.root)
+
+    def _open_history_root(self) -> None:
+        if self.history_store is None:
+            messagebox.showwarning("历史记录不可用", "资料库暂时无法打开，请联系管理员检查保存位置。")
+            return
+        try:
+            open_path(self.history_store.records_dir)
+        except Exception as exc:
+            messagebox.showerror("无法打开归档资料", str(exc), parent=self.root)
+
+    def _open_history_trash(self) -> None:
+        if self.history_store is None:
+            messagebox.showwarning("历史记录不可用", "资料库暂时无法打开，请联系管理员检查保存位置。")
+            return
+        try:
+            open_path(self.history_store.trash_dir)
+        except Exception as exc:
+            messagebox.showerror("无法打开回收站", str(exc), parent=self.root)
+
+    def _move_selected_history_to_trash(self) -> None:
+        detail = self._history_selected_task
+        if detail is None or self.history_store is None:
+            return
+        if detail.summary.id in self._history_task_by_token.values():
+            messagebox.showwarning(
+                "正在安全结束",
+                "这次处理的后台工作还在安全结束，请稍等片刻再移动。",
+                parent=self.root,
+            )
+            return
+        if not messagebox.askyesno(
+            "移到回收站",
+            "这次处理的上传资料和结果会移到 HRToolkit 回收站，不会立即永久删除；如需恢复请联系管理员。是否继续？",
+            parent=self.root,
+        ):
+            return
+        try:
+            self.history_store.move_to_trash(detail.summary.id)
+        except Exception as exc:
+            messagebox.showerror("无法移动", str(exc), parent=self.root)
+            return
+        self._history_selected_task = None
+        self._refresh_history()
+
+    def _rebuild_history_index(self) -> None:
+        if self.history_store is None:
+            messagebox.showwarning("历史记录不可用", "资料库暂时无法读取，请联系管理员检查保存位置。")
+            return
+        self.history_rebuild_button.config(state="disabled")
+        self.history_message.set("正在整理历史记录，请稍候…")
+
+        def worker() -> None:
+            try:
+                count = self.history_store.rebuild_index_from_manifests()
+            except Exception as exc:
+                self.history_queue.put(("rebuild_error", exc))
+                return
+            self.history_queue.put(("rebuild_done", count))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_history_queue(self) -> None:
+        try:
+            while True:
+                status, payload = self.history_queue.get_nowait()
+                if hasattr(self, "history_rebuild_button"):
+                    self.history_rebuild_button.config(state="normal")
+                if status == "rebuild_done":
+                    self._refresh_history()
+                    messagebox.showinfo(
+                        "整理完成",
+                        f"历史记录已经整理完成，恢复或修复了 {int(payload or 0)} 条记录。",
+                        parent=self.root,
+                    )
+                elif status == "rebuild_error":
+                    self.history_message.set("整理没有完成，资料仍保存在本机。")
+                    messagebox.showerror("整理失败", str(payload), parent=self.root)
+        except queue.Empty:
+            pass
+        self.root.after(200, self._poll_history_queue)
+
+    def _reuse_selected_history(self) -> None:
+        detail = self._history_selected_task
+        if detail is None:
+            return
+        if self._tool_running:
+            messagebox.showwarning("正在处理", "请先等待当前处理完成，再使用历史资料。", parent=self.root)
+            return
+        tool_id = detail.summary.tool_id
+        if tool_id not in TOOL_NAV_LABELS:
+            messagebox.showwarning("暂不支持", "这条旧记录暂时不能直接再次使用，可以先打开上传资料。", parent=self.root)
+            return
+        if tool_id == "folder_rename":
+            messagebox.showinfo(
+                "请先复制资料",
+                "为了保护历史原件，文件夹改名记录不能直接再次处理。请先打开上传资料并复制到新的文件夹。",
+                parent=self.root,
+            )
+            return
+        self._show_tool_view()
+        self._select_tool(tool_id)
+        if tool_id == "personnel_change_merge" and detail.summary.mode in {"merge", "roster"}:
+            target_index = 1 if detail.summary.mode == "roster" else 0
+            self.change_tabs.select(target_index)
+            self._on_change_tab_changed()
+        elif tool_id == "archive_import" and detail.summary.mode in {"import", "export"}:
+            target_index = 1 if detail.summary.mode == "export" else 0
+            self.change_tabs.select(target_index)
+            self._on_change_tab_changed()
+
+        main_inputs = [item.archived_path for item in detail.inputs if item.role in {"input_path", "input_paths"} and item.archived_path.exists()]
+        secondary: dict[str, list[Path]] = {}
+        for item in detail.inputs:
+            if item.role not in {"input_path", "input_paths"} and item.archived_path.exists():
+                secondary.setdefault(item.role, []).append(item.archived_path)
+        self.change_input_paths = None
+        self.input_path.set("")
+        self.summary_path.set("")
+        if tool_id == "salary_split":
+            if main_inputs:
+                self.input_path.set(str(main_inputs[0]))
+        elif main_inputs:
+            self._set_change_input_paths(main_inputs)
+        if secondary:
+            role_paths = next(iter(secondary.values()))
+            summary_value = role_paths[0] if len(role_paths) == 1 else Path(os.path.commonpath([str(path) for path in role_paths]))
+            self.summary_path.set(str(summary_value))
+        self._refresh_upload_card()
+        self._update_summary_display()
+        messagebox.showinfo("资料已带入", "以前保存的资料已经放回当前功能，请确认后重新处理。", parent=self.root)
+
+    def _history_started_after(self) -> str | None:
+        selected = self.history_date_filter.get()
+        today = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        if selected == "今天":
+            start = today
+        elif selected == "最近7天":
+            start = today - timedelta(days=6)
+        elif selected == "最近30天":
+            start = today - timedelta(days=29)
+        elif selected == "今年":
+            start = today.replace(month=1, day=1)
+        else:
+            return None
+        return start.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _format_history_time(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return value
+
+    @staticmethod
+    def _format_history_list_time(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%m-%d %H:%M")
+        except (TypeError, ValueError):
+            return value
+
+    @staticmethod
+    def _format_history_size(value: int) -> str:
+        size = max(0, int(value))
+        if size >= 1024**3:
+            return f"{size / 1024**3:.1f} GB"
+        if size >= 1024**2:
+            return f"{size / 1024**2:.1f} MB"
+        if size >= 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size} B"
+
+    @staticmethod
+    def _history_names_text(names: tuple[str, ...], *, empty: str, full: bool = False) -> str:
+        if not names:
+            return empty
+        if full:
+            visible = "、".join(names[:5])
+            return visible if len(names) <= 5 else f"{visible} 等 {len(names)} 个文件"
+        return names[0] if len(names) == 1 else f"{names[0]} 等 {len(names)} 个"
 
     def _check_updates_on_startup(self) -> None:
         if not update_check_enabled():
@@ -2106,6 +6421,13 @@ class HRToolkitApp:
         self._close_update_window()
 
     def _start_update_download(self, update: UpdateInfo) -> None:
+        if self._tool_running or self._history_task_by_token:
+            messagebox.showwarning(
+                "请先完成当前处理",
+                "当前资料还在处理或留存中。请等待完成后再更新，避免结果文件被中断。",
+                parent=self.root,
+            )
+            return
         self._write_log(f"开始下载更新包：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
         self._download_speed_anchor = None
@@ -2155,6 +6477,11 @@ class HRToolkitApp:
 
     def _finish_update_download(self, package_path: object | None) -> None:
         if not isinstance(package_path, Path):
+            return
+        if self._tool_running or self._history_task_by_token:
+            if self.update_progress_label is not None:
+                self.update_progress_label.configure(text="更新已下载，正在等待当前处理安全结束...")
+            self.root.after(1000, lambda: self._finish_update_download(package_path))
             return
         if self.update_progress_label is not None:
             self.update_progress_label.configure(text="下载完成，正在启动安装程序...")
@@ -2550,7 +6877,9 @@ class HRToolkitApp:
 
     def _select_tool(self, tool_id: str) -> None:
         if tool_id == self.current_tool:
+            self._show_tool_view()
             return
+        self._show_tool_view()
         if self._tool_running:
             self._stop_tool_run()
         if self.current_tool == "personnel_change_merge":
@@ -2580,8 +6909,11 @@ class HRToolkitApp:
         if not self.output_dir_user_selected:
             self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
         self._set_tool_texts()
+        self._update_project_output_controls()
         self._clear_log()
         self._write_log(self._initial_log_text())
+        if hasattr(self, "workspace_tree") and self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL:
+            self._refresh_workspace_tree()
 
     def _save_change_form_state(self, mode: str) -> None:
         self.change_form_state[mode] = (self.input_path.get(), self.summary_path.get(), self.change_input_paths)
@@ -2620,12 +6952,17 @@ class HRToolkitApp:
             self._load_change_form_state(selected_mode)
         self._set_tool_texts()
         self.last_output_dir = None
+        self._update_project_output_controls()
         self._clear_log()
         self._write_log(self._initial_log_text())
+        if hasattr(self, "workspace_tree") and self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL:
+            self._refresh_workspace_tree()
 
     def _refresh_nav_buttons(self) -> None:
         for tool_id, item in self.nav_buttons.items():
-            item.set_selected(tool_id == self.current_tool)
+            item.set_selected(self.current_view == "tool" and tool_id == self.current_tool)
+        if hasattr(self, "history_nav_item"):
+            self.history_nav_item.set_selected(self.current_view == "history")
 
     def _set_tool_texts(self) -> None:
         self.tool_group.set(TOOL_GROUP_LABELS.get(self.current_tool, "人员运营自动化"))
@@ -3299,7 +7636,7 @@ class HRToolkitApp:
                 ("适用：把 1-12 个月工资表合成一张个人应发工资汇总表。", "strong"),
                 ("步骤：可选择单个月度工资表、多个工资表、zip压缩包，或包含这些文件的文件夹。", None),
                 ("如已有前几月汇总表，再选择“已有汇总表”；不选则新建一张汇总表。", None),
-                ("点击“开始合并”后，结果会生成到保存位置下的新文件夹中。", None),
+                ("点击“开始合并”后，上传资料和结果会自动保存到当前工作项目。", None),
                 ("结果：按姓名、身份证号、月份合并；没有工资的月份填 0；已存在的人员月份不会覆盖。", None),
                 ("注意：工资表文件名或表内日期要能识别月份；重复人员或重复月份会在执行结果里提醒。", "warning"),
             ]
@@ -3308,7 +7645,7 @@ class HRToolkitApp:
                 return [
                     ("适用：已有月度异动汇总表时，单独更新人力资源花名册。", "strong"),
                     ("步骤：选择单个异动汇总表、多个汇总表，或包含汇总表的文件夹；再选择人力资源花名册。", None),
-                    ("点击“更新花名册”后，结果会生成到保存位置下的新文件夹中。", None),
+                    ("点击“更新花名册”后，上传资料和结果会自动保存到当前工作项目。", None),
                     ("结果：根据汇总表里的增员写入花名册，根据减员在花名册中标记离职。", None),
                     ("注意：不会清空原花名册；身份证已存在的增员不会重复写入，找不到的减员会在日志提醒。", "warning"),
                 ]
@@ -3318,7 +7655,7 @@ class HRToolkitApp:
                 ("如已有月度汇总表，可选择单个汇总表或包含多个汇总表的文件夹；工具会按月份追加，原有记录不会清空。", None),
                 ("不选择已有汇总表时，工具会按月份新建干净汇总表。缺少某个月份汇总表时也会自动创建。", None),
                 ("如果同一文件夹里放了人力资源分析表，工具会自动更新其中的花名册。", None),
-                ("点击“开始汇总”后，结果会生成到保存位置下的新文件夹中。", None),
+                ("点击“开始汇总”后，上传资料和结果会自动保存到当前工作项目。", None),
                 ("月份规则：增员看入职日期，减员看离职日期，转正看转正日期，调动看调整日期。", None),
                 ("注意：只处理增补表、离职、转正、调整；薪酬、产值和同行对比分析暂不处理。", "warning"),
             ]
@@ -3344,12 +7681,12 @@ class HRToolkitApp:
                 ("追加文字：姓名不填就是全部文件夹追加；填姓名就是只处理这个人。输入“劳动合同”会追加为“-劳动合同”。", None),
                 ("删除结尾文字：输入“_劳动合同”，可删除“张三_劳动合同 / 张三-劳动合同 / 张三劳动合同”的结尾文字。", None),
                 ("修改单人名称：填写原姓名和新名称，例如“张三”改为“章五”。", None),
-                ("重要提醒：改名会直接改变真实文件夹名称。必须先看预览，确认无误后再点确认；建议操作前先备份。", "warning"),
+                ("安全说明：确认后会先把所选文件夹复制进当前项目，再在“处理结果”的副本上改名；电脑上的原文件夹不会被修改。", "warning"),
             ]
         if tool_id == "salary_split":
             return [
                 ("适用：一个完整工资表按“入职公司”拆成多个公司工资表。", "strong"),
-                ("步骤：选择工资表文件，保存位置默认在桌面“工资表拆分结果”，点击“开始拆分”。", None),
+                ("步骤：先打开工作项目，选择工资表文件，再点击“开始拆分”。", None),
                 ("点击“打开所在文件夹”可直接查看本次生成的结果目录。", None),
                 ("结果：每个入职公司生成一个 Excel，保留表头、格式、公式、小计和底部总计。", None),
                 ("注意：源工资表不会被修改；如果模板列名或表结构变化，先发给开发确认。", "warning"),
@@ -3546,25 +7883,25 @@ class HRToolkitApp:
 
     def _initial_log_text(self) -> str:
         if self.current_tool == "social_security":
-            return "请选择社保缴费清单、参保人员花名册和保存位置，然后点击“生成报表”。"
+            return "请选择社保缴费清单和参保人员花名册，然后点击“生成报表”。资料和结果会自动留存在当前项目。"
         if self.current_tool == "data_statistics":
-            return "请选择考勤结果、周报记录、月报记录文件或文件夹和保存位置，然后点击“生成统计”。应汇报人员名单是可选项。"
+            return "请选择考勤结果、周报记录和月报记录，然后点击“生成统计”。应汇报人员名单是可选项，资料和结果会自动留存在当前项目。"
         if self.current_tool == "insurance_ledger":
-            return "请选择保单人员清单、人力资源分析表和保存位置，然后点击“生成台账”。"
+            return "请选择保单人员清单和人力资源分析表，然后点击“生成台账”。资料和结果会自动留存在当前项目。"
         if self.current_tool == "salary_merge":
-            return "请选择工资表文件、压缩包或文件夹和保存位置，然后点击“开始合并”。已有汇总表是可选项，用于追加新月份。"
+            return "请选择工资表文件、压缩包或文件夹，然后点击“开始合并”。已有汇总表是可选项，资料和结果会自动留存在当前项目。"
         if self.current_tool == "personnel_change_merge":
             if self.change_mode == "roster":
-                return "请选择异动汇总表、人力资源花名册和保存位置，然后点击“更新花名册”。"
-            return "请选择异动表文件或文件夹和保存位置，然后点击“开始汇总”。已有汇总表是可选项，用于追加新记录。"
+                return "请选择异动汇总表和人力资源花名册，然后点击“更新花名册”。资料和结果会自动留存在当前项目。"
+            return "请选择异动表文件或文件夹，然后点击“开始汇总”。已有汇总表是可选项，资料和结果会自动留存在当前项目。"
         if self.current_tool == "archive_import":
             if self.archive_mode == "export":
-                return "请选择档案汇总表、压缩包或文件夹和保存位置，然后点击“生成档案表”。已有公司档案表是可选项，用于追加。"
-            return "请选择移交表文件、压缩包或文件夹和保存位置，然后点击“开始入库”。已有档案汇总表是可选项。"
+                return "请选择档案汇总表、压缩包或文件夹，然后点击“生成档案表”。已有公司档案表是可选项，结果会自动留存在当前项目。"
+            return "请选择移交表文件、压缩包或文件夹，然后点击“开始入库”。已有档案汇总表是可选项，结果会自动留存在当前项目。"
         if self.current_tool == "folder_rename":
             return "请选择人员文件夹目录，填写改名内容，然后点击“预览”。"
         if self.current_tool == "salary_split":
-            return "请选择工资表文件和保存位置，然后点击“开始拆分”。"
+            return "请选择工资表文件，然后点击“开始拆分”。资料和结果会自动留存在当前项目。"
         return "该工具暂未实现。"
 
     def _choose_input(self) -> None:
@@ -3791,10 +8128,34 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_output(self) -> None:
-        directory = filedialog.askdirectory(title="选择保存位置")
-        if directory:
-            self.output_dir_user_selected = True
-            self.output_dir.set(directory)
+        self._open_workspace_root()
+
+    def _update_project_output_controls(self) -> None:
+        """Keep the legacy form row, but make the project the only formal output target."""
+
+        project_path = self.current_project_path
+        self.output_dir_user_selected = True
+        self.output_dir.set(str(project_path) if project_path is not None else "")
+        self.output_display_path.set(
+            "当前项目 / 本次处理结果" if project_path is not None else "请先新建或打开工作项目"
+        )
+        if not hasattr(self, "output_label_widget"):
+            return
+        self.output_label_widget.configure(text="结果位置")
+        entry = self._form_rows.get("output", {}).get("entry")
+        if entry is not None:
+            try:
+                entry.configure(textvariable=self.output_display_path, state="disabled")
+            except Exception:
+                pass
+        self.output_choose_button.configure(
+            text="打开项目",
+            command=self._open_workspace_root,
+            state="normal" if project_path is not None else "disabled",
+        )
+        if hasattr(self, "open_button"):
+            can_open_result = self.last_output_dir is not None and self.last_output_dir.exists()
+            self.open_button.configure(state="normal" if can_open_result else "disabled")
 
     def _choose_summary(self) -> None:
         if self.current_tool == "social_security":
@@ -3827,6 +8188,38 @@ class HRToolkitApp:
         if self._tool_running:
             self._stop_tool_run()
             return
+        if getattr(self, "_workspace_recovery_blocked", False):
+            messagebox.showerror(
+                "项目需要恢复",
+                "上次资料保存没有完成安全恢复。为避免覆盖或遗漏资料，请关闭工具后重新打开当前项目，"
+                "再开始新的处理。",
+                parent=self.root,
+            )
+            return
+        if self._history_task_by_token or self._project_batch_by_token or self._workspace_write_in_progress():
+            messagebox.showwarning(
+                "正在安全结束",
+                "上一项处理或资料保存还在安全结束，请稍等片刻再开始新的处理。",
+                parent=self.root,
+            )
+            return
+        if self.current_project_path is None or self.project_store is None:
+            messagebox.showerror(
+                "请先打开工作项目",
+                "请先在左侧“工作项目”中新建或打开一个项目。\n\n"
+                "上传资料和处理结果会自动保存在项目中，方便以后查找和追溯。",
+                parent=self.root,
+            )
+            return
+        if self._workspace_project_read_only or not bool(getattr(self.project_store, "writable", False)):
+            reason = getattr(getattr(self.project_store, "workspace", None), "read_only_reason", None)
+            detail = f"\n\n原因：{reason}" if reason else ""
+            messagebox.showerror(
+                "当前项目只能查看",
+                "这个项目目前是只读状态，不能新增处理批次。请关闭其他正在使用该项目的窗口后重试。" + detail,
+                parent=self.root,
+            )
+            return
         if self.current_tool == "folder_rename":
             self._run_folder_rename()
             return
@@ -3856,6 +8249,24 @@ class HRToolkitApp:
             return
         self._run_salary_split()
 
+    def _prepare_result_output_dir(self, parent_dir: Path) -> Path | None:
+        # 工具表单仍会在开始前调用这个方法；项目模式下只返回占位路径，
+        # 真正的批次结果目录由 _start_tool_worker 在输入快照完成后创建。
+        if getattr(self, "project_store", None) is not None and getattr(self, "current_project_path", None) is not None:
+            return Path(self.current_project_path)
+        try:
+            return make_result_output_dir(parent_dir)
+        except (OSError, RuntimeError) as exc:
+            runlog.log_exception("创建结果保存目录失败", exc)
+            messagebox.showerror(
+                "无法创建保存目录",
+                "无法在所选位置创建结果文件夹。\n\n"
+                "请检查该位置是否有写入权限、磁盘空间是否充足，或重新选择保存位置。\n\n"
+                f"原因：{exc}",
+                parent=self.root,
+            )
+            return None
+
     def _run_salary_split(self) -> None:
         input_text = self.input_path.get().strip()
         output_text = self.output_dir.get().strip()
@@ -3874,7 +8285,9 @@ class HRToolkitApp:
             return
         output_parent_dir = Path(output_text)
 
-        output_dir = make_result_output_dir(output_parent_dir)
+        output_dir = self._prepare_result_output_dir(output_parent_dir)
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始拆分，请稍候...")
@@ -3910,7 +8323,9 @@ class HRToolkitApp:
             return
         output_parent_dir = Path(output_text)
 
-        output_dir = make_result_output_dir(output_parent_dir)
+        output_dir = self._prepare_result_output_dir(output_parent_dir)
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始合并，请稍候...")
@@ -3948,7 +8363,9 @@ class HRToolkitApp:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
 
-        output_dir = make_result_output_dir(Path(output_text))
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成社保报表，请稍候...")
@@ -3991,7 +8408,9 @@ class HRToolkitApp:
             messagebox.showwarning("日期填写有误", str(exc))
             return
 
-        output_dir = make_result_output_dir(Path(output_text))
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成统计表，请稍候...")
@@ -4037,7 +8456,9 @@ class HRToolkitApp:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
 
-        output_dir = make_result_output_dir(Path(output_text))
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成保险台账，请稍候...")
@@ -4073,7 +8494,9 @@ class HRToolkitApp:
             return
         output_parent_dir = Path(output_text)
 
-        output_dir = make_result_output_dir(output_parent_dir)
+        output_dir = self._prepare_result_output_dir(output_parent_dir)
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始汇总，请稍候...")
@@ -4110,7 +8533,9 @@ class HRToolkitApp:
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
-        output_dir = make_result_output_dir(Path(output_text))
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始更新花名册，请稍候...")
@@ -4144,7 +8569,9 @@ class HRToolkitApp:
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
-        output_dir = make_result_output_dir(Path(output_text))
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始入库，请稍候...")
@@ -4178,7 +8605,9 @@ class HRToolkitApp:
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
-        output_dir = make_result_output_dir(Path(output_text))
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
         self._begin_tool_run()
         self._clear_log()
         self._write_log("开始生成档案表，请稍候...")
@@ -4242,6 +8671,7 @@ class HRToolkitApp:
         """进入运行状态：主按钮变为“停止”，并为本次运行分配编号。"""
         self._tool_run_token += 1
         self._tool_running = True
+        self._run_cancel_events[self._tool_run_token] = threading.Event()
         self._idle_run_button_text = self.run_button_text.get()
         self.run_button_text.set("停止")
 
@@ -4251,11 +8681,21 @@ class HRToolkitApp:
             self.run_button_text.set(self._idle_run_button_text)
 
     def _stop_tool_run(self) -> None:
-        # 工具函数本身不可中断：递增运行编号让后台任务的结果在返回时被丢弃，
-        # 界面立即恢复可用。被停止的任务如已写出文件，直接忽略即可。
+        token = self._tool_run_token
+        cancel_event = self._run_cancel_events.get(token)
+        if cancel_event is not None:
+            cancel_event.set()
+        task_id = self._history_task_by_token.get(token)
+        if task_id is not None and self.history_store is not None:
+            try:
+                self.history_store.mark_stopped(task_id)
+            except Exception as exc:
+                runlog.log_exception("保存停止状态失败", exc)
+        # 项目批次不能在工具仍可能写文件时提前结案。后台线程会在安全点将其
+        # 标记为“未完成”，并把未登记的半成品移入隐藏隔离区。
         self._tool_run_token += 1
         self._finish_tool_run()
-        self._write_log("已停止本次生成。")
+        self._write_log("已停止本次处理，后台正在安全结束。")
         runlog.log_line(f"用户停止了 {self._tool_log_label()}。")
 
     def _tool_log_label(self) -> str:
@@ -4265,19 +8705,406 @@ class HRToolkitApp:
             return "档案表生成"
         return TOOL_LOG_LABELS.get(self.current_tool, self.current_tool)
 
+    def _history_mode_for_current_tool(self) -> str | None:
+        if self.current_tool == "personnel_change_merge":
+            return self.change_mode
+        if self.current_tool == "archive_import":
+            return self.archive_mode
+        if self.current_tool == "folder_rename":
+            return RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
+        return None
+
+    @staticmethod
+    def _history_serializable(value):
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, (list, tuple)):
+            return [HRToolkitApp._history_serializable(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): HRToolkitApp._history_serializable(item) for key, item in value.items()}
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    def _history_context_from_call(self, tool_func, args, kwargs):
+        bound = inspect.signature(tool_func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        parameters: dict[str, object] = {}
+        sources: list[SourceSpec] = []
+        output_dir: Path | None = None
+        for name, value in bound.arguments.items():
+            if name == "output_dir" and value is not None:
+                output_dir = Path(value).expanduser()
+                parameters[name] = output_dir.name
+                continue
+            if name == "root_dir" and value is not None:
+                root_dir = Path(value).expanduser()
+                parameters[name] = root_dir.name
+                if root_dir.exists():
+                    sources.append(SourceSpec(path=root_dir, role="input_path", suffixes=None))
+                    output_dir = root_dir
+                continue
+            if name not in HISTORY_PATH_ARGUMENTS or value is None:
+                parameters[name] = self._history_serializable(value)
+                continue
+            raw_paths = value if isinstance(value, (list, tuple)) else [value]
+            parameters[name] = [Path(item).name for item in raw_paths if item is not None]
+            if not isinstance(value, (list, tuple)):
+                parameters[name] = parameters[name][0] if parameters[name] else None
+            role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS else name
+            for raw_path in raw_paths:
+                if raw_path is None:
+                    continue
+                path = Path(raw_path).expanduser()
+                if path.exists():
+                    sources.append(SourceSpec(path=path, role=role))
+        return sources, parameters, output_dir
+
+    @classmethod
+    def _history_result_for_storage(cls, value, *, key: str = ""):
+        if isinstance(value, dict):
+            return {
+                str(item_key): cls._history_result_for_storage(item, key=str(item_key))
+                for item_key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._history_result_for_storage(item, key=key) for item in value]
+        if isinstance(value, Path):
+            return value.name
+        if isinstance(value, str):
+            normalized_key = key.lower()
+            if any(token in normalized_key for token in ("path", "file", "dir")):
+                return Path(value).name
+            return value
+        return cls._history_serializable(value)
+
+    def _call_with_archived_inputs(self, tool_func, args, kwargs, archived_records, task_id: str):
+        if self.history_store is None:
+            raise HistoryStoreError("资料留存功能不可用。")
+        bound = inspect.signature(tool_func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        detail = self.history_store.get_task(task_id)
+        if detail is None:
+            raise HistoryStoreError("本次历史记录无法读取。")
+        self.history_store.verify_task_files(task_id, kind="input")
+        records_by_role: dict[str, list[Path]] = {}
+        for record in archived_records:
+            records_by_role.setdefault(record.role, []).append(record.archived_path)
+
+        for name, value in tuple(bound.arguments.items()):
+            if name not in HISTORY_PATH_ARGUMENTS or value is None:
+                continue
+            role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS else name
+            archived_paths = records_by_role.get(role, [])
+            if not archived_paths:
+                raise HistoryStoreError(f"没有完整保存 {name} 对应的原始资料。")
+            original_values = value if isinstance(value, (list, tuple)) else [value]
+            original_paths = [Path(item).expanduser() for item in original_values if item is not None]
+            original_was_directory = len(original_paths) == 1 and original_paths[0].is_dir()
+
+            if name == "template_path" and original_was_directory:
+                source_name = original_paths[0].name
+                replacement = next(
+                    (
+                        parent
+                        for parent in (archived_paths[0].parent, *archived_paths[0].parents)
+                        if parent != detail.input_dir
+                        and parent.is_relative_to(detail.input_dir)
+                        and parent.name == source_name
+                    ),
+                    None,
+                )
+                if replacement is None:
+                    common_path = Path(os.path.commonpath([str(path) for path in archived_paths]))
+                    replacement = common_path if common_path.is_dir() else common_path.parent
+            elif isinstance(value, (list, tuple)) or original_was_directory:
+                replacement = archived_paths
+            else:
+                replacement = archived_paths[0]
+            bound.arguments[name] = replacement
+        return bound.args, bound.kwargs
+
+    def _request_close(self) -> None:
+        has_background_work = (
+            self._tool_running
+            or bool(self._history_task_by_token)
+            or bool(self._project_batch_by_token)
+            or self._workspace_write_in_progress()
+        )
+        if has_background_work and not messagebox.askyesno(
+            "处理尚未结束",
+            "当前处理或资料保存还没有完全结束。现在退出会先安全停止正在保存的资料，"
+            "并把未完成的处理留待下次打开时恢复。是否仍要退出？",
+            parent=self.root,
+        ):
+            return
+        for cancel_event in self._run_cancel_events.values():
+            cancel_event.set()
+        for cancel_event, _store in self._workspace_write_tasks.values():
+            cancel_event.set()
+        if self.history_store is not None:
+            for task_id in set(self._history_task_by_token.values()):
+                try:
+                    self.history_store.mark_stopped(task_id)
+                except Exception as exc:
+                    runlog.log_exception("退出时保存任务状态失败", exc)
+        if self._workspace_write_in_progress():
+            self._workspace_close_requested = True
+            self._update_workspace_action_states()
+            return
+        self._finish_app_close()
+
+    def _finish_app_close(self) -> None:
+        if not getattr(self, "_workspace_close_requested", False):
+            self._workspace_close_requested = True
+        self._save_workspace_preferences()
+        # 正在运行时保留项目写锁直到进程结束，避免后台线程与另一个窗口同时
+        # 写入；下次打开项目时会把残留 running 批次恢复为“未完成”。
+        if self.project_store is not None and not self._project_batch_by_token:
+            try:
+                self.project_store.close()
+            except Exception as exc:
+                runlog.log_exception("关闭工作项目失败", exc)
+        self.root.destroy()
+
+    def _project_source_replacement(
+        self,
+        store,
+        batch_id: str,
+        source: SourceSpec,
+        records,
+        *,
+        source_was_file: bool,
+    ) -> Path:
+        """Resolve one imported source back to the file/folder shape expected by a tool."""
+
+        if not records:
+            raise RuntimeError(f"没有可留存的资料：{source.path.name}")
+        paths = [record.path(store.workspace) for record in records]
+        if source_was_file:
+            if len(paths) != 1:
+                raise RuntimeError(f"资料快照不完整：{source.path.name}")
+            return paths[0]
+        detail = store.get_batch(batch_id)
+        if detail is None:
+            raise RuntimeError("本次处理批次无法读取。")
+        upload_root = detail.directories["uploads"]
+        top_names: set[str] = set()
+        for path in paths:
+            relative = path.relative_to(upload_root)
+            if not relative.parts:
+                raise RuntimeError(f"资料快照位置无效：{source.path.name}")
+            top_names.add(relative.parts[0])
+        if len(top_names) != 1:
+            raise RuntimeError(f"文件夹快照不完整：{source.path.name}")
+        return upload_root / next(iter(top_names))
+
+    def _import_project_run_sources(self, store, batch_id: str, sources: list[SourceSpec], cancel_event) -> dict[str, list[Path]]:
+        replacements: dict[str, list[Path]] = {}
+        project_root = Path(store.root).absolute()
+        for source in sources:
+            # 保留用户实际选择的词法路径，不能先 resolve；否则文件/目录链接会
+            # 被替换成目标路径，绕过 ProjectStore 的链接与越界检查。
+            source_path = Path(source.path).expanduser().absolute()
+            source_was_file = source_path.is_file()
+            try:
+                source_path.relative_to(project_root)
+                is_project_source = True
+            except ValueError:
+                is_project_source = False
+            if is_project_source:
+                copier = getattr(store, "copy_project_sources", None)
+                if not callable(copier):
+                    raise RuntimeError("当前版本暂时不能复用项目内资料，请从原文件位置重新选择。")
+            else:
+                copier = store.import_sources
+            records = copier(
+                batch_id,
+                [source_path],
+                category="uploads",
+                role=source.role,
+                cancelled=cancel_event.is_set,
+            )
+            replacement = self._project_source_replacement(
+                store,
+                batch_id,
+                source,
+                records,
+                source_was_file=source_was_file,
+            )
+            replacements.setdefault(source.role, []).append(replacement)
+        return replacements
+
+    @staticmethod
+    def _copy_project_directory_for_result(store, batch_id: str, source: Path) -> Path:
+        copier = getattr(store, "create_result_working_copy", None)
+        if not callable(copier):
+            raise RuntimeError("当前版本无法安全建立文件夹处理副本。")
+        return copier(batch_id, source)
+
+    @staticmethod
+    def _rebase_project_replacements(
+        replacements: dict[str, list[Path]],
+        old_upload_root: Path,
+        new_upload_root: Path,
+    ) -> dict[str, list[Path]]:
+        return {
+            role: [new_upload_root / path.relative_to(old_upload_root) for path in paths]
+            for role, paths in replacements.items()
+        }
+
+    def _call_with_project_inputs(
+        self,
+        tool_func,
+        args,
+        kwargs,
+        replacements: dict[str, list[Path]],
+        result_dir: Path,
+        store,
+        batch_id: str,
+    ):
+        bound = inspect.signature(tool_func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        for name, value in tuple(bound.arguments.items()):
+            if name == "output_dir":
+                bound.arguments[name] = result_dir
+                continue
+            if value is None or name not in HISTORY_PATH_ARGUMENTS | {"root_dir"}:
+                continue
+            role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS or name == "root_dir" else name
+            copied_paths = replacements.get(role, [])
+            if not copied_paths:
+                raise RuntimeError(f"没有完整保存 {name} 对应的原始资料。")
+            original_values = value if isinstance(value, (list, tuple)) else [value]
+            original_paths = [Path(item).expanduser() for item in original_values if item is not None]
+            original_was_directory = len(original_paths) == 1 and original_paths[0].is_dir()
+            if name == "root_dir":
+                if len(copied_paths) != 1 or not copied_paths[0].is_dir():
+                    raise RuntimeError("人员资料文件夹快照不完整。")
+                replacement = self._copy_project_directory_for_result(store, batch_id, copied_paths[0])
+            elif name == "template_path" and original_was_directory:
+                replacement = copied_paths[0]
+            elif isinstance(value, (list, tuple)) or original_was_directory:
+                replacement = copied_paths
+            else:
+                replacement = copied_paths[0]
+            bound.arguments[name] = replacement
+        return bound.args, bound.kwargs
+
+    @staticmethod
+    def _project_batch_is_closed(store, batch_id: str) -> bool:
+        detail = store.get_batch(batch_id)
+        if detail is not None:
+            return detail.summary.status in {"success", "failed", "stopped"}
+        return any(summary.id == batch_id for summary in store.list_trash())
+
     def _start_tool_worker(self, tool_func, /, *args, **kwargs) -> None:
         token = self._tool_run_token
         label = self._tool_log_label()
-        details = runlog.describe_call(args, kwargs)
-        runlog.log_line(f"开始 {label}：{details}" if details else f"开始 {label}")
+        cancel_event = self._run_cancel_events.setdefault(token, threading.Event())
+        store = self.project_store
+        if store is None or self.current_project_path is None or not bool(getattr(store, "writable", False)):
+            self._finish_tool_run()
+            self._run_cancel_events.pop(token, None)
+            self._show_error_after_log("无法开始处理", "请先打开一个可写的工作项目。")
+            return
+
+        try:
+            sources, _parameters, _legacy_output = self._history_context_from_call(tool_func, args, kwargs)
+            project_tool_id, project_tool_name = self._project_tool_identity()
+            description = project_tool_name
+            if self.current_tool == "folder_rename":
+                description = f"{project_tool_name}-{self.rename_mode.get()}"
+            period = date.today().strftime("%Y-%m-%d")
+            draft = store.create_draft(
+                group_name=TOOL_GROUP_LABELS.get(self.current_tool, "人员运营自动化"),
+                tool_id=project_tool_id,
+                tool_name=project_tool_name,
+                business_description=description,
+                business_period=period,
+            )
+            batch_id = draft.summary.id
+            runlog.log_line(f"开始 {label}（{len(sources)} 个资料来源，自动留存在当前项目）")
+        except Exception as exc:
+            self._finish_tool_run()
+            self._run_cancel_events.pop(token, None)
+            runlog.log_exception("创建项目批次失败", exc)
+            self._write_log(f"无法建立本次项目记录：{exc}")
+            self._show_error_after_log(
+                "无法开始处理",
+                f"为了避免资料无法追溯，本次处理没有开始。\n\n原因：{exc}",
+            )
+            return
+
+        self._project_batch_by_token[token] = batch_id
+        self._update_workspace_action_states()
 
         def worker() -> None:
             start = time.monotonic()
+            result = None
+            started = False
             try:
-                result = tool_func(*args, **kwargs)
+                replacements = self._import_project_run_sources(store, batch_id, sources, cancel_event)
+                if cancel_event.is_set():
+                    raise RuntimeError("本次处理已停止。")
+                old_upload_root = draft.directories["uploads"]
+                running = store.start_batch(batch_id)
+                started = True
+                replacements = self._rebase_project_replacements(
+                    replacements,
+                    old_upload_root,
+                    running.directories["uploads"],
+                )
+                result_dir = store.result_directory(batch_id)
+                call_args, call_kwargs = self._call_with_project_inputs(
+                    tool_func,
+                    args,
+                    kwargs,
+                    replacements,
+                    result_dir,
+                    store,
+                    batch_id,
+                )
+                result = tool_func(*call_args, **call_kwargs)
+                if cancel_event.is_set():
+                    raise RuntimeError("本次处理已停止。")
+                store.register_results(batch_id, result_dir)
+                if cancel_event.is_set():
+                    raise RuntimeError("本次处理已停止。")
+                store.mark_success(batch_id)
             except Exception as exc:
-                runlog.log_exception(f"{label} 失败，耗时 {time.monotonic() - start:.1f} 秒", exc)
-                self.status_queue.put(("error", token, exc))
+                stopped = cancel_event.is_set()
+                finalization_error = None
+                try:
+                    if started:
+                        if stopped:
+                            store.mark_stopped(batch_id)
+                        else:
+                            store.mark_failed(batch_id, str(exc))
+                    else:
+                        store.move_to_trash(batch_id)
+                    if not self._project_batch_is_closed(store, batch_id):
+                        raise RuntimeError("项目批次仍未进入安全结束状态。")
+                except Exception as project_exc:
+                    finalization_error = project_exc
+                    runlog.log_exception("保存项目批次状态失败", project_exc)
+                if finalization_error is not None:
+                    self.status_queue.put(
+                        (
+                            "project_finalize_error",
+                            token,
+                            (exc, finalization_error),
+                        )
+                    )
+                    return
+                if stopped:
+                    runlog.log_line(f"{label} 已停止，后台耗时 {time.monotonic() - start:.1f} 秒")
+                    self.status_queue.put(("stopped", token, None))
+                else:
+                    runlog.log_exception(f"{label} 失败，耗时 {time.monotonic() - start:.1f} 秒", exc)
+                    self.status_queue.put(("error", token, exc))
                 return
             warnings = getattr(result, "warnings", None)
             warn_text = f"，提醒 {len(warnings)} 条" if warnings else ""
@@ -4290,21 +9117,60 @@ class HRToolkitApp:
         try:
             while True:
                 status, token, payload = self.status_queue.get_nowait()
+                keep_project_guard = status == "project_finalize_error"
+                if not keep_project_guard:
+                    self._history_task_by_token.pop(token, None)
+                    self._project_batch_by_token.pop(token, None)
+                    self._run_cancel_events.pop(token, None)
                 if token != self._tool_run_token:
-                    self._write_log("（已停止的任务在后台结束，结果已忽略。）")
+                    if status == "project_finalize_error":
+                        self._write_log("（后台处理未能安全结案，请退出并重新打开工具恢复项目。）")
+                    elif status == "stopped":
+                        self._write_log("（已停止的后台处理已安全结束。）")
+                    else:
+                        self._write_log("（已停止的任务在后台结束，结果已忽略。）")
+                    if self.current_view == "history":
+                        self._refresh_history()
+                    if self.current_project_path is not None:
+                        self._refresh_workspace_tree()
+                        self._update_workspace_action_states()
+                        self._update_sidebar_project_summary()
                     continue
                 self._finish_tool_run()
                 if status == "success":
                     self._record_last_run(True)
                     self._handle_success(payload)
+                elif status == "history_warning" and isinstance(payload, tuple):
+                    self._record_last_run(True)
+                    result, exc = payload
+                    self._handle_success(result, history_warning=str(exc))
                 elif status == "error":
                     self._record_last_run(False)
                     self._handle_error(payload)
+                elif status == "stopped":
+                    self._write_log("本次处理已停止。")
+                elif status == "project_finalize_error":
+                    self._record_last_run(False)
+                    original_exc, finalization_exc = payload
+                    runlog.log_exception("项目批次未能安全结案", finalization_exc)
+                    self._write_log(f"处理没有完成：{original_exc}")
+                    self._write_log("项目仍处于保护状态。请退出并重新打开工具，系统会恢复这次记录。")
+                    self._show_error_after_log(
+                        "项目需要重新打开",
+                        "本次处理没有正常结束，项目已保持锁定，不能继续写入。\n\n"
+                        "请退出并重新打开工具，系统会自动恢复未完成记录。",
+                    )
+                if self.current_view == "history":
+                    self._refresh_history()
+                if self.current_project_path is not None:
+                    self._refresh_workspace_tree()
+                    self._update_workspace_action_states()
+                    self._update_sidebar_project_summary()
         except queue.Empty:
             pass
         self.root.after(150, self._poll_status_queue)
 
-    def _handle_success(self, result) -> None:
+    def _handle_success(self, result, *, history_warning: str | None = None) -> None:
         payload = result.to_dict()
         if self.current_tool == "folder_rename":
             self.last_output_dir = Path(payload["root_dir"])
@@ -4313,7 +9179,6 @@ class HRToolkitApp:
             message = f"已完成 {payload['operation_count']} 个文件夹改名。"
         else:
             self.last_output_dir = Path(payload["output_dir"])
-
             if self.current_tool == "social_security":
                 self._write_log("社保报表生成完成。")
                 self._write_log(f"识别文件数：{payload['source_file_count']}")
@@ -4456,7 +9321,17 @@ class HRToolkitApp:
                 message = "工资表已拆分完成，可以打开结果文件夹查看。"
             else:
                 message = "处理完成。"
-        self._show_success_after_log("处理完成", message)
+        self._update_project_output_controls()
+        if hasattr(self, "workspace_tree") and self.current_project_path is not None:
+            self._refresh_workspace_tree()
+        if history_warning:
+            self._write_log(f"提醒：结果已经生成，但没有完整保存到历史记录：{history_warning}")
+            self._show_warning_after_log(
+                "结果已生成，留存未完成",
+                f"{message}\n\n但本次资料没有完整保存到“历史记录”。请不要删除原文件，并联系管理员检查保存空间。",
+            )
+        else:
+            self._show_success_after_log("处理完成", message)
 
     def _handle_error(self, exc: object | None) -> None:
         action = (
@@ -4493,6 +9368,10 @@ class HRToolkitApp:
         self._flush_log_view()
         self.root.after(80, lambda: messagebox.showerror(title, message, parent=self.root))
 
+    def _show_warning_after_log(self, title: str, message: str) -> None:
+        self._flush_log_view()
+        self.root.after(80, lambda: messagebox.showwarning(title, message, parent=self.root))
+
     def _write_folder_rename_preview(self, result) -> None:
         payload = result.to_dict()
         self._write_log(f"目录：{payload['root_dir']}")
@@ -4514,31 +9393,16 @@ class HRToolkitApp:
         if remaining > 0:
             lines.append(f"... 还有 {remaining} 条")
         lines.append("")
-        lines.append("确认后会直接改名，是否继续？")
+        lines.append("确认后会复制到当前项目，并在处理结果副本上改名；原文件夹不会改变。是否继续？")
         return "\n".join(lines)
 
     def _open_output_dir(self) -> None:
-        directory_text = self.output_dir.get().strip()
         directory = self.last_output_dir
-        if self.current_tool == "folder_rename" and directory is None:
-            input_text = self.input_path.get().strip()
-            directory = Path(input_text) if input_text else None
-            if directory is None:
-                messagebox.showwarning("缺少目录", "请先选择人员文件夹目录。")
-                return
-        if directory is None and directory_text:
-            directory = make_result_output_dir(Path(directory_text))
         if directory is None:
-            messagebox.showwarning("缺少目录", "请先选择保存位置。")
+            messagebox.showwarning("暂无处理结果", "请先完成一次处理，再打开结果目录。")
             return
-        if self.current_tool == "folder_rename" and not directory.exists():
-            messagebox.showwarning("目录不存在", "选择的人员文件夹目录不存在。")
-            return
-        try:
-            if self.current_tool != "folder_rename":
-                directory.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            messagebox.showerror("无法创建目录", str(exc))
+        if not directory.exists():
+            messagebox.showwarning("结果目录不存在", "本次结果目录可能已被移动，请在右侧“项目文件”中查找。")
             return
         open_path(directory)
 
@@ -4603,7 +9467,18 @@ def default_output_parent_dir(tool: str) -> Path:
 
 
 def make_result_output_dir(parent_dir: Path) -> Path:
-    return parent_dir / _default_result_dir_name()
+    parent_dir = parent_dir.expanduser()
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    base_name = _default_result_dir_name()
+    for index in range(1, 10_000):
+        name = base_name if index == 1 else f"{base_name}_{index}"
+        candidate = parent_dir / name
+        try:
+            candidate.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+    raise RuntimeError("同一保存位置的结果文件夹过多，请更换保存位置。")
 
 
 def desktop_dir() -> Path:

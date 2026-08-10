@@ -23,8 +23,31 @@ class RuntimeChecksTest(unittest.TestCase):
                 os.environ.pop(CHECK_OUTPUT_ENV, None)
             self.assertEqual(output.read_text(encoding="utf-8"), __version__ + "\n")
 
-    def test_smoke_test_reads_all_packaged_templates(self) -> None:
+    def test_smoke_test_reads_templates_and_runs_project_lifecycle(self) -> None:
         smoke_test()
+
+    def test_smoke_test_creates_metadata_inside_the_temporary_project(self) -> None:
+        class FixedTemporaryDirectory:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+
+            def __enter__(self) -> str:
+                return str(self.path)
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp) / "runtime-smoke"
+            temp_root.mkdir()
+            with patch(
+                "hr_toolkit.runtime_checks.tempfile.TemporaryDirectory",
+                return_value=FixedTemporaryDirectory(temp_root),
+            ):
+                smoke_test()
+            project_root = temp_root.resolve() / "project"
+            self.assertTrue((project_root / ".hrtoolkit").is_dir())
+            self.assertFalse((temp_root / "history").exists())
 
     def test_unknown_arguments_are_left_for_cli(self) -> None:
         self.assertIsNone(run_headless_command(["salary-split"]))
