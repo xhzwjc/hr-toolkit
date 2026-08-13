@@ -2435,10 +2435,31 @@ def _safe_component(value: str) -> str:
 def _safe_join(root: Path, relative: Path) -> Path:
     if relative.is_absolute():
         raise HistoryStoreError("资料库路径无效。")
-    target = Path(os.path.realpath(os.path.join(os.fspath(root), os.fspath(relative))))
-    if not _is_within(target, root):
+    # ``realpath`` on Windows can return a short/long-name variant when the
+    # final directory does not exist yet.  Comparing that result with a root
+    # resolved through a different Win32 call makes a valid concurrent task
+    # path look outside the data root.  Normalize the lexical path first,
+    # then inspect every existing component for symlinks/reparse points.
+    root_path = Path(os.path.abspath(os.fspath(root)))
+    target = Path(os.path.abspath(os.path.join(os.fspath(root_path), os.fspath(relative))))
+    if not _is_lexically_within(target, root_path):
         raise HistoryStoreError("资料库路径越界。")
+    try:
+        target_relative = Path(os.path.relpath(os.fspath(target), os.fspath(root_path)))
+    except ValueError as exc:
+        raise HistoryStoreError("资料库路径越界。") from exc
+    if not _path_components_are_real(root_path, target_relative):
+        raise HistoryStoreError("资料库路径包含链接或系统重定向目录。")
     return target
+
+
+def _is_lexically_within(path: Path, root: Path) -> bool:
+    try:
+        path_value = os.path.normcase(os.path.abspath(os.fspath(path)))
+        root_value = os.path.normcase(os.path.abspath(os.fspath(root)))
+        return os.path.commonpath((path_value, root_value)) == root_value
+    except (OSError, ValueError):
+        return False
 
 
 def _is_within(path: Path, root: Path) -> bool:
