@@ -22,6 +22,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, Sequence
 
+try:
+    from zoneinfo import ZoneInfo
+
+    _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:  # pragma: no cover - 极端环境兜底
+    from datetime import timedelta
+
+    _SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def _shanghai_now() -> datetime:
+    return datetime.now(tz=_SHANGHAI_TZ)
+
 from hr_toolkit.history_store import (
     COPY_BUFFER_BYTES,
     MIN_FREE_SPACE_BYTES,
@@ -529,7 +542,8 @@ class ProjectStore:
                 batch.get("business_description") if business_description is None else business_description
             ).strip() or "未命名事项"
             period = str(batch.get("business_period") if business_period is None else business_period).strip() or "未填写期间"
-            local_now = (now or datetime.now().astimezone()).astimezone()
+            # 项目批次目录命名固定使用北京时间，与运行环境时区无关
+            local_now = (now or _shanghai_now()).astimezone(_SHANGHAI_TZ)
             base_name = "_".join(
                 (
                     local_now.strftime("%Y%m%d_%H%M%S"),
