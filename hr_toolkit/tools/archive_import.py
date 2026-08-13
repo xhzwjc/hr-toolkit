@@ -11,6 +11,7 @@ _HEADER_WHITESPACE = re.compile(r"\s+")
 import shutil
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,7 @@ DIRECT_FIELD_MAP = {
     "转正考试试卷": "转正考试试卷",
     "增购社保申请单": "增购社保申请单",
     "离职申请单、交接清单": "离职申请单",
+    "离职时间": "离职时间",
 }
 
 FORMULA_HEADERS = {"出生日期", "年齡", "年龄", "入职公式", "出生年月公式", "档案号"}
@@ -714,11 +716,11 @@ def _target_values_for_record(record: ArchiveTransferRecord, target_headers: dic
         if normalized_source in SOURCE_SKIP_HEADERS or normalized_source in FORMULA_HEADERS:
             continue
         if normalized_source in target_headers:
-            values[normalized_source] = value
+            values[normalized_source] = _normalize_date_value(normalized_source, value)
             continue
         target_header = DIRECT_FIELD_MAP.get(normalized_source)
         if target_header and target_header in target_headers:
-            values[target_header] = value
+            values[target_header] = _normalize_date_value(target_header, value)
             continue
         if normalized_source in DIRECT_FIELD_MAP and DIRECT_FIELD_MAP[normalized_source] not in target_headers:
             other_parts.append(_format_other_part(normalized_source, value))
@@ -1085,6 +1087,18 @@ def _format_other_part(header: str, value: Any) -> str:
     if not _has_value(value):
         return ""
     return f"{header}：{_cell_text(value)}"
+
+
+# 仅对日期类字段做截断：datetime → date，避免输出 00:00:00 影响阅读
+_DATE_FIELD_HEADERS = {"入职时间", "离职时间", "出生日期"}
+
+
+def _normalize_date_value(header: str, value: Any) -> Any:
+    if value is None or header not in _DATE_FIELD_HEADERS:
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    return value
 
 
 def _count_by_company(records: list[ArchiveTransferRecord]) -> dict[str, int]:
