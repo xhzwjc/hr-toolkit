@@ -18,6 +18,7 @@ import sys
 import threading
 import unicodedata
 import uuid
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,6 +44,7 @@ DATABASE_BACKUPS_DIR_NAME = "database-backups"
 DATABASE_RECOVERY_PENDING_NAME = ".database-recovery-pending.json"
 DATABASE_BACKUP_MANIFEST_NAME = "complete.json"
 DATABASE_ACCESS_LOCK_NAME = ".database-access.lock"
+TASK_ARCHIVE_LOCKS_DIR_NAME = ".task-archive-locks"
 TRASH_MOVE_PENDING_PREFIX = ".trash-move-"
 DEFAULT_ARCHIVE_SUFFIXES = frozenset({".xlsx", ".xls", ".zip"})
 SCHEMA_SQL = """
@@ -81,6 +83,15 @@ CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(deleted_at, started_at DESC
 CREATE INDEX IF NOT EXISTS idx_files_task_kind ON files(task_id, kind);
 CREATE INDEX IF NOT EXISTS idx_files_display_name ON files(display_name);
 """
+
+
+# ``msvcrt.locking`` treats a second handle in the same process differently
+# from a second process and can raise ``OSError(36, "Resource deadlock
+# avoided")`` when several worker threads open the same lock file at once.
+# Keep a lightweight process-local lock in front of the OS lock.  The weak
+# registry avoids retaining one Python lock forever for every historical task.
+_PROCESS_FILE_LOCKS_GUARD = threading.Lock()
+_PROCESS_FILE_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
 
 
 class HistoryStoreError(RuntimeError):
@@ -160,6 +171,7 @@ class HistoryStore:
         self.root = _validate_data_root(requested)
         self.records_dir = self.root / "records"
         self.trash_dir = self.root / "trash"
+        self.archive_locks_dir = self.root / TASK_ARCHIVE_LOCKS_DIR_NAME
         self.database_backups_dir = self.root / DATABASE_BACKUPS_DIR_NAME
         self.database_path = self.root / DATABASE_NAME
         self.recovered_database_backup: Path | None = None
@@ -204,9 +216,11 @@ class HistoryStore:
         _make_private(marker)
         _assert_storage_entry(self.records_dir, "历史记录目录", kind="directory", allow_missing=True)
         _assert_storage_entry(self.trash_dir, "历史回收站目录", kind="directory", allow_missing=True)
+        _assert_storage_entry(self.archive_locks_dir, "历史资料锁目录", kind="directory", allow_missing=True)
         _assert_storage_entry(self.database_backups_dir, "历史索引备份目录", kind="directory", allow_missing=True)
         _mkdir_private(self.records_dir)
         _mkdir_private(self.trash_dir)
+        _mkdir_private(self.archive_locks_dir)
         recovery_marker = self.root / DATABASE_RECOVERY_PENDING_NAME
         _assert_storage_entry(recovery_marker, "历史索引恢复标记", kind="file", allow_missing=True)
         database_access_lock = self.root / DATABASE_ACCESS_LOCK_NAME
@@ -1989,7 +2003,12 @@ class HistoryStore:
             raise HistoryStoreError("本次历史记录已经结束，不能继续写入资料。")
         if not _is_valid_record_task_dir(task.task_dir, self.records_dir, task_id):
             raise HistoryStoreError("历史记录目录无效。")
-        lock_path = task.task_dir / ".archive.lock"
+        # Keep the archive lock outside the task directory.  Windows refuses
+        # to rename a directory while a file inside that directory is still
+        # open, which made a valid move-to-trash operation fail with
+        # ``WinError 5`` even though the lock itself was correctly held.
+        _mkdir_private(self.archive_locks_dir)
+        lock_path = self.archive_locks_dir / f"{task_id.lower()}.archive.lock"
         if _is_link_like(lock_path):
             raise HistoryStoreError("历史记录锁文件不安全。")
         return lock_path
@@ -2003,6 +2022,16 @@ def _raise_if_cancelled(cancelled: Callable[[], bool] | None) -> None:
 def _startup_lock_path(root: Path) -> Path:
     digest = hashlib.sha256(os.fsencode(str(root))).hexdigest()[:24]
     return root.parent / f".hrtoolkit-startup-{digest}.lock"
+
+
+def _process_file_lock(path: Path) -> threading.RLock:
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _PROCESS_FILE_LOCKS_GUARD:
+        lock = _PROCESS_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROCESS_FILE_LOCKS[key] = lock
+        return lock
 
 
 @contextmanager
@@ -2023,10 +2052,17 @@ def _exclusive_file_lock(
             _make_private(path.parent, directory=True)
     if _is_link_like(path):
         raise HistoryStoreError("历史记录锁文件不安全。")
+    process_lock = _process_file_lock(path)
+    if not process_lock.acquire(blocking=blocking):
+        raise BlockingIOError(f"文件锁正在被当前进程占用：{path}")
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    file_descriptor = os.open(path, flags, 0o600)
+    try:
+        file_descriptor = os.open(path, flags, 0o600)
+    except BaseException:
+        process_lock.release()
+        raise
     locked = False
     try:
         if os.fstat(file_descriptor).st_size == 0:
@@ -2066,6 +2102,7 @@ def _exclusive_file_lock(
             except OSError:
                 pass
         os.close(file_descriptor)
+        process_lock.release()
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -2398,17 +2435,18 @@ def _safe_component(value: str) -> str:
 def _safe_join(root: Path, relative: Path) -> Path:
     if relative.is_absolute():
         raise HistoryStoreError("资料库路径无效。")
-    target = (root / relative).resolve()
-    if not _is_within(target, root.resolve()):
+    target = Path(os.path.realpath(os.path.join(os.fspath(root), os.fspath(relative))))
+    if not _is_within(target, root):
         raise HistoryStoreError("资料库路径越界。")
     return target
 
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
+        path_value = os.path.normcase(os.path.realpath(os.fspath(path)))
+        root_value = os.path.normcase(os.path.realpath(os.fspath(root)))
+        return os.path.commonpath((path_value, root_value)) == root_value
+    except (OSError, ValueError):
         return False
 
 

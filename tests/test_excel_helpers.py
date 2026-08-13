@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import unittest
 import shutil
 import tempfile
@@ -96,6 +97,7 @@ class LibreOfficeLookupTest(unittest.TestCase):
                 with patch("hr_toolkit.common.excel_compat.shutil.which", return_value=None):
                     self.assertIsNone(_find_libreoffice())
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS-specific LibreOffice bundle path")
     def test_find_libreoffice_prefers_mac_app_path(self) -> None:
         """官方 .app 路径优先级最高。"""
         with patch("hr_toolkit.common.excel_compat.os.environ", {"PATH": "/usr/bin:/bin"}):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -797,9 +798,9 @@ class HistoryStoreTests(unittest.TestCase):
         original = self.source_dir / "large.xlsx"
         original.write_bytes(b"x" * 1024)
         task_id = self._start()
-        disk_usage = os.statvfs(self.store.root)
+        disk_usage = shutil.disk_usage(self.store.root)
         fake_usage = type("DiskUsage", (), {"total": 1024, "used": 1024, "free": 0})()
-        self.assertGreaterEqual(disk_usage.f_bsize, 1)  # keep the real path exercised
+        self.assertGreaterEqual(disk_usage.total, 1)  # keep the real path exercised
         with patch("hr_toolkit.history_store.shutil.disk_usage", return_value=fake_usage):
             with self.assertRaisesRegex(HistoryStoreError, "空间不足"):
                 self.store.archive_sources(task_id, [SourceSpec(original)])
