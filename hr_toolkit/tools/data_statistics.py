@@ -153,6 +153,8 @@ class DataStatisticsResult:
     report_staff_path: Path | None = None
     week_range_start: date | None = None
     week_range_end: date | None = None
+    month_range_start: date | None = None
+    month_range_end: date | None = None
     remark_unit: str = REMARK_UNIT_DAY
     warnings: list[str] = field(default_factory=list)
 
@@ -176,6 +178,8 @@ class DataStatisticsResult:
             "report_staff_path": None if self.report_staff_path is None else str(self.report_staff_path),
             "week_range_start": None if self.week_range_start is None else self.week_range_start.isoformat(),
             "week_range_end": None if self.week_range_end is None else self.week_range_end.isoformat(),
+            "month_range_start": None if self.month_range_start is None else self.month_range_start.isoformat(),
+            "month_range_end": None if self.month_range_end is None else self.month_range_end.isoformat(),
             "remark_unit": self.remark_unit,
             "warnings": self.warnings,
         }
@@ -188,6 +192,8 @@ def generate_data_statistics_reports(
     report_staff_path: str | Path | None = None,
     week_start: date | str | None = None,
     week_end: date | str | None = None,
+    month_start: date | str | None = None,
+    month_end: date | str | None = None,
     remark_unit: str = REMARK_UNIT_DAY,
     dry_run: bool = False,
 ) -> DataStatisticsResult:
@@ -198,6 +204,7 @@ def generate_data_statistics_reports(
     output = Path(output_dir).expanduser().resolve()
     staff_path = Path(report_staff_path).expanduser().resolve() if report_staff_path else None
     week_range = resolve_week_range(week_start, week_end)
+    month_range = resolve_month_range(month_start, month_end)
     warnings: list[str] = []
 
     for path in input_paths:
@@ -237,6 +244,7 @@ def generate_data_statistics_reports(
             monthly_records,
             expected_reporters,
             week_range=week_range,
+            month_range=month_range,
         )
         warnings.extend(report_warnings)
 
@@ -256,6 +264,8 @@ def generate_data_statistics_reports(
             report_staff_path=staff_path,
             week_range_start=None if week_range is None else week_range[0],
             week_range_end=None if week_range is None else week_range[1],
+            month_range_start=None if month_range is None else month_range[0],
+            month_range_end=None if month_range is None else month_range[1],
             remark_unit=remark_unit,
             warnings=warnings,
         )
@@ -274,6 +284,7 @@ def generate_data_statistics_reports(
             report_exceptions,
             temp_dir,
             week_range=week_range,
+            month_range=month_range,
         )
         result.output_file = output_file
         return result
@@ -311,6 +322,18 @@ def resolve_week_range(week_start: date | str | None, week_end: date | str | Non
     end = parse_report_date(week_end)
     if start > end:
         raise ValueError("周报统计的开始日期不能晚于结束日期。")
+    return start, end
+
+
+def resolve_month_range(month_start: date | str | None, month_end: date | str | None) -> tuple[date, date] | None:
+    if month_start is None and month_end is None:
+        return None
+    if month_start is None or month_end is None:
+        raise ValueError("月报统计的开始日期和结束日期需要同时填写，或同时留空。")
+    start = parse_report_date(month_start)
+    end = parse_report_date(month_end)
+    if start > end:
+        raise ValueError("月报统计的开始日期不能晚于结束日期。")
     return start, end
 
 
@@ -795,6 +818,7 @@ def _summarize_reports(
     monthly_records: list[ReportRecord],
     expected_reporters: list[ExpectedReporter],
     week_range: tuple[date, date] | None = None,
+    month_range: tuple[date, date] | None = None,
 ) -> tuple[list[ReportPersonSummary], list[ReportException], list[str]]:
     warnings: list[str] = []
     people = _build_report_people(weekly_records, monthly_records, expected_reporters)
@@ -810,6 +834,13 @@ def _summarize_reports(
     weekly_stats_records = weekly_records
     if week_range is not None:
         weekly_stats_records = [record for record in weekly_records if record.report_time.date() >= week_range[0]]
+
+    # 用户指定月报统计范围时，仅范围内的月报记录参与本期统计
+    monthly_stats_records = monthly_records
+    if month_range is not None:
+        monthly_stats_records = [
+            record for record in monthly_records if month_range[0] <= record.report_time.date() <= month_range[1]
+        ]
 
     weekly_due_dates, skipped_due_dates = _weekly_due_dates(weekly_stats_records, week_range)
     weekly_by_due = _group_weekly_records(weekly_stats_records, weekly_due_dates)
@@ -852,9 +883,9 @@ def _summarize_reports(
                     source_row=first_report.source_row,
                 )
 
-    monthly_due = _monthly_due_time(weekly_records, monthly_records)
+    monthly_due = _monthly_due_time(weekly_records, monthly_stats_records, month_range)
     monthly_by_name: dict[str, list[ReportRecord]] = {}
-    for record in monthly_records:
+    for record in monthly_stats_records:
         monthly_by_name.setdefault(record.name, []).append(record)
     monthly_period_text = _monthly_period_text(monthly_due)
     for name, summary in summaries.items():
@@ -1016,7 +1047,18 @@ def _is_report_late(report_time: datetime, due_time: datetime) -> bool:
     return report_time >= due_time + timedelta(minutes=1)
 
 
-def _monthly_due_time(weekly_records: list[ReportRecord], monthly_records: list[ReportRecord]) -> datetime:
+def _monthly_due_time(
+    weekly_records: list[ReportRecord],
+    monthly_records: list[ReportRecord],
+    month_range: tuple[date, date] | None = None,
+) -> datetime:
+    # 用户明确指定月报统计范围时，直接用 month_range[0] 推算「次月 2 日 17:00」，
+    # 不再从 records 推断——避免范围内记录被过滤后回退到 today 导致截止日错位。
+    if month_range is not None:
+        start = month_range[0]
+        next_month = 1 if start.month == 12 else start.month + 1
+        next_year = start.year + 1 if start.month == 12 else start.year
+        return datetime(next_year, next_month, 2, 17, 0)
     records = monthly_records or weekly_records
     if not records:
         today = date.today()
@@ -1091,6 +1133,7 @@ def _write_output_workbook(
     report_exceptions: list[ReportException],
     temp_dir: Path,
     week_range: tuple[date, date] | None = None,
+    month_range: tuple[date, date] | None = None,
 ) -> None:
     template_path = _copy_template(temp_dir)
     workbook = load_workbook(template_path)
@@ -1100,7 +1143,7 @@ def _write_output_workbook(
         report_ws = workbook["周月报模板"]
         report_ws.title = "周月报统计"
         _write_attendance_sheet(attendance_ws, attendance_summaries)
-        _write_report_sheet(report_ws, report_summaries, weekly_records, monthly_records, week_range)
+        _write_report_sheet(report_ws, report_summaries, weekly_records, monthly_records, week_range, month_range)
         _write_attendance_detail_sheet(workbook, attendance_exceptions)
         _write_report_detail_sheet(workbook, report_exceptions)
         workbook.save(output_file)
@@ -1167,6 +1210,7 @@ def _write_report_sheet(
     weekly_records: list[ReportRecord],
     monthly_records: list[ReportRecord],
     week_range: tuple[date, date] | None = None,
+    month_range: tuple[date, date] | None = None,
 ) -> None:
     period_title = _report_title(weekly_records, monthly_records)
     ws["A1"].value = period_title
@@ -1196,7 +1240,7 @@ def _write_report_sheet(
     ws.cell(total_row, 2).value = _report_total_text(weekly_records, week_range)
     ws.cell(total_row, 9).value = None
     _format_table(ws, 2, total_row, 10, set_column_widths=False)
-    _write_report_footer(ws, total_row, weekly_records, monthly_records, week_range)
+    _write_report_footer(ws, total_row, weekly_records, monthly_records, week_range, month_range)
     if ws.max_column > 10:
         ws.delete_cols(11, ws.max_column - 10)
     ws.freeze_panes = "A3"
@@ -1286,6 +1330,7 @@ def _write_report_footer(
     weekly_records: list[ReportRecord],
     monthly_records: list[ReportRecord],
     week_range: tuple[date, date] | None = None,
+    month_range: tuple[date, date] | None = None,
 ) -> None:
     approval_row = total_row + 2
     weekly_rule_row = approval_row + 2
@@ -1314,7 +1359,7 @@ def _write_report_footer(
     ws.cell(weekly_rule_row, 3).value = "汇报规则："
     ws.cell(weekly_rule_row, 4).value = _weekly_rule_text(weekly_records, week_range)
     ws.cell(monthly_rule_row, 3).value = "月报规则："
-    ws.cell(monthly_rule_row, 4).value = _monthly_rule_text(weekly_records, monthly_records)
+    ws.cell(monthly_rule_row, 4).value = _monthly_rule_text(weekly_records, monthly_records, month_range)
 
     ws.cell(approval_row, 1).font = Font(name="宋体", size=12)
     ws.cell(approval_row, 1).alignment = Alignment(horizontal="left", vertical="center")
@@ -1383,11 +1428,15 @@ def _weekly_rule_text(weekly_records: list[ReportRecord], week_range: tuple[date
     return f"{base_rule}；本期截止日期：{due_text}；{tail_rule}"
 
 
-def _monthly_rule_text(weekly_records: list[ReportRecord], monthly_records: list[ReportRecord]) -> str:
+def _monthly_rule_text(
+    weekly_records: list[ReportRecord],
+    monthly_records: list[ReportRecord],
+    month_range: tuple[date, date] | None = None,
+) -> str:
     base_rule = "月报在每月最后一个工作日结束后即可汇报，截止时间为次月2日17:00"
-    if not weekly_records and not monthly_records:
+    if not weekly_records and not monthly_records and month_range is None:
         return base_rule + "；17:00:59前正常，17:01起异常。"
-    monthly_due = _monthly_due_time(weekly_records, monthly_records)
+    monthly_due = _monthly_due_time(weekly_records, monthly_records, month_range)
     return f"{base_rule}；本期截止日期：{_format_due_date(monthly_due.date())} 17:00；17:00:59前正常，17:01起异常。"
 
 

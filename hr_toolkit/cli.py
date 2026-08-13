@@ -95,6 +95,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选周报统计结束日期（如 2026-06-30）；需与 --week-start 同时使用",
     )
     data_statistics.add_argument(
+        "--month-start",
+        help="可选月报统计开始日期（如 2026-06-01）；只统计落在该范围内的月报，需与 --month-end 同时使用",
+    )
+    data_statistics.add_argument(
+        "--month-end",
+        help="可选月报统计结束日期（如 2026-06-30）；需与 --month-start 同时使用",
+    )
+    data_statistics.add_argument(
         "--remark-unit",
         choices=["day", "hour"],
         default="day",
@@ -448,6 +456,8 @@ def main(argv: list[str] | None = None) -> int:
             report_staff_path=args.staff,
             week_start=args.week_start,
             week_end=args.week_end,
+            month_start=args.month_start,
+            month_end=args.month_end,
             remark_unit=args.remark_unit,
             dry_run=args.dry_run,
         )

@@ -48,7 +48,7 @@ from hr_toolkit.tools.folder_rename import (
     FILE_TYPE_DOCUMENT,
 )
 from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
-from hr_toolkit.tools.data_statistics import generate_data_statistics_reports, resolve_week_range
+from hr_toolkit.tools.data_statistics import generate_data_statistics_reports, resolve_month_range, resolve_week_range
 from hr_toolkit.tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from hr_toolkit.tools.insurance_ledger import generate_insurance_ledger
 from hr_toolkit.tools.salary_merge import merge_monthly_salary
@@ -1063,6 +1063,8 @@ class HRToolkitApp:
         self.summary_path = StringVar()
         self.stats_week_start = StringVar()
         self.stats_week_end = StringVar()
+        self.stats_month_start = StringVar()
+        self.stats_month_end = StringVar()
         # 考勤统计表备注中加班/调休的展示单位：day 按天（默认）/ hour 按小时
         self.stats_remark_unit = StringVar(value="day")
         # 正式结果只写入当前工作项目。这个变量保留给现有工具表单，实际运行时
@@ -2291,6 +2293,36 @@ class HRToolkitApp:
                 height=28,
             )
             button.pack(side=LEFT, padx=self._pad(0, 8))
+
+        # 月报统计日期（独立于周报周期）
+        self.stats_month_range_label = ttk.Label(form, text="月报统计日期（可选）", style="App.TLabel")
+        self.stats_month_range_frame = ttk.Frame(form, style="InputWrap.TFrame")
+        stats_month_range_inputs = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
+        stats_month_range_inputs.pack(side="top", fill="x")
+        self.stats_month_start_entry = ttk.Entry(
+            stats_month_range_inputs, textvariable=self.stats_month_start, width=12, style="App.TEntry"
+        )
+        self.stats_month_start_entry.pack(side=LEFT)
+        ttk.Label(stats_month_range_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
+        self.stats_month_end_entry = ttk.Entry(
+            stats_month_range_inputs, textvariable=self.stats_month_end, width=12, style="App.TEntry"
+        )
+        self.stats_month_end_entry.pack(side=LEFT)
+        ttk.Label(
+            stats_month_range_inputs, text="如 2026-06-01，留空不筛选月报", style="App.TLabel"
+        ).pack(side=LEFT, padx=self._pad(10, 0))
+        stats_month_range_presets = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
+        stats_month_range_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        for preset_text, preset_key in (("本月", "this_month"), ("上月", "last_month"), ("清空", "clear")):
+            button = CodexButton(
+                stats_month_range_presets,
+                text=preset_text,
+                command=lambda key=preset_key: self._fill_stats_month_range(key),
+                width=56,
+                min_width=56,
+                height=28,
+            )
+            button.pack(side=LEFT, padx=self._pad(0, 8))
         stats_remark_unit_row = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
         stats_remark_unit_row.pack(side="top", fill="x", pady=self._pad(8, 0))
         ttk.Label(stats_remark_unit_row, text="备注加班/调休单位", style="App.TLabel").pack(side=LEFT)
@@ -2403,12 +2435,24 @@ class HRToolkitApp:
                     base_row = len(visible_keys) * 2
                     self.stats_range_label.grid(row=base_row, column=0, columnspan=2, sticky="w", padx=0, pady=self._pad(4, 2))
                     self.stats_range_frame.grid(row=base_row + 1, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8))
+                    month_label_row = base_row + 2
+                    month_frame_row = base_row + 3
+                    self.stats_month_range_label.grid(
+                        row=month_label_row, column=0, columnspan=2, sticky="w", padx=0, pady=self._pad(4, 2)
+                    )
+                    self.stats_month_range_frame.grid(
+                        row=month_frame_row, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8)
+                    )
                 else:
                     self.stats_range_label.grid(row=4, column=0, sticky="w", padx=0, pady=self._px(7))
                     self.stats_range_frame.grid(row=4, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7))
+                    self.stats_month_range_label.grid(row=5, column=0, sticky="w", padx=0, pady=self._px(7))
+                    self.stats_month_range_frame.grid(row=5, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7))
             else:
                 self.stats_range_label.grid_remove()
                 self.stats_range_frame.grid_remove()
+                self.stats_month_range_label.grid_remove()
+                self.stats_month_range_frame.grid_remove()
 
             if hasattr(self, "_sync_right_canvas_window"):
                 self.root.after_idle(self._sync_right_canvas_window)
@@ -7846,6 +7890,23 @@ class HRToolkitApp:
         self.stats_week_start.set(start.isoformat())
         self.stats_week_end.set(end.isoformat())
 
+    def _fill_stats_month_range(self, preset: str) -> None:
+        if preset == "clear":
+            self.stats_month_start.set("")
+            self.stats_month_end.set("")
+            return
+        today = date.today()
+        if preset == "this_month":
+            start = today.replace(day=1)
+            end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+        elif preset == "last_month":
+            end = today.replace(day=1) - timedelta(days=1)
+            start = end.replace(day=1)
+        else:
+            return
+        self.stats_month_start.set(start.isoformat())
+        self.stats_month_end.set(end.isoformat())
+
     def _on_rename_mode_changed(self, _event=None) -> None:
         self._update_rename_mode_controls()
         if hasattr(self, "_sync_right_canvas_window"):
@@ -8407,6 +8468,14 @@ class HRToolkitApp:
         except ValueError as exc:
             messagebox.showwarning("日期填写有误", str(exc))
             return
+        try:
+            month_range = resolve_month_range(
+                self.stats_month_start.get().strip() or None,
+                self.stats_month_end.get().strip() or None,
+            )
+        except ValueError as exc:
+            messagebox.showwarning("日期填写有误", str(exc))
+            return
 
         output_dir = self._prepare_result_output_dir(Path(output_text))
         if output_dir is None:
@@ -8422,6 +8491,8 @@ class HRToolkitApp:
             report_staff_path=staff_path,
             week_start=None if week_range is None else week_range[0],
             week_end=None if week_range is None else week_range[1],
+            month_start=None if month_range is None else month_range[0],
+            month_end=None if month_range is None else month_range[1],
             remark_unit=self.stats_remark_unit.get() or "day",
         )
 

@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from hr_toolkit.tools.data_statistics import (
     generate_data_statistics_reports,
     parse_report_date,
+    resolve_month_range,
     resolve_week_range,
 )
 
@@ -258,6 +259,40 @@ class DataStatisticsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_week_range("2026-06-30", "2026-06-02")
         self.assertIsNone(resolve_week_range(None, None))
+
+    def test_month_range_requires_both_dates(self) -> None:
+        with self.assertRaises(ValueError):
+            resolve_month_range("2026-06-01", None)
+        with self.assertRaises(ValueError):
+            resolve_month_range(None, "2026-06-30")
+        with self.assertRaises(ValueError):
+            resolve_month_range("2026-06-30", "2026-06-01")
+        self.assertIsNone(resolve_month_range(None, None))
+
+    def test_month_range_filters_monthly_records(self) -> None:
+        """Bug2：月报统计日期范围外的记录不计入、未写月报异常。"""
+        from datetime import date
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_monthly_file(input_dir / "月报.xlsx")  # 4/30 黄三、5/2 黄五
+
+            # 限定到 4 月，黄五 5/2 落在范围外 → 应报「未写月报」
+            result = generate_data_statistics_reports(
+                input_dir,
+                root / "out",
+                month_start=date(2026, 4, 1),
+                month_end=date(2026, 4, 30),
+            )
+
+            month_exceptions = [
+                exc for exc in result.to_dict() if isinstance(exc, dict)
+            ]
+            # 4 月只有黄三交了，黄五未交 → 至少 1 个「未写月报」
+            self.assertGreaterEqual(result.monthly_record_count, 1)
+            self.assertGreaterEqual(result.report_exception_count, 1)
 
     def test_parse_report_date_formats(self) -> None:
         from datetime import date
