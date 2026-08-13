@@ -53,12 +53,18 @@ class AttendanceSourceRow:
     absence_days: float = 0.0
     late_count: int = 0
     early_count: int = 0
+    late_minutes: float = 0.0
+    early_minutes: float = 0.0
+    out_minutes: float = 0.0
     missing_punch_count: int = 0
     expected_hours: float = 0.0
     actual_hours: float = 0.0
     plan_time: str = ""
     punch_record: str = ""
     missing_record: str = ""
+    remark: str = ""
+    # 汇总格式的源表（无日期列）会被标记为 True；day 字段此时是"该月1号"占位
+    is_summary_row: bool = False
 
 
 @dataclass
@@ -73,6 +79,9 @@ class AttendancePersonSummary:
     month_overtime_days: dict[int, float] = field(default_factory=dict)
     absence_days: float = 0.0
     late_early_count: int = 0
+    late_minutes: float = 0.0
+    early_minutes: float = 0.0
+    out_minutes: float = 0.0
     missing_punch_count: int = 0
     remarks: list[str] = field(default_factory=list)
 
@@ -87,6 +96,8 @@ class AttendanceException:
     remark: str
     source_file: str
     source_row: int
+    # 汇总表行：day 字段是占位（该月1号），展示时改为"—"
+    is_summary_row: bool = False
 
 
 @dataclass
@@ -195,6 +206,7 @@ def generate_data_statistics_reports(
     month_start: date | str | None = None,
     month_end: date | str | None = None,
     remark_unit: str = REMARK_UNIT_DAY,
+    include_business_trip: bool = False,
     dry_run: bool = False,
 ) -> DataStatisticsResult:
     if remark_unit not in _VALID_REMARK_UNITS:
@@ -238,7 +250,9 @@ def generate_data_statistics_reports(
         if not attendance_rows and not weekly_records and not monthly_records:
             raise ValueError("未识别到考勤结果、周报记录或月报记录，请确认文件格式。")
 
-        attendance_summaries, attendance_exceptions = _summarize_attendance(attendance_rows, remark_unit)
+        attendance_summaries, attendance_exceptions = _summarize_attendance(
+            attendance_rows, remark_unit, include_business_trip
+        )
         report_summaries, report_exceptions, report_warnings = _summarize_reports(
             weekly_records,
             monthly_records,
@@ -285,6 +299,7 @@ def generate_data_statistics_reports(
             temp_dir,
             week_range=week_range,
             month_range=month_range,
+            include_business_trip=include_business_trip,
         )
         result.output_file = output_file
         return result
@@ -388,6 +403,12 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
             grid = SheetGrid(ws)
             header_row = _find_header_row(grid)
             if header_row is None:
+                # 候选 sheet 表头（前 20 行内），便于排查「未识别」类问题
+                headers_preview = _collect_preview_headers(grid)
+                warnings.append(
+                    f"{file_path.name} 工作表「{grid.title}」未找到已知表头，已跳过。"
+                    + (f" 候选表头：{headers_preview}" if headers_preview else "")
+                )
                 continue
             headers = _read_headers(grid, header_row)
             if _is_attendance_sheet(headers):
@@ -404,9 +425,27 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
                     weekly_records.extend(records)
                 else:
                     monthly_records.extend(records)
+            else:
+                # 找到了表头行但三套表头判定都不通过——通常是模板或格式变体
+                header_names = sorted(headers.keys())
+                warnings.append(
+                    f"{file_path.name} 工作表「{grid.title}」表头不在已知考勤/周月报模板内，已跳过。"
+                    f" 识别到的表头（{len(header_names)}）：{header_names[:8]}{'...' if len(header_names) > 8 else ''}"
+                )
     finally:
         workbook.close()
     return attendance_rows, weekly_records, monthly_records
+
+
+def _collect_preview_headers(grid: SheetGrid) -> str:
+    """在前 8 行 × 8 列内收集非空单元格文本，用于未识别表头时的提示。"""
+    cells: list[str] = []
+    for row_index in range(1, min((grid.max_row or 0), 8) + 1):
+        for col_index in range(1, min((grid.max_column or 0), 8) + 1):
+            text = _cell_text(grid.value(row_index, col_index))
+            if text:
+                cells.append(text)
+    return "、".join(cells[:10])
 
 
 # 汇总格式考勤表的识别标记：有"姓名"+应出勤字段(强);有"姓名"+请假字段(弱,需配合其他标志)
@@ -420,6 +459,13 @@ _SUMMARY_ATTENDANCE_LEAVE_FIELDS = (
 _FILENAME_MONTH_PATTERN = re.compile(r"(\d{1,2})\s*月")
 _FILE_PERIOD_RANGE_PATTERN = re.compile(
     r"([01]?\d)[.月/-]([0-3]?\d)\s*[-—~至]+\s*([01]?\d)[.月/-]([0-3]?\d)"
+)
+# 汇总表备注里「M.D迟到/早退/旷工N分钟/天」这种结构化写法
+# 例: 5.18迟到11分钟、5.20早退3分钟、5.21补下班卡、5.18旷工0.5天
+_SUMMARY_REMARK_ITEM_PATTERN = re.compile(
+    r"(\d{1,2})\s*[.\-/月]\s*(\d{1,2})\s*日?\s*"
+    r"(迟到|早退|旷工|补卡|漏打卡|缺卡|公出|外出|事假|病假)\s*"
+    r"(\d+(?:\.\d+)?)\s*(分钟|次|小时|天)?"
 )
 _PROJECT_BRACKET_SPLIT_PATTERN = re.compile(r"[/／]")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -479,6 +525,7 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
         "事假", "病假天数", "年假天数",
         "调休", "加班计调休时长", "旷工天数",
         "迟到次数", "早退次数", "漏打卡次数",
+        "迟到分钟数", "早退分钟数", "公出", "外出",
         "应出勤小时数", "实出勤小时数",
         "计划上下班时间", "当日刷卡记录", "缺卡记录",
     )}
@@ -494,6 +541,9 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
     late_col = cols["迟到次数"]
     early_col = cols["早退次数"]
     missing_col = cols["漏打卡次数"]
+    late_minutes_col = cols["迟到分钟数"]
+    early_minutes_col = cols["早退分钟数"]
+    out_col_candidates = [cols[name] for name in ("公出", "外出") if cols.get(name)]
     expected_col = cols["应出勤小时数"]
     actual_col = cols["实出勤小时数"]
     plan_col = cols["计划上下班时间"]
@@ -502,6 +552,18 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
 
     def _val(row_index: int, col: int | None):
         return grid.value(row_index, col) if col else None
+
+    def _first_out_value(row_index: int, cols: list[int | None]) -> float:
+        for col in cols:
+            if col is None:
+                continue
+            v = grid.value(row_index, col)
+            if v is None:
+                continue
+            num = _number(v)
+            if num:
+                return num
+        return 0.0
 
     rows: list[AttendanceSourceRow] = []
     for row_index in range(header_row + 1, (grid.max_row or 0) + 1):
@@ -531,6 +593,9 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
                 absence_days=_number(_val(row_index, absence_col)),
                 late_count=int(_number(_val(row_index, late_col))),
                 early_count=int(_number(_val(row_index, early_col))),
+                late_minutes=_number(_val(row_index, late_minutes_col)),
+                early_minutes=_number(_val(row_index, early_minutes_col)),
+                out_minutes=_first_out_value(row_index, out_col_candidates) * 60,
                 missing_punch_count=int(_number(_val(row_index, missing_col))),
                 expected_hours=_number(_val(row_index, expected_col)),
                 actual_hours=_number(_val(row_index, actual_col)),
@@ -560,9 +625,13 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
     absence_cols = _cols("旷工天数", "旷工", "旷工（天）")
     late_cols = _cols("迟到次数", "迟到", "迟到（次）")
     early_cols = _cols("早退次数", "早退", "早退（次）")
+    late_minutes_cols = _cols("迟到分钟数", "迟到（分钟）", "迟到时长", "迟到分钟")
+    early_minutes_cols = _cols("早退分钟数", "早退（分钟）", "早退时长", "早退分钟")
+    out_cols = _cols("公出", "公出（小时）", "公出（分钟）", "公出时长", "外出", "外出（小时）", "外出（分钟）", "外出时长")
     missing_cols = _cols("漏打卡次数", "漏打卡", "漏打卡（次）")
     expected_cols = _cols("应出勤小时数", "应出勤天数")
     actual_cols = _cols("实出勤小时数", "实际出勤天数")
+    remark_col = _cols("备注", "备注（天）", "备注\n（天）")[0]
 
     def _val(row_index: int, col: int | None):
         return grid.value(row_index, col) if col else None
@@ -607,6 +676,7 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
                 company=company,
                 department=department,
                 day=default_date,
+                is_summary_row=True,
                 personal_leave_days=_to_days(_number(_first_not_none(row_index, personal_cols))),
                 sick_leave_days=_to_days(_number(_first_not_none(row_index, sick_cols))),
                 paid_leave_days=_to_days(_number(_first_not_none(row_index, paid_cols))),
@@ -617,11 +687,17 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
                 absence_days=_number(_first_not_none(row_index, absence_cols)),
                 late_count=int(_number(_first_not_none(row_index, late_cols))),
                 early_count=int(_number(_first_not_none(row_index, early_cols))),
+                late_minutes=_number(_first_not_none(row_index, late_minutes_cols)),
+                early_minutes=_number(_first_not_none(row_index, early_minutes_cols)),
+                out_minutes=_number(_first_not_none(row_index, out_cols)) * 60,
                 missing_punch_count=int(_number(_first_not_none(row_index, missing_cols))),
                 expected_hours=_number(_first_not_none(row_index, expected_cols)),
                 actual_hours=_number(_first_not_none(row_index, actual_cols)),
+                remark=_cell_text(_val(row_index, remark_col)),
             )
         )
+        # 备注里的结构化条目补全 day / 迟到分钟 / 早退分钟 等
+        _augment_summary_row_from_remark(rows[-1], default_date.year)
     return rows
 
 
@@ -633,6 +709,94 @@ def _infer_month_from_filename(file_name: str) -> int | None:
         if 1 <= month <= 12:
             return month
     return None
+
+
+@dataclass
+class _SummaryRemarkItem:
+    """从汇总表备注里解析出来的结构化条目。
+
+    示例: 5.18迟到11分钟 → kind=迟到, value=11, unit=分钟, month=5, day=18
+    """
+    month: int
+    day: int
+    kind: str  # 迟到/早退/旷工/补卡/漏打卡/缺卡/公出/外出/事假/病假
+    value: float
+    unit: str  # 分钟/次/小时/天 (默认=次)
+
+
+def _parse_summary_remark(text: str) -> list[_SummaryRemarkItem]:
+    """解析汇总表备注里的结构化异常条目。
+
+    当前支持的写法:
+      - 5.18迟到11分钟 / 5月18日迟到11分钟
+      - 5.20早退3分钟
+      - 5.21补下班卡 / 5.21补卡
+      - 5.18漏打卡 / 5.18缺卡
+      - 5.18公出2小时 / 5.18外出2小时
+      - 5.18旷工0.5天
+    没有单位的数字默认按"次"理解。
+    """
+    items: list[_SummaryRemarkItem] = []
+    for match in _SUMMARY_REMARK_ITEM_PATTERN.finditer(text or ""):
+        month = int(match.group(1))
+        day = int(match.group(2))
+        kind = match.group(3)
+        value = float(match.group(4))
+        unit = match.group(5) or "次"
+        items.append(_SummaryRemarkItem(month=month, day=day, kind=kind, value=value, unit=unit))
+    return items
+
+
+def _augment_summary_row_from_remark(row: AttendanceSourceRow, default_year: int) -> bool:
+    """根据汇总表行备注里的结构化条目,补全 row.day/late_minutes/early_minutes/out_minutes/missing_punch_count。
+
+    返回 True 表示至少有 1 条结构化条目被应用（day 被更新到最近一次出现的日期）。
+    """
+    remark_text = row.remark or row.missing_record
+    if not remark_text:
+        return False
+    items = _parse_summary_remark(remark_text)
+    if not items:
+        return False
+    last_day: date | None = None
+    for item in items:
+        # 用最近一次出现的日期作为该行的 day(便于异常明细仍能看到具体日期)
+        last_day = date(default_year, item.month, item.day)
+        if item.kind == "迟到":
+            if item.unit == "分钟":
+                row.late_minutes += item.value
+            else:
+                row.late_count += int(item.value)
+        elif item.kind == "早退":
+            if item.unit == "分钟":
+                row.early_minutes += item.value
+            else:
+                row.early_count += int(item.value)
+        elif item.kind in ("公出", "外出"):
+            # 备注中支持"公出X小时"或"公出X天"，统一转成分钟存到 out_minutes
+            if item.unit == "小时":
+                row.out_minutes += item.value * 60
+            elif item.unit == "天":
+                row.out_minutes += item.value * 480
+            else:
+                # 未带单位时按"天"兜底（与列展示保持一致）
+                row.out_minutes += item.value * 480
+        elif item.kind == "旷工":
+            if item.unit == "天":
+                row.absence_days += item.value
+            else:
+                row.absence_days += item.value  # 当小时也累加（少见）
+        elif item.kind in ("补卡", "漏打卡", "缺卡"):
+            row.missing_punch_count += int(item.value)
+        elif item.kind == "事假":
+            row.personal_leave_days += item.value
+        elif item.kind == "病假":
+            row.sick_leave_days += item.value
+    if last_day is not None:
+        row.day = last_day
+        # 一旦从备注里提取到具体日期，就不再是"汇总行"占位
+        row.is_summary_row = False
+    return True
 
 
 def _read_report_sheet(grid: SheetGrid, headers: dict[str, int], header_row: int, file_name: str, report_type: str) -> list[ReportRecord]:
@@ -712,6 +876,7 @@ def _find_expected_reporter_header_row(grid: SheetGrid) -> int | None:
 def _summarize_attendance(
     rows: list[AttendanceSourceRow],
     remark_unit: str = REMARK_UNIT_DAY,
+    include_business_trip: bool = False,
 ) -> tuple[list[AttendancePersonSummary], list[AttendanceException]]:
     summaries: OrderedDict[tuple[str, str, str], AttendancePersonSummary] = OrderedDict()
     exceptions: list[AttendanceException] = []
@@ -725,12 +890,15 @@ def _summarize_attendance(
         summary.month_overtime_days[row.day.month] = summary.month_overtime_days.get(row.day.month, 0.0) + row.overtime_days
         summary.absence_days += row.absence_days
         summary.late_early_count += row.late_count + row.early_count
+        summary.late_minutes += row.late_minutes
+        summary.early_minutes += row.early_minutes
+        summary.out_minutes += row.out_minutes
         summary.missing_punch_count += row.missing_punch_count
 
-        remarks = _attendance_row_remarks(row, remark_unit)
+        remarks = _attendance_row_remarks(row, remark_unit, include_business_trip)
         if remarks:
             summary.remarks.append(f"{row.day.month}.{row.day.day}" + "、".join(remarks))
-        for exception_type, value, remark in _attendance_row_exceptions(row):
+        for exception_type, value, remark in _attendance_row_exceptions(row, remark_unit, include_business_trip):
             exceptions.append(
                 AttendanceException(
                     name=row.name,
@@ -741,13 +909,18 @@ def _summarize_attendance(
                     remark=remark,
                     source_file=row.source_file,
                     source_row=row.source_row,
+                    is_summary_row=row.is_summary_row,
                 )
             )
     return list(summaries.values()), exceptions
 
 
-def _attendance_row_remarks(row: AttendanceSourceRow, remark_unit: str = REMARK_UNIT_DAY) -> list[str]:
-    # 只有加班和调休支持按小时展示，其余备注内容不受单位影响
+def _attendance_row_remarks(
+    row: AttendanceSourceRow,
+    remark_unit: str = REMARK_UNIT_DAY,
+    include_business_trip: bool = False,
+) -> list[str]:
+    # 加班、调休、公出支持按小时/按天展示；其余备注内容不受单位影响
     by_hour = remark_unit == REMARK_UNIT_HOUR
     remarks: list[str] = []
     if row.overtime_days:
@@ -761,6 +934,10 @@ def _attendance_row_remarks(row: AttendanceSourceRow, remark_unit: str = REMARK_
             remarks.append(f"{prefix}调休{_format_number(row.rest_hours)}小时")
         else:
             remarks.append(f"{prefix}调休{_format_number(row.rest_days)}天")
+    if include_business_trip and row.out_minutes:
+        # 公出按 8 小时/天换算成天展示
+        out_days = row.out_minutes / 480
+        remarks.append(f"公出{_format_number(out_days)}天")
     if row.personal_leave_days:
         remarks.append(f"事假{_format_number(row.personal_leave_days)}天")
     if row.sick_leave_days:
@@ -769,22 +946,43 @@ def _attendance_row_remarks(row: AttendanceSourceRow, remark_unit: str = REMARK_
         remarks.append(f"带薪休假{_format_number(row.paid_leave_days)}天")
     if row.absence_days:
         remarks.append(f"旷工{_format_number(row.absence_days)}天")
-    if row.late_count:
+    if row.late_minutes:
+        remarks.append(f"迟到{_format_number(row.late_minutes)}分钟")
+    elif row.late_count:
         remarks.append(f"迟到{row.late_count}次")
-    if row.early_count:
+    if row.early_minutes:
+        remarks.append(f"早退{_format_number(row.early_minutes)}分钟")
+    elif row.early_count:
         remarks.append(f"早退{row.early_count}次")
     if row.missing_punch_count:
         remarks.append(_missing_punch_remark(row))
     return remarks
 
 
-def _attendance_row_exceptions(row: AttendanceSourceRow) -> list[tuple[str, str, str]]:
+def _attendance_row_exceptions(
+    row: AttendanceSourceRow,
+    remark_unit: str = REMARK_UNIT_DAY,
+    include_business_trip: bool = False,
+) -> list[tuple[str, str, str]]:
+    by_hour = remark_unit == REMARK_UNIT_HOUR
     exceptions: list[tuple[str, str, str]] = []
     if row.missing_punch_count:
         exceptions.append(("漏打卡", str(row.missing_punch_count), _missing_punch_remark(row)))
-    if row.late_count:
+    if row.late_minutes:
+        exceptions.append((
+            "迟到",
+            f"{_format_number(row.late_minutes)}分钟",
+            f"迟到{_format_number(row.late_minutes)}分钟",
+        ))
+    elif row.late_count:
         exceptions.append(("迟到", str(row.late_count), f"迟到{row.late_count}次"))
-    if row.early_count:
+    if row.early_minutes:
+        exceptions.append((
+            "早退",
+            f"{_format_number(row.early_minutes)}分钟",
+            f"早退{_format_number(row.early_minutes)}分钟",
+        ))
+    elif row.early_count:
         exceptions.append(("早退", str(row.early_count), f"早退{row.early_count}次"))
     if row.absence_days:
         exceptions.append(("旷工", _format_number(row.absence_days), f"旷工{_format_number(row.absence_days)}天"))
@@ -796,6 +994,14 @@ def _attendance_row_exceptions(row: AttendanceSourceRow) -> list[tuple[str, str,
         exceptions.append(("调休", _format_number(row.rest_days), f"调休{_format_number(row.rest_days)}天"))
     if row.overtime_days:
         exceptions.append(("加班", _format_number(row.overtime_days), f"加班{_format_number(row.overtime_days)}天"))
+    if include_business_trip and row.out_minutes:
+        # 公出按 8 小时/天换算成天展示
+        out_days = row.out_minutes / 480
+        exceptions.append((
+            "公出",
+            f"{_format_number(out_days)}天",
+            f"公出{_format_number(out_days)}天",
+        ))
     return exceptions
 
 
@@ -1134,6 +1340,7 @@ def _write_output_workbook(
     temp_dir: Path,
     week_range: tuple[date, date] | None = None,
     month_range: tuple[date, date] | None = None,
+    include_business_trip: bool = False,
 ) -> None:
     template_path = _copy_template(temp_dir)
     workbook = load_workbook(template_path)
@@ -1142,7 +1349,7 @@ def _write_output_workbook(
         attendance_ws.title = "考勤统计"
         report_ws = workbook["周月报模板"]
         report_ws.title = "周月报统计"
-        _write_attendance_sheet(attendance_ws, attendance_summaries)
+        _write_attendance_sheet(attendance_ws, attendance_summaries, include_business_trip=include_business_trip)
         _write_report_sheet(report_ws, report_summaries, weekly_records, monthly_records, week_range, month_range)
         _write_attendance_detail_sheet(workbook, attendance_exceptions)
         _write_report_detail_sheet(workbook, report_exceptions)
@@ -1158,14 +1365,18 @@ def _copy_template(temp_dir: Path) -> Path:
     return target
 
 
-def _write_attendance_sheet(ws: Worksheet, summaries: list[AttendancePersonSummary]) -> None:
+def _write_attendance_sheet(
+    ws: Worksheet,
+    summaries: list[AttendancePersonSummary],
+    include_business_trip: bool = False,
+) -> None:
     max_month = max([4] + [month for summary in summaries for month in summary.month_overtime_days])
     if max_month > 4:
         insert_cols(ws, 13, max_month - 4)
     stat_start_col = 9 + max_month
     headers = ["序号", "公司", "部门（片区）", "姓名", "事假（天）", "病假（天）", "带薪休假（天）", "调休（天）"]
     headers.extend(f"{month}月份加班天数" for month in range(1, max_month + 1))
-    headers.extend(["旷工", "迟到/早退（次）", "漏打卡", "累计剩余加班天数", "备注"])
+    headers.extend(["旷工", "迟到/早退（分钟）", "漏打卡", "累计剩余加班天数", "备注"])
     for col_index, header in enumerate(headers, start=1):
         ws.cell(2, col_index).value = header
 
@@ -1173,10 +1384,20 @@ def _write_attendance_sheet(ws: Worksheet, summaries: list[AttendancePersonSumma
     template_snapshot = snapshot_row(ws, 3, min(ws.max_column, max_col))
     if len(summaries) > 1:
         insert_rows(ws, 4, len(summaries) - 1)
+    # 公出列：默认不勾选 → 不插入；勾选后插入在"调休"（col 8）与"1月份加班"之间（即 col 9）
+    out_col_index: int | None = None
+    if include_business_trip:
+        insert_cols(ws, 9, 1)
+        ws.cell(2, 9).value = "公出（天）"
+        out_col_index = 9
+        # 公式列与列头整体右移 1
+        stat_start_col += 1
+    # 月份加班从"调休"+1 或"公出"+1 开始
+    first_overtime_col = 9 if out_col_index is None else out_col_index + 1
     for offset, summary in enumerate(summaries):
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
-        for col_index in range(1, max_col + 1):
+        for col_index in range(1, ws.max_column + 1):
             ws.cell(row_index, col_index).value = None
         ws.cell(row_index, 1).value = offset + 1
         ws.cell(row_index, 2).value = summary.company
@@ -1186,21 +1407,28 @@ def _write_attendance_sheet(ws: Worksheet, summaries: list[AttendancePersonSumma
         ws.cell(row_index, 6).value = _zero_blank(summary.sick_leave_days)
         ws.cell(row_index, 7).value = _zero_blank(summary.paid_leave_days)
         ws.cell(row_index, 8).value = _zero_blank(summary.rest_days)
+        if out_col_index is not None:
+            ws.cell(row_index, out_col_index).value = _zero_blank(summary.out_minutes / 480)
         for month in range(1, max_month + 1):
-            ws.cell(row_index, 8 + month).value = _zero_blank(summary.month_overtime_days.get(month, 0.0))
+            ws.cell(row_index, first_overtime_col + month - 1).value = _zero_blank(summary.month_overtime_days.get(month, 0.0))
         ws.cell(row_index, stat_start_col).value = _zero_blank(summary.absence_days)
-        ws.cell(row_index, stat_start_col + 1).value = summary.late_early_count or None
+        # 迟到/早退以"分钟"展示：源表有分钟数据则写分钟，否则留空（不再把"次"兜底为"分钟"）
+        late_early_minutes = summary.late_minutes + summary.early_minutes
+        if late_early_minutes > 0:
+            ws.cell(row_index, stat_start_col + 1).value = _zero_blank(late_early_minutes)
+        else:
+            ws.cell(row_index, stat_start_col + 1).value = None
         ws.cell(row_index, stat_start_col + 2).value = summary.missing_punch_count or None
-        start_ref = f"{get_column_letter(9)}{row_index}"
-        end_ref = f"{get_column_letter(8 + max_month)}{row_index}"
+        start_ref = f"{get_column_letter(first_overtime_col)}{row_index}"
+        end_ref = f"{get_column_letter(first_overtime_col + max_month - 1)}{row_index}"
         rest_ref = f"{get_column_letter(8)}{row_index}"
         ws.cell(row_index, stat_start_col + 3).value = f"=SUM({start_ref}:{end_ref})-{rest_ref}"
         ws.cell(row_index, stat_start_col + 4).value = "；".join(summary.remarks) + ("；" if summary.remarks else "")
-        _format_row(ws, row_index, max_col)
+        _format_row(ws, row_index, ws.max_column)
     if not summaries:
-        for col_index in range(1, max_col + 1):
+        for col_index in range(1, ws.max_column + 1):
             ws.cell(3, col_index).value = None
-    _format_table(ws, 2, max(3, 2 + len(summaries)), max_col)
+    _format_table(ws, 2, max(3, 2 + len(summaries)), ws.max_column)
     ws.freeze_panes = "A3"
 
 
@@ -1251,10 +1479,15 @@ def _write_attendance_detail_sheet(workbook, exceptions: list[AttendanceExceptio
     headers = ["序号", "部门（片区）", "姓名", "日期", "异常类型", "数值", "说明", "来源文件", "来源行"]
     _write_headers(ws, headers)
     for index, item in enumerate(exceptions, start=1):
-        values = [index, item.department, item.name, item.day, item.exception_type, item.value, item.remark, item.source_file, item.source_row]
+        # 汇总格式的源表：row.day 是占位（该月1号），对异常日期无意义
+        day_display: Any = item.day
+        if item.is_summary_row:
+            day_display = "—"
+        values = [index, item.department, item.name, day_display, item.exception_type, item.value, item.remark, item.source_file, item.source_row]
         for col_index, value in enumerate(values, start=1):
             ws.cell(index + 1, col_index).value = value
-        ws.cell(index + 1, 4).number_format = "yyyy/m/d"
+        if not item.is_summary_row:
+            ws.cell(index + 1, 4).number_format = "yyyy/m/d"
     _format_table(ws, 1, max(2, len(exceptions) + 1), len(headers))
     ws.column_dimensions["G"].width = 30
     ws.column_dimensions["H"].width = 36

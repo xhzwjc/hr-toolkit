@@ -109,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="考勤统计表备注中加班/调休的单位：day 按天（默认），hour 按小时",
     )
     data_statistics.add_argument(
+        "--include-business-trip",
+        action="store_true",
+        help="在考勤统计表中新增公出列；默认不勾选（不加该列）",
+    )
+    data_statistics.add_argument(
         "--dry-run",
         action="store_true",
         help="只识别记录，不生成 Excel 文件",
@@ -459,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
             month_start=args.month_start,
             month_end=args.month_end,
             remark_unit=args.remark_unit,
+            include_business_trip=args.include_business_trip,
             dry_run=args.dry_run,
         )
         payload = result.to_dict()

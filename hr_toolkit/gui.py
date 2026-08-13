@@ -15,7 +15,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox, simpledialog
-from tkinter import Tk, StringVar, Text, TkVersion
+from tkinter import Tk, StringVar, BooleanVar, Text, TkVersion
 from tkinter import font as tkfont
 from tkinter import ttk
 
@@ -1067,6 +1067,8 @@ class HRToolkitApp:
         self.stats_month_end = StringVar()
         # 考勤统计表备注中加班/调休的展示单位：day 按天（默认）/ hour 按小时
         self.stats_remark_unit = StringVar(value="day")
+        # 是否在考勤统计表新增「公出」列：默认否（不加列）
+        self.stats_include_business_trip = BooleanVar(value=False)
         # 正式结果只写入当前工作项目。这个变量保留给现有工具表单，实际运行时
         # 会被替换为本次批次的“处理结果”目录。
         self.output_dir = StringVar(value="")
@@ -2271,21 +2273,35 @@ class HRToolkitApp:
 
         self.rename_options_frame.columnconfigure(1, weight=1)
 
-        self.stats_range_label = ttk.Label(form, text="周报统计日期（可选）", style="App.TLabel")
+        # ──────── 区块 1：统计日期范围 ────────
+        # 周报与月报日期范围用对称两行布局；每行 label 放左侧，右侧为「起始日 至 结束日」+ 快捷按钮
+        self.stats_range_label = ttk.Label(form, text="周报", style="App.TLabel")
         self.stats_range_frame = ttk.Frame(form, style="InputWrap.TFrame")
-        stats_range_inputs = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
-        stats_range_inputs.pack(side="top", fill="x")
-        self.stats_week_start_entry = ttk.Entry(stats_range_inputs, textvariable=self.stats_week_start, width=12, style="App.TEntry")
+        week_inputs = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        week_inputs.pack(side="top", fill="x")
+        self.stats_week_start_entry = ttk.Entry(
+            week_inputs, textvariable=self.stats_week_start, width=12, style="App.TEntry"
+        )
         self.stats_week_start_entry.pack(side=LEFT)
-        ttk.Label(stats_range_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
-        self.stats_week_end_entry = ttk.Entry(stats_range_inputs, textvariable=self.stats_week_end, width=12, style="App.TEntry")
+        ttk.Label(week_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
+        self.stats_week_end_entry = ttk.Entry(
+            week_inputs, textvariable=self.stats_week_end, width=12, style="App.TEntry"
+        )
         self.stats_week_end_entry.pack(side=LEFT)
-        ttk.Label(stats_range_inputs, text="如 2026-06-02，留空按整月统计", style="App.TLabel").pack(side=LEFT, padx=self._pad(10, 0))
-        stats_range_presets = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
-        stats_range_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
-        for preset_text, preset_key in (("本月", "this_month"), ("上月", "last_month"), ("本周", "this_week"), ("上周", "last_week"), ("清空", "clear")):
+        ttk.Label(week_inputs, text="如 2026-06-02，留空按整月统计", style="App.TLabel").pack(
+            side=LEFT, padx=self._pad(10, 0)
+        )
+        week_presets = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        week_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        for preset_text, preset_key in (
+            ("本月", "this_month"),
+            ("上月", "last_month"),
+            ("本周", "this_week"),
+            ("上周", "last_week"),
+            ("清空", "clear"),
+        ):
             button = CodexButton(
-                stats_range_presets,
+                week_presets,
                 text=preset_text,
                 command=lambda key=preset_key: self._fill_stats_week_range(key),
                 width=56,
@@ -2294,28 +2310,28 @@ class HRToolkitApp:
             )
             button.pack(side=LEFT, padx=self._pad(0, 8))
 
-        # 月报统计日期（独立于周报周期）
-        self.stats_month_range_label = ttk.Label(form, text="月报统计日期（可选）", style="App.TLabel")
+        # —— 月报日期行 ——
+        self.stats_month_range_label = ttk.Label(form, text="月报", style="App.TLabel")
         self.stats_month_range_frame = ttk.Frame(form, style="InputWrap.TFrame")
-        stats_month_range_inputs = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
-        stats_month_range_inputs.pack(side="top", fill="x")
+        month_inputs = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
+        month_inputs.pack(side="top", fill="x")
         self.stats_month_start_entry = ttk.Entry(
-            stats_month_range_inputs, textvariable=self.stats_month_start, width=12, style="App.TEntry"
+            month_inputs, textvariable=self.stats_month_start, width=12, style="App.TEntry"
         )
         self.stats_month_start_entry.pack(side=LEFT)
-        ttk.Label(stats_month_range_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
+        ttk.Label(month_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
         self.stats_month_end_entry = ttk.Entry(
-            stats_month_range_inputs, textvariable=self.stats_month_end, width=12, style="App.TEntry"
+            month_inputs, textvariable=self.stats_month_end, width=12, style="App.TEntry"
         )
         self.stats_month_end_entry.pack(side=LEFT)
-        ttk.Label(
-            stats_month_range_inputs, text="如 2026-06-01，留空不筛选月报", style="App.TLabel"
-        ).pack(side=LEFT, padx=self._pad(10, 0))
-        stats_month_range_presets = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
-        stats_month_range_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        ttk.Label(month_inputs, text="如 2026-06-01，留空不筛选月报", style="App.TLabel").pack(
+            side=LEFT, padx=self._pad(10, 0)
+        )
+        month_presets = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
+        month_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
         for preset_text, preset_key in (("本月", "this_month"), ("上月", "last_month"), ("清空", "clear")):
             button = CodexButton(
-                stats_month_range_presets,
+                month_presets,
                 text=preset_text,
                 command=lambda key=preset_key: self._fill_stats_month_range(key),
                 width=56,
@@ -2323,28 +2339,52 @@ class HRToolkitApp:
                 height=28,
             )
             button.pack(side=LEFT, padx=self._pad(0, 8))
-        stats_remark_unit_row = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
-        stats_remark_unit_row.pack(side="top", fill="x", pady=self._pad(8, 0))
-        ttk.Label(stats_remark_unit_row, text="备注加班/调休单位", style="App.TLabel").pack(side=LEFT)
+
+        # ──────── 区块 2：输出选项 ────────
+        # 与上方日期范围独立分组；含「加班/调休备注单位」「公出列」两条并列选项
+        self.stats_options_label = ttk.Label(form, text="输出选项", style="App.TLabel")
+        self.stats_options_frame = ttk.Frame(form, style="InputWrap.TFrame")
+        stats_options_grid = ttk.Frame(self.stats_options_frame, style="InputWrap.TFrame")
+        stats_options_grid.pack(side="top", fill="x")
+
+        # 第 1 列：加班/调休备注单位（单选）
+        unit_col = ttk.Frame(stats_options_grid, style="InputWrap.TFrame")
+        unit_col.pack(side=LEFT, fill="x", expand=True)
+        ttk.Label(unit_col, text="加班/调休备注", style="App.TLabel").pack(side=LEFT)
         ttk.Radiobutton(
-            stats_remark_unit_row,
-            text="按天",
-            value="day",
-            variable=self.stats_remark_unit,
-            style="App.TRadiobutton",
+            unit_col, text="按天", value="day",
+            variable=self.stats_remark_unit, style="App.TRadiobutton",
         ).pack(side=LEFT, padx=self._pad(12, 0))
         ttk.Radiobutton(
-            stats_remark_unit_row,
-            text="按小时",
-            value="hour",
-            variable=self.stats_remark_unit,
-            style="App.TRadiobutton",
+            unit_col, text="按小时", value="hour",
+            variable=self.stats_remark_unit, style="App.TRadiobutton",
         ).pack(side=LEFT, padx=self._pad(8, 0))
-        ttk.Label(
-            stats_remark_unit_row,
-            text="仅影响考勤统计表备注中加班/调休的显示",
-            style="App.TLabel",
-        ).pack(side=LEFT, padx=self._pad(10, 0))
+        self._stats_unit_help = ttk.Label(unit_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
+        self._stats_unit_help.pack(side=LEFT, padx=self._pad(6, 0))
+        self._stats_unit_help.bind(
+            "<Enter>", lambda _e: self._show_tooltip(
+                self._stats_unit_help, "仅影响考勤统计表备注中加班/调休的显示"
+            )
+        )
+        self._stats_unit_help.bind("<Leave>", lambda _e: self._hide_tooltip())
+
+        # 第 2 列：是否新增公出列（勾选）
+        out_col = ttk.Frame(stats_options_grid, style="InputWrap.TFrame")
+        out_col.pack(side=LEFT, fill="x", expand=True)
+        self.stats_business_trip_check = ttk.Checkbutton(
+            out_col, text="新增「公出」列",
+            variable=self.stats_include_business_trip, style="App.TCheckbutton",
+        )
+        self.stats_business_trip_check.pack(side=LEFT)
+        self._stats_out_help = ttk.Label(out_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
+        self._stats_out_help.pack(side=LEFT, padx=self._pad(6, 0))
+        self._stats_out_help.bind(
+            "<Enter>", lambda _e: self._show_tooltip(
+                self._stats_out_help,
+                "默认不勾选；勾选后在调休之后插入「公出（天）」列",
+            )
+        )
+        self._stats_out_help.bind("<Leave>", lambda _e: self._hide_tooltip())
 
         def _refresh_picker_button_bar(button_bar) -> None:
             visible_buttons = [child for child in button_bar.winfo_children() if getattr(child, "_hr_picker_visible", False)]
@@ -2433,26 +2473,44 @@ class HRToolkitApp:
             if self._stats_range_row_visible:
                 if self._form_compact_layout:
                     base_row = len(visible_keys) * 2
-                    self.stats_range_label.grid(row=base_row, column=0, columnspan=2, sticky="w", padx=0, pady=self._pad(4, 2))
-                    self.stats_range_frame.grid(row=base_row + 1, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8))
-                    month_label_row = base_row + 2
-                    month_frame_row = base_row + 3
+                    self.stats_range_label.grid(
+                        row=base_row, column=0, sticky="w", padx=0, pady=self._pad(4, 2)
+                    )
+                    self.stats_range_frame.grid(
+                        row=base_row + 1, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8)
+                    )
                     self.stats_month_range_label.grid(
-                        row=month_label_row, column=0, columnspan=2, sticky="w", padx=0, pady=self._pad(4, 2)
+                        row=base_row + 2, column=0, sticky="w", padx=0, pady=self._pad(4, 2)
                     )
                     self.stats_month_range_frame.grid(
-                        row=month_frame_row, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8)
+                        row=base_row + 3, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8)
+                    )
+                    self.stats_options_label.grid(
+                        row=base_row + 4, column=0, sticky="w", padx=0, pady=self._pad(4, 2)
+                    )
+                    self.stats_options_frame.grid(
+                        row=base_row + 5, column=0, columnspan=2, sticky="ew", padx=0, pady=self._pad(0, 8)
                     )
                 else:
                     self.stats_range_label.grid(row=4, column=0, sticky="w", padx=0, pady=self._px(7))
-                    self.stats_range_frame.grid(row=4, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7))
+                    self.stats_range_frame.grid(
+                        row=4, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7)
+                    )
                     self.stats_month_range_label.grid(row=5, column=0, sticky="w", padx=0, pady=self._px(7))
-                    self.stats_month_range_frame.grid(row=5, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7))
+                    self.stats_month_range_frame.grid(
+                        row=5, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7)
+                    )
+                    self.stats_options_label.grid(row=6, column=0, sticky="w", padx=0, pady=self._px(7))
+                    self.stats_options_frame.grid(
+                        row=6, column=1, sticky="ew", padx=self._pad(12, 0), pady=self._px(7)
+                    )
             else:
                 self.stats_range_label.grid_remove()
                 self.stats_range_frame.grid_remove()
                 self.stats_month_range_label.grid_remove()
                 self.stats_month_range_frame.grid_remove()
+                self.stats_options_label.grid_remove()
+                self.stats_options_frame.grid_remove()
 
             if hasattr(self, "_sync_right_canvas_window"):
                 self.root.after_idle(self._sync_right_canvas_window)
@@ -7907,6 +7965,41 @@ class HRToolkitApp:
         self.stats_month_start.set(start.isoformat())
         self.stats_month_end.set(end.isoformat())
 
+    def _show_tooltip(self, widget, text: str) -> None:
+        """显示一个轻量的气泡提示，用于解释控件语义。"""
+        self._hide_tooltip()
+        try:
+            x = widget.winfo_rootx() + widget.winfo_width() + 6
+            y = widget.winfo_rooty() - 2
+        except Exception:
+            x = y = 0
+        tip = Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        label = ttk.Label(
+            tip,
+            text=text,
+            style="App.TLabel",
+            background="#FFF8E1",
+            foreground="#5C4400",
+            borderwidth=1,
+            relief="solid",
+            padding=(8, 6),
+            wraplength=280,
+            justify="left",
+        )
+        label.pack()
+        self._tooltip_window = tip
+
+    def _hide_tooltip(self) -> None:
+        tip = getattr(self, "_tooltip_window", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+            self._tooltip_window = None
+
     def _on_rename_mode_changed(self, _event=None) -> None:
         self._update_rename_mode_controls()
         if hasattr(self, "_sync_right_canvas_window"):
@@ -8047,7 +8140,12 @@ class HRToolkitApp:
     def _choose_data_statistics_folder(self) -> None:
         directory = filedialog.askdirectory(title="选择考勤周月报数据文件夹")
         if directory:
-            self._set_change_input_paths([Path(directory)])
+            # 替换式：每次重新选择都覆盖旧路径，避免 chip 残留导致重复上传时统计报错
+            self.change_input_paths = [Path(directory)]
+            self._sync_input_path_text()
+            self._refresh_upload_card()
+            if not self.output_dir_user_selected:
+                self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
 
     def _choose_data_statistics_files_or_zip(self) -> None:
         filenames = filedialog.askopenfilenames(
@@ -8055,7 +8153,12 @@ class HRToolkitApp:
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
         if filenames:
-            self._set_change_input_paths([Path(filename) for filename in filenames])
+            # 替换式：每次重新选择都覆盖旧路径，避免 chip 残留导致重复上传时统计报错
+            self.change_input_paths = [Path(filename) for filename in filenames]
+            self._sync_input_path_text()
+            self._refresh_upload_card()
+            if not self.output_dir_user_selected:
+                self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
 
     def _choose_data_statistics_staff_file(self) -> None:
         filename = filedialog.askopenfilename(
@@ -8494,6 +8597,7 @@ class HRToolkitApp:
             month_start=None if month_range is None else month_range[0],
             month_end=None if month_range is None else month_range[1],
             remark_unit=self.stats_remark_unit.get() or "day",
+            include_business_trip=bool(self.stats_include_business_trip.get()),
         )
 
     def _run_insurance_ledger(self) -> None:
