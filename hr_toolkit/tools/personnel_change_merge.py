@@ -23,7 +23,15 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
-from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, insert_rows, snapshot_row
+from hr_toolkit.common.excel import (
+    apply_row_snapshot,
+    cached_style_id,
+    cell_text as _cell_text,
+    insert_rows,
+    set_style_ids,
+    snapshot_row,
+    style_source_id,
+)
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
 
@@ -657,6 +665,12 @@ def _append_sheet_rows(ws: Worksheet, rows: list[ChangeRow]) -> dict[str, int]:
     # 在循环外一次性计算 layout 和 existing 索引，避免 O(N²) 复杂度
     layout = _detect_sheet_layout(ws)
     existing = _existing_change_index(ws, layout, rows[0].sheet_name)
+    # 空行游标：数据行只会被填充、不会被清空，所以"第一个空行"的位置单调递增。
+    # 每次都从 data_start_row 重新扫描会让写入退化成 O(行数²)，几千行要跑几分钟。
+    blank_cursor = layout.data_start_row
+    # ws.max_row 每次都要遍历全部单元格求最大行号，循环里反复取同样会退化成
+    # O(行数²)；这里只在进入循环前取一次，之后按写入行数自行递增。
+    sheet_max_row = ws.max_row
     for row in rows:
         row_key = _change_key_from_source(row, layout)
         if row_key and row_key in existing:
@@ -665,7 +679,10 @@ def _append_sheet_rows(ws: Worksheet, rows: list[ChangeRow]) -> dict[str, int]:
             else:
                 skipped_count += 1
             continue
-        target_row = _next_summary_write_row(ws, layout)
+        target_row, sheet_max_row = _next_summary_write_row(
+            ws, layout, search_from=blank_cursor, max_row=sheet_max_row
+        )
+        blank_cursor = target_row + 1
         # 插入新行后，更新 layout 的 footer_start_row
         if target_row >= layout.footer_start_row:
             layout = ChangeSheetLayout(
@@ -697,28 +714,36 @@ def _existing_change_index(ws: Worksheet, layout: ChangeSheetLayout, sheet_name:
     return existing
 
 
-def _next_summary_write_row(ws: Worksheet, layout: ChangeSheetLayout) -> int:
-    blank_row = _first_blank_summary_row(ws, layout)
+def _next_summary_write_row(
+    ws: Worksheet,
+    layout: ChangeSheetLayout,
+    search_from: int | None = None,
+    max_row: int | None = None,
+) -> tuple[int, int]:
+    """Return the row to write next, plus the sheet's resulting max row."""
+    sheet_max_row = ws.max_row if max_row is None else max_row
+    blank_row = _first_blank_summary_row(ws, layout, search_from=search_from)
     if blank_row is not None:
-        return blank_row
-    if layout.footer_start_row <= ws.max_row:
+        return blank_row, max(sheet_max_row, blank_row)
+    if layout.footer_start_row <= sheet_max_row:
         target_row = layout.footer_start_row
         template_row = max(layout.data_start_row, target_row - 1)
         template_snapshot = snapshot_row(ws, template_row, layout.max_column)
         insert_rows(ws, target_row, 1)
         apply_row_snapshot(ws, target_row, template_snapshot, translate_formulas=True)
         _clear_row_values(ws, target_row, layout.max_column)
-        return target_row
-    target_row = ws.max_row + 1
+        return target_row, sheet_max_row + 1
+    target_row = sheet_max_row + 1
     template_row = max(layout.data_start_row, target_row - 1)
     template_snapshot = snapshot_row(ws, template_row, layout.max_column)
     apply_row_snapshot(ws, target_row, template_snapshot, translate_formulas=True)
     _clear_row_values(ws, target_row, layout.max_column)
-    return target_row
+    return target_row, target_row
 
 
-def _first_blank_summary_row(ws: Worksheet, layout: ChangeSheetLayout) -> int | None:
-    for row_index in range(layout.data_start_row, layout.footer_start_row):
+def _first_blank_summary_row(ws: Worksheet, layout: ChangeSheetLayout, search_from: int | None = None) -> int | None:
+    start_row = layout.data_start_row if search_from is None else max(search_from, layout.data_start_row)
+    for row_index in range(start_row, layout.footer_start_row):
         if not _is_existing_summary_data_row(ws, layout, row_index):
             return row_index
     return None
@@ -734,8 +759,9 @@ def _is_existing_summary_data_row(ws: Worksheet, layout: ChangeSheetLayout, row_
 
 
 def _write_change_row(ws: Worksheet, layout: ChangeSheetLayout, row_index: int, row: ChangeRow) -> None:
-    template_snapshot = snapshot_row(ws, row_index, layout.max_column)
-    apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
+    # 这里曾经把 row_index 快照后再写回同一行，样式值不变却要深拷贝整行的
+    # font/fill/border/alignment，并让 openpyxl 重新登记一遍样式表；目标行的
+    # 样式在 _next_summary_write_row 里已经铺好，直接清值即可。
     _clear_row_values(ws, row_index, layout.max_column)
     for header, col_index in layout.headers.items():
         if header == HEADER_SERIAL or header in FORMULA_TARGET_HEADERS:
@@ -788,22 +814,32 @@ def _write_summary_formulas(ws: Worksheet, layout: ChangeSheetLayout, row_index:
         ws.cell(row_index, age_col).value = f'=DATEDIF({birth_ref},TODAY(),"Y")'
 
 
+def _centered_alignment(source: Alignment) -> Alignment:
+    return Alignment(
+        horizontal="center",
+        vertical="center",
+        textRotation=source.textRotation,
+        wrapText=source.wrapText,
+        shrinkToFit=source.shrinkToFit,
+        indent=source.indent,
+        relativeIndent=source.relativeIndent,
+        justifyLastLine=source.justifyLastLine,
+        readingOrder=source.readingOrder,
+    )
+
+
 def _center_row_cells(ws: Worksheet, row_index: int, max_column: int) -> None:
+    # 居中结果只取决于原对齐方式，整表往往只有少数几种，按来源下标缓存即可，
+    # 免去逐格 hash 边框与对齐对象。
+    border_id = cached_style_id(ws, "border", "thin_black", lambda: THIN_BLACK_BORDER)
+    alignments = ws.parent._alignments
     for col_index in range(1, max_column + 1):
         cell = ws.cell(row_index, col_index)
-        cell.border = THIN_BLACK_BORDER
-        current = cell.alignment
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            textRotation=current.textRotation,
-            wrapText=current.wrapText,
-            shrinkToFit=current.shrinkToFit,
-            indent=current.indent,
-            relativeIndent=current.relativeIndent,
-            justifyLastLine=current.justifyLastLine,
-            readingOrder=current.readingOrder,
+        source_id = style_source_id(cell, "alignment")
+        alignment_id = cached_style_id(
+            ws, "alignment", ("centered", source_id), lambda: _centered_alignment(alignments[source_id])
         )
+        set_style_ids(cell, border_id=border_id, alignment_id=alignment_id)
 
 
 def _renumber_summary_sheet(ws: Worksheet, layout: ChangeSheetLayout) -> None:

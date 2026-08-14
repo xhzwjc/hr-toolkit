@@ -22,7 +22,14 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
-from hr_toolkit.common.excel import apply_row_snapshot, cell_text as _cell_text, insert_rows, snapshot_row
+from hr_toolkit.common.excel import (
+    apply_row_snapshot,
+    cached_style_id,
+    cell_text as _cell_text,
+    insert_rows,
+    set_style_ids,
+    snapshot_row,
+)
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
 
@@ -755,6 +762,13 @@ def _write_archive_formulas(ws: Worksheet, layout: ArchiveSheetLayout, row_index
             ws.cell(row_index, col_index).value = formula
 
 
+_DATA_ROW_SIDE = Side(style="thin", color="000000")
+_DATA_ROW_BORDER = Border(left=_DATA_ROW_SIDE, right=_DATA_ROW_SIDE, top=_DATA_ROW_SIDE, bottom=_DATA_ROW_SIDE)
+_DATA_ROW_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_DATA_ROW_FONT = Font(name="宋体", size=10, bold=False, color="000000")
+_DATA_ROW_EMPTY_FILL = PatternFill(fill_type=None)
+
+
 def _format_archive_data_row(
     ws: Worksheet,
     layout: ArchiveSheetLayout,
@@ -762,18 +776,20 @@ def _format_archive_data_row(
     *,
     clear_fill: bool = True,
 ) -> None:
-    side = Side(style="thin", color="000000")
-    border = Border(left=side, right=side, top=side, bottom=side)
-    alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    font = Font(name="宋体", size=10, bold=False, color="000000")
-    empty_fill = PatternFill(fill_type=None)
+    # 整行套用的是固定样式，逐格 cell.border = ... 会让 openpyxl 每次都对样式
+    # 对象做一次递归哈希去查样式表。样式表只增不改，下标查一次就能重复使用。
+    border_id = cached_style_id(ws, "border", "archive_data_thin", lambda: _DATA_ROW_BORDER)
+    alignment_id = cached_style_id(ws, "alignment", "archive_data_center", lambda: _DATA_ROW_ALIGNMENT)
+    font_id = cached_style_id(ws, "font", "archive_data_song10", lambda: _DATA_ROW_FONT)
+    fill_id = cached_style_id(ws, "fill", "archive_data_empty", lambda: _DATA_ROW_EMPTY_FILL) if clear_fill else None
     for col_index in range(1, layout.max_column + 1):
-        cell = ws.cell(row_index, col_index)
-        cell.border = border
-        cell.alignment = alignment
-        cell.font = font
-        if clear_fill:
-            cell.fill = empty_fill
+        set_style_ids(
+            ws.cell(row_index, col_index),
+            border_id=border_id,
+            alignment_id=alignment_id,
+            font_id=font_id,
+            fill_id=fill_id,
+        )
 
 
 def _normalize_archive_output_sheet(ws: Worksheet, layout: ArchiveSheetLayout) -> None:

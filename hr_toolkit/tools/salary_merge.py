@@ -19,6 +19,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
+from hr_toolkit.common.excel import cached_style_id, set_style_ids
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -605,22 +606,37 @@ def _write_output_workbook(output_file: Path, employees: list[MergedEmployee], m
     workbook.save(output_file)
 
 
+_OUTPUT_SIDE = Side(style="thin", color="000000")
+_OUTPUT_BORDER = Border(left=_OUTPUT_SIDE, right=_OUTPUT_SIDE, top=_OUTPUT_SIDE, bottom=_OUTPUT_SIDE)
+_OUTPUT_ALIGNMENT = Alignment(horizontal="center", vertical="center")
+_OUTPUT_SONG_BOLD = Font(name="宋体", size=10, bold=True)
+_OUTPUT_SONG_PLAIN = Font(name="宋体", size=10, bold=False)
+_OUTPUT_TIMES_PLAIN = Font(name="Times New Roman", size=10, bold=False)
+_OUTPUT_TIMES_BODY = Font(name="Times New Roman", size=10)
+
+
 def _format_output_sheet(ws: Worksheet, max_col: int, employee_count: int) -> None:
-    border_side = Side(style="thin", color="000000")
-    border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
+    # 员工行数可能上千，逐格新建 Font/Alignment 再交给 openpyxl 哈希查表开销很大；
+    # 这里先把用到的几种样式解析成下标，再直接写入单元格样式下标。
+    border_id = cached_style_id(ws, "border", "output_thin", lambda: _OUTPUT_BORDER)
+    alignment_id = cached_style_id(ws, "alignment", "output_center", lambda: _OUTPUT_ALIGNMENT)
+    song_bold_id = cached_style_id(ws, "font", "output_song_bold", lambda: _OUTPUT_SONG_BOLD)
+    song_plain_id = cached_style_id(ws, "font", "output_song_plain", lambda: _OUTPUT_SONG_PLAIN)
+    times_plain_id = cached_style_id(ws, "font", "output_times_plain", lambda: _OUTPUT_TIMES_PLAIN)
+    times_body_id = cached_style_id(ws, "font", "output_times_body", lambda: _OUTPUT_TIMES_BODY)
     for row in ws.iter_rows(min_row=3, max_row=4, max_col=max_col):
         for cell in row:
-            cell.font = Font(name="宋体", size=10, bold=cell.row == 4 or cell.column <= 3)
             if cell.row == 3 and cell.column >= 4:
-                cell.font = Font(name="Times New Roman", size=10, bold=False)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
+                font_id = times_plain_id
+            elif cell.row == 4 or cell.column <= 3:
+                font_id = song_bold_id
+            else:
+                font_id = song_plain_id
+            set_style_ids(cell, border_id=border_id, alignment_id=alignment_id, font_id=font_id)
 
     for row in ws.iter_rows(min_row=5, max_row=4 + employee_count, max_col=max_col):
         for cell in row:
-            cell.font = Font(name="Times New Roman", size=10)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
+            set_style_ids(cell, border_id=border_id, alignment_id=alignment_id, font_id=times_body_id)
             if cell.column >= 4:
                 cell.number_format = AMOUNT_NUMBER_FORMAT
 

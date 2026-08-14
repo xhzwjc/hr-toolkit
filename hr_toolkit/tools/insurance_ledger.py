@@ -21,7 +21,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, snapshot_row
+from hr_toolkit.common.excel import SheetGrid, apply_row_snapshot, cached_style_id, set_style_ids, snapshot_row
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
 
@@ -656,20 +656,32 @@ def _last_header_column(ws: Worksheet, header_row: int) -> int:
     return last_col
 
 
+_TABLE_SIDE = Side(style="thin", color="000000")
+_TABLE_BORDER = Border(left=_TABLE_SIDE, right=_TABLE_SIDE, top=_TABLE_SIDE, bottom=_TABLE_SIDE)
+_TABLE_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_TABLE_HEADER_FILL = PatternFill("solid", fgColor="FCE4D6")
+_TABLE_HEADER_FONT = Font(name="宋体", size=10, bold=True)
+_TABLE_NORMAL_FONT = Font(name="宋体", size=10)
+
+
 def _format_table(ws: Worksheet, min_row: int, max_row: int, max_col: int) -> None:
-    side = Side(style="thin", color="000000")
-    border = Border(left=side, right=side, top=side, bottom=side)
-    header_fill = PatternFill("solid", fgColor="FCE4D6")
-    header_font = Font(name="宋体", size=10, bold=True)
-    normal_font = Font(name="宋体", size=10)
+    # 固定样式先解析成样式表下标，避免逐格重复哈希样式对象。
+    border_id = cached_style_id(ws, "border", "table_thin", lambda: _TABLE_BORDER)
+    alignment_id = cached_style_id(ws, "alignment", "table_center", lambda: _TABLE_ALIGNMENT)
+    header_font_id = cached_style_id(ws, "font", "table_header", lambda: _TABLE_HEADER_FONT)
+    normal_font_id = cached_style_id(ws, "font", "table_normal", lambda: _TABLE_NORMAL_FONT)
+    header_fill_id = cached_style_id(ws, "fill", "table_header_fill", lambda: _TABLE_HEADER_FILL)
     for row_index in range(min_row, max_row + 1):
+        is_header = row_index == min_row
         for col_index in range(1, max_col + 1):
             cell = ws.cell(row_index, col_index)
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.font = header_font if row_index == min_row else normal_font
-            if row_index == min_row:
-                cell.fill = header_fill
+            set_style_ids(
+                cell,
+                border_id=border_id,
+                alignment_id=alignment_id,
+                font_id=header_font_id if is_header else normal_font_id,
+                fill_id=header_fill_id if is_header else None,
+            )
             if isinstance(cell.value, float):
                 cell.number_format = "0.##"
     for col_index in range(1, max_col + 1):
