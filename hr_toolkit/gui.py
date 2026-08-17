@@ -14,7 +14,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox, simpledialog
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox, simpledialog
 from tkinter import Tk, StringVar, BooleanVar, Text, TkVersion
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -51,6 +51,14 @@ from hr_toolkit.tools.archive_import import export_company_archive_tables, impor
 from hr_toolkit.tools.data_statistics import generate_data_statistics_reports, resolve_month_range, resolve_week_range
 from hr_toolkit.tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from hr_toolkit.tools.insurance_ledger import generate_insurance_ledger
+from hr_toolkit.tools.material_collector import (
+    MODE_BY_EMPLOYEE,
+    MODE_BY_MATERIAL,
+    MODE_FLAT,
+    MODE_LABELS,
+    MATERIAL_SYNONYMS,
+    collect_employee_materials,
+)
 from hr_toolkit.tools.salary_merge import merge_monthly_salary
 from hr_toolkit.tools.salary_split import split_salary_by_company
 from hr_toolkit.tools.social_security import generate_social_security_reports
@@ -79,6 +87,7 @@ TOOL_NAV_ITEMS = (
     ("salary_merge", "多月工资合并"),
     ("personnel_change_merge", "异动汇总"),
     ("archive_import", "档案入库"),
+    ("material_collector", "员工资料打包"),
     ("folder_rename", "资料文件夹改名"),
 )
 TOOL_NAV_LABELS = dict(TOOL_NAV_ITEMS)
@@ -91,13 +100,14 @@ TOOL_LOG_LABELS = {
     "salary_merge": "工资合并",
     "personnel_change_merge": "异动汇总",
     "archive_import": "档案入库",
+    "material_collector": "资料打包",
     "folder_rename": "文件夹改名",
 }
 NAV_GROUPS = (
     ("社保与保险", ("social_security", "insurance_ledger")),
     ("考勤与统计", ("data_statistics",)),
     ("薪酬管理", ("salary_split", "salary_merge")),
-    ("人员与档案", ("personnel_change_merge", "archive_import", "folder_rename")),
+    ("人员与档案", ("personnel_change_merge", "archive_import", "material_collector", "folder_rename")),
 )
 TOOL_GROUP_LABELS = {tool_id: group for group, tools in NAV_GROUPS for tool_id in tools}
 # 支持一次选择多个文件/压缩包/文件夹作为输入的工具
@@ -118,9 +128,10 @@ HISTORY_STATUS_LABELS = {
 HISTORY_TOOL_FILTER_ALL = "全部功能"
 HISTORY_DATE_FILTER_ALL = "全部时间"
 HISTORY_DATE_FILTERS = (HISTORY_DATE_FILTER_ALL, "今天", "最近7天", "最近30天", "今年")
-HISTORY_PRIMARY_PATH_ARGUMENTS = {"input_path", "input_dir", "summary_input", "summary_path"}
+HISTORY_PRIMARY_PATH_ARGUMENTS = {"input_path", "input_dir", "summary_input", "summary_path", "library_dir"}
 HISTORY_SUPPORTING_PATH_ARGUMENTS = {
     "roster_path",
+    "roster_source",
     "report_staff_path",
     "existing_summary_path",
     "template_path",
@@ -145,6 +156,9 @@ WORKSPACE_TOOL_PATHS = {
     "data_statistics": ("考勤与统计", "考勤与周月报"),
     "salary_split": ("薪酬管理", "工资表拆分"),
     "salary_merge": ("薪酬管理", "多月工资合并"),
+    "personnel_change_merge": ("人员与档案", "异动汇总"),
+    "archive_import": ("人员与档案", "档案入库"),
+    "material_collector": ("人员与档案", "员工资料打包"),
     "folder_rename": ("人员与档案", "资料文件夹改名"),
 }
 WORKSPACE_HIDDEN_NAMES = {
@@ -740,6 +754,10 @@ def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: floa
         canvas.create_rectangle(px(2), py(4.5), px(12), py(12), outline=color, width=line_width)
         canvas.create_line(px(2), py(7), px(12), py(7), **line)
         canvas.create_line(px(7), py(4.5), px(7), py(2.5), **line)
+    elif icon_id == "material_collector":
+        canvas.create_rectangle(px(2.5), py(3), px(11.5), py(11.5), outline=color, width=line_width)
+        canvas.create_line(px(2.5), py(6), px(11.5), py(6), **line)
+        canvas.create_line(px(7), py(6), px(7), py(11.5), **line)
     elif icon_id == "folder_rename":
         canvas.create_line(
             px(2), py(10.5), px(2), py(4), px(3.5), py(2.5), px(6), py(2.5), px(7.2), py(4),
@@ -1059,6 +1077,22 @@ class HRToolkitApp:
         self.rename_text = StringVar()
         self.rename_replacement_name = StringVar()
         self.rename_file_type = StringVar(value="文件夹")
+        self.material_mode = StringVar(value="按员工归类（每人一个文件夹）")
+        self.material_create_zip = BooleanVar(value=False)
+        self.material_collect_all = BooleanVar(value=True)
+        self.material_target_input = StringVar(value="")
+        self.material_types_selected: dict[str, BooleanVar] = {
+            "身份证": BooleanVar(value=True),
+            "护照": BooleanVar(value=True),
+            "劳动合同": BooleanVar(value=True),
+            "学历证明": BooleanVar(value=True),
+            "资格证书": BooleanVar(value=True),
+            "体检报告": BooleanVar(value=True),
+            "证件照片": BooleanVar(value=True),
+            "离职证明": BooleanVar(value=True),
+            "个人简历": BooleanVar(value=True),
+            "银行卡": BooleanVar(value=True),
+        }
         self.input_path = StringVar()
         self.summary_path = StringVar()
         self.stats_week_start = StringVar()
@@ -1504,6 +1538,50 @@ class HRToolkitApp:
         style.configure("App.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
         style.configure("App.TRadiobutton", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
         style.map("App.TRadiobutton", background=[("active", COLOR_SURFACE)])
+
+        # 自定义清晰对勾复选框指示器（彻底解决 clam 默认绘制 "X" 叉号引发的用户困惑）
+        try:
+            self._img_checkbox_unchecked = tk.PhotoImage(width=18, height=18)
+            self._img_checkbox_checked = tk.PhotoImage(width=18, height=18)
+            # 未勾选：浅灰边框、纯白背景
+            for x in range(18):
+                for y in range(18):
+                    if x in (0, 1, 16, 17) or y in (0, 1, 16, 17):
+                        self._img_checkbox_unchecked.put("#94A3B8", (x, y))
+                    else:
+                        self._img_checkbox_unchecked.put("#FFFFFF", (x, y))
+            # 已勾选：品牌主色实心底色 + 加粗清晰白色对勾 ✓
+            for x in range(18):
+                for y in range(18):
+                    self._img_checkbox_checked.put("#1F4E79", (x, y))
+            # 绘制加粗白色清晰对勾 ✓（从左下到右上的经典折线）
+            check_points = [
+                (4, 9), (5, 10), (6, 11), (7, 12),
+                (8, 11), (9, 9), (10, 8), (11, 6), (12, 5), (13, 4)
+            ]
+            for px, py in check_points:
+                for dx in (0, 1):
+                    for dy in (0, 1):
+                        if 0 <= px + dx < 18 and 0 <= py + dy < 18:
+                            self._img_checkbox_checked.put("#FFFFFF", (px + dx, py + dy))
+
+            style.element_create("App.Checkbutton.indicator", "image", self._img_checkbox_unchecked, ("selected", self._img_checkbox_checked))
+
+            for style_name in ("TCheckbutton", "App.TCheckbutton"):
+                style.layout(style_name, [
+                    ("Checkbutton.padding", {"sticky": "nswe", "children": [
+                        ("App.Checkbutton.indicator", {"side": "left", "sticky": ""}),
+                        ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+                            ("Checkbutton.label", {"sticky": "nswe"})
+                        ]})
+                    ]})
+                ])
+                style.configure(style_name, background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font, padding=(2, 2))
+                style.map(style_name, background=[("active", COLOR_SURFACE)])
+        except Exception:
+            for style_name in ("TCheckbutton", "App.TCheckbutton"):
+                style.configure(style_name, background=COLOR_SURFACE, foreground=COLOR_TEXT, font=self.base_font)
+                style.map(style_name, background=[("active", COLOR_SURFACE)])
         style.configure(
             "App.TEntry",
             fieldbackground=COLOR_SURFACE,
@@ -2214,6 +2292,14 @@ class HRToolkitApp:
             width=84,
             variant="link",
         )
+        self.clear_summary_button = CodexButton(
+            getattr(self.summary_entry_widget, "_hr_button_bar"),
+            text="✕ 清空",
+            command=lambda: self.summary_path.set(""),
+            width=64,
+            min_width=50,
+            variant="secondary",
+        )
 
         # 花名册/汇总表一行只显示文件名，完整路径悬停查看（对应设计稿第二张卡片的行）
         summary_entry = self._form_rows["summary"]["entry"]
@@ -2272,6 +2358,104 @@ class HRToolkitApp:
         self.rename_file_type_widget.grid(row=4, column=1, sticky="w", padx=self._px(12), pady=self._px(5))
 
         self.rename_options_frame.columnconfigure(1, weight=1)
+
+        self.material_options_frame = ttk.LabelFrame(form, text="资料检索与打包设置", padding=self._px(12), style="Rename.TLabelframe")
+        self.material_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
+
+        # 第 0 行：直接输入目标人员（姓名 / 身份证号）
+        ttk.Label(self.material_options_frame, text="目标人员", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=self._px(4))
+        target_wrap = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        target_wrap.grid(row=0, column=1, columnspan=2, sticky="ew", padx=self._px(10), pady=self._px(4))
+        self.material_target_entry = ttk.Entry(
+            target_wrap,
+            textvariable=self.material_target_input,
+            style="App.TEntry",
+        )
+        self.material_target_entry.pack(side=LEFT, fill=BOTH, expand=True)
+        self.material_target_clear_btn = CodexButton(
+            target_wrap,
+            text="✕ 清空",
+            command=lambda: self.material_target_input.set(""),
+            width=56,
+            min_width=48,
+            variant="link",
+        )
+        self.material_target_clear_btn.pack(side=RIGHT, padx=self._pad(6, 0))
+
+        self.material_input_hint = ttk.Label(
+            self.material_options_frame,
+            text="可在此直接输入姓名或身份证（如“张三”，或多人“张三, 李四”），无需制作Excel；也可在下方选择 Excel 名单文件",
+            style="CardHint.TLabel",
+        )
+        self.material_input_hint.grid(row=1, column=1, columnspan=2, sticky="w", padx=self._px(10), pady=(0, self._px(6)))
+
+        # 第 2 行：全部模式 + ZIP
+        self.material_collect_all_check = ttk.Checkbutton(
+            self.material_options_frame,
+            text="全部（直接拷贝匹配到的人员整个文件夹）",
+            variable=self.material_collect_all,
+            command=self._on_material_collect_all_changed,
+            style="App.TCheckbutton",
+        )
+        self.material_collect_all_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=self._px(5))
+
+        self.material_zip_check = ttk.Checkbutton(
+            self.material_options_frame,
+            text="生成 ZIP 压缩包",
+            variable=self.material_create_zip,
+            style="App.TCheckbutton",
+        )
+        self.material_zip_check.grid(row=2, column=2, sticky="w", padx=self._px(12), pady=self._px(5))
+
+        # 第 3 行：提取材料（全部模式下隐藏）
+        self.material_types_header = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        self.material_types_header.grid(row=3, column=0, sticky="nw", pady=self._px(5))
+
+        self.material_types_label = ttk.Label(self.material_types_header, text="指定材料", style="App.TLabel")
+        self.material_types_label.pack(side=TOP, anchor="w")
+
+        mat_actions_frame = ttk.Frame(self.material_types_header, style="InputWrap.TFrame")
+        mat_actions_frame.pack(side=TOP, anchor="w", pady=(self._px(4), 0))
+
+        CodexButton(
+            mat_actions_frame,
+            text="全选",
+            command=self._select_all_material_types,
+            width=36,
+            min_width=32,
+            variant="link",
+        ).pack(side=LEFT, padx=(0, self._px(4)))
+
+        CodexButton(
+            mat_actions_frame,
+            text="取消全选",
+            command=self._deselect_all_material_types,
+            width=56,
+            min_width=48,
+            variant="link",
+        ).pack(side=LEFT)
+
+        self.mat_checks_frame = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        self.mat_checks_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=self._px(12), pady=self._px(5))
+
+        self._material_check_widgets: list = []
+        for idx, (mat_name, var) in enumerate(self.material_types_selected.items()):
+            r = idx // 4
+            c = idx % 4
+            cb = ttk.Checkbutton(self.mat_checks_frame, text=mat_name, variable=var, style="App.TCheckbutton")
+            cb.grid(row=r, column=c, sticky="w", padx=self._px(6), pady=self._px(4))
+            self._material_check_widgets.append(cb)
+
+        self.material_types_hint = ttk.Label(
+            self.material_options_frame,
+            text="取消勾选「全部」可按材料类型精确提取（如员工名单已指定每人材料，此处为兜底默认值）",
+            style="App.TLabel",
+        )
+
+        self.material_options_frame.columnconfigure(1, weight=1)
+
+        # 初始状态：全部模式默认开，隐藏材料选择
+        self._on_material_collect_all_changed()
 
         # ──────── 区块 1：统计日期范围 ────────
         # 周报与月报日期范围用对称两行布局；每行 label 放左侧，右侧为「起始日 至 结束日」+ 快捷按钮
@@ -2470,6 +2654,12 @@ class HRToolkitApp:
             else:
                 self.rename_options_frame.grid_remove()
 
+            if getattr(self, "_material_row_visible", False):
+                material_row = len(visible_keys) * 2 if self._form_compact_layout else 3
+                self.material_options_frame.grid(row=material_row, column=0, columnspan=2, sticky="ew", pady=self._pad(10, 0))
+            else:
+                self.material_options_frame.grid_remove()
+
             if self._stats_range_row_visible:
                 if self._form_compact_layout:
                     base_row = len(visible_keys) * 2
@@ -2549,6 +2739,7 @@ class HRToolkitApp:
         self._update_summary_controls()
         self._update_output_controls()
         self._update_rename_controls()
+        self._update_material_controls()
         self._update_stats_range_controls()
 
         actions = ttk.Frame(right_frame, style="Content.TFrame")
@@ -7169,6 +7360,16 @@ class HRToolkitApp:
             self.summary_label.set("")
             self.summary_button_text.set("选择")
             self.run_button_text.set("开始拆分")
+        elif self.current_tool == "material_collector":
+            self.tool_title.set("员工资料智能检索与打包")
+            self.tool_description.set("选择员工资料库根目录和员工名单 Excel 文件，勾选所需材料类型，一键打包导出并生成缺失清单。")
+            self.input_label.set("员工资料库根目录")
+            self.input_hint.set("选择包含员工资料/扫描件/文件夹的根目录")
+            self._input_drop_title = "选择员工资料库根目录"
+            self.choose_input_text.set("选择文件夹")
+            self.summary_label.set("员工名单文件（Excel）")
+            self.summary_button_text.set("选择名单")
+            self.run_button_text.set("开始打包")
         else:
             self.tool_title.set("该工具暂未实现")
             self.tool_description.set("请选择左侧已经可用的工具。")
@@ -7185,6 +7386,7 @@ class HRToolkitApp:
             self._update_summary_controls()
             self._update_output_controls()
             self._update_rename_controls()
+            self._update_material_controls()
             self._update_stats_range_controls()
         self._refresh_last_run_status()
         if hasattr(self, "_sync_right_canvas_window"):
@@ -7323,9 +7525,13 @@ class HRToolkitApp:
         text = self.summary_path.get().strip()
         if not text:
             self.summary_display.configure(text="未选择", fg=COLOR_FAINT, font=self.base_font)
+            if hasattr(self, "clear_summary_button"):
+                self.clear_summary_button.pack_forget()
             return
         name = Path(text).name or text
         self.summary_display.configure(text=name, fg=COLOR_TEXT, font=(self.base_font[0], _font_size(10), "bold"))
+        if hasattr(self, "clear_summary_button"):
+            self.clear_summary_button.pack(side=RIGHT, padx=self._pad(6, 0))
 
     # ---------- 合并后的上传入口 ----------
 
@@ -7793,9 +7999,17 @@ class HRToolkitApp:
                 ("结果：每个入职公司生成一个 Excel，保留表头、格式、公式、小计和底部总计。", None),
                 ("注意：源工资表不会被修改；如果模板列名或表结构变化，先发给开发确认。", "warning"),
             ]
+        if tool_id == "material_collector":
+            return [
+                ("适用：根据员工名单从资料库批量提取特定材料（身份证、合同、学历等）并自动打包。", "strong"),
+                ("步骤：选择员工资料库根目录，在第二行选择员工名单表格（Excel），勾选需要的材料类型后点击“开始打包”。", None),
+                ("归类方式：支持“按员工归类”（每人建一个文件夹）、“按材料归类”或“平铺输出”，可选自动生成 ZIP 压缩包。", None),
+                ("结果：按指定结构导出文件，并自动生成《员工资料提取汇总与缺失清单.xlsx》。", None),
+                ("安全说明：纯本地读取与复制，原始资料库不会被修改，不上传外网。", "warning"),
+            ]
         return [
             ("该工具暂未实现。", "strong"),
-            ("请选择左侧已完成的工具：需求1、需求2、需求4、需求5、需求6、需求7、需求8。", None),
+            ("请选择左侧已完成的工具：需求1、需求2、需求4、需求5、需求6、需求7、需求8、需求9。", None),
         ]
 
     def _update_change_tabs_visibility(self) -> None:
@@ -7816,9 +8030,37 @@ class HRToolkitApp:
         self.change_tabs.pack_forget()
 
     def _update_summary_controls(self) -> None:
-        self._summary_row_visible = self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import"}
+        self._summary_row_visible = self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import", "material_collector"}
         if hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
+
+    def _update_material_controls(self) -> None:
+        self._material_row_visible = self.current_tool == "material_collector"
+        if hasattr(self, "_apply_form_layout"):
+            self._apply_form_layout()
+
+    def _select_all_material_types(self) -> None:
+        for var in self.material_types_selected.values():
+            var.set(True)
+
+    def _deselect_all_material_types(self) -> None:
+        for var in self.material_types_selected.values():
+            var.set(False)
+
+    def _on_material_collect_all_changed(self) -> None:
+        """全部模式切换：勾选时隐藏材料类型选择，取消时显示。"""
+        if not hasattr(self, "mat_checks_frame"):
+            return
+        if self.material_collect_all.get():
+            if hasattr(self, "material_types_header"):
+                self.material_types_header.grid_remove()
+            self.mat_checks_frame.grid_remove()
+            self.material_types_hint.grid(row=3, column=0, columnspan=3, sticky="w", pady=self._px(5))
+        else:
+            self.material_types_hint.grid_remove()
+            if hasattr(self, "material_types_header"):
+                self.material_types_header.grid(row=3, column=0, sticky="nw", pady=self._px(5))
+            self.mat_checks_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=self._px(12), pady=self._px(5))
 
     def _update_change_picker_buttons(self) -> None:
         """配置合并后的上传入口动作，以及第二行（花名册/汇总表）的选择链接。"""
@@ -7860,7 +8102,7 @@ class HRToolkitApp:
             else:
                 self._input_file_cmd = self._choose_archive_files_or_zip
                 self._input_folder_cmd = self._choose_archive_folder
-        elif tool == "folder_rename":
+        elif tool in {"folder_rename", "material_collector"}:
             self._input_file_cmd = None
             self._input_folder_cmd = self._choose_input
         else:  # salary_split 及未实现工具：单个文件
@@ -7903,6 +8145,10 @@ class HRToolkitApp:
                 hide(self.change_summary_folder_button)
                 self.change_summary_file_button.configure(text="选择文件", command=self._choose_archive_summary_file)
                 show(self.change_summary_file_button)
+        elif tool == "material_collector":
+            hide(self.summary_choose_button, self.change_summary_folder_button)
+            self.change_summary_file_button.configure(text="选择文件", command=self._choose_material_roster_file)
+            show(self.change_summary_file_button)
         else:
             hide(self.change_summary_folder_button, self.change_summary_file_button)
             show(self.summary_choose_button)
@@ -8056,10 +8302,12 @@ class HRToolkitApp:
             return "请选择人员文件夹目录，填写改名内容，然后点击“预览”。"
         if self.current_tool == "salary_split":
             return "请选择工资表文件，然后点击“开始拆分”。资料和结果会自动留存在当前项目。"
+        if self.current_tool == "material_collector":
+            return "请选择员工资料库根目录和员工名单 Excel 文件，勾选所需材料类型，然后点击“开始打包”。"
         return "该工具暂未实现。"
 
     def _choose_input(self) -> None:
-        if self.current_tool in {"salary_merge", "personnel_change_merge", "folder_rename", "archive_import"}:
+        if self.current_tool in {"salary_merge", "personnel_change_merge", "folder_rename", "archive_import", "material_collector"}:
             if self.current_tool == "personnel_change_merge":
                 if self.change_mode == "roster":
                     self._choose_roster_summary_files()
@@ -8070,6 +8318,8 @@ class HRToolkitApp:
                 title = "选择档案移交表文件夹"
             elif self.current_tool == "folder_rename":
                 title = "选择人员文件夹目录"
+            elif self.current_tool == "material_collector":
+                title = "选择员工资料库根目录"
             else:
                 title = "选择工资表文件夹"
             directory = filedialog.askdirectory(title=title)
@@ -8132,6 +8382,14 @@ class HRToolkitApp:
     def _choose_social_security_roster_file(self) -> None:
         filename = filedialog.askopenfilename(
             title="选择参保人员花名册",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filename:
+            self.summary_path.set(filename)
+
+    def _choose_material_roster_file(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="选择员工名单 Excel 文件",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filename:
@@ -8410,6 +8668,9 @@ class HRToolkitApp:
             return
         if self.current_tool == "salary_merge":
             self._run_salary_merge()
+            return
+        if self.current_tool == "material_collector":
+            self._run_material_collector()
             return
         self._run_salary_split()
 
@@ -8842,6 +9103,79 @@ class HRToolkitApp:
             file_type=file_type,
         )
 
+    def _run_material_collector(self) -> None:
+        input_text = self.input_path.get().strip()
+        direct_target_text = self.material_target_input.get().strip()
+        roster_text = self.summary_path.get().strip()
+        output_text = self.output_dir.get().strip()
+
+        if not input_text:
+            messagebox.showwarning("缺少资料库", "请先选择员工资料库根目录。")
+            return
+        lib_path = Path(input_text)
+        if not lib_path.exists() or not lib_path.is_dir():
+            messagebox.showwarning("资料库不存在", "选择的资料库根目录不存在，请重新选择。")
+            return
+
+        # 确定名单来源：输入框直接指定优先，其次为上传的 Excel 名单
+        roster_source: str | Path | None = None
+        if direct_target_text:
+            roster_source = direct_target_text
+        elif roster_text:
+            roster_path = Path(roster_text)
+            if not roster_path.exists() or not roster_path.is_file():
+                messagebox.showwarning("名单文件不存在", "选择的员工名单文件不存在，请重新选择。")
+                return
+            if roster_path.suffix.lower() not in {".xlsx", ".xls"}:
+                messagebox.showwarning("格式不支持", "员工名单只支持 .xlsx 或 .xls 文件。")
+                return
+            roster_source = roster_path
+        else:
+            messagebox.showwarning(
+                "缺少员工信息",
+                "请在上方输入框直接输入员工姓名/身份证（如“张三”），或在下方选择员工名单 Excel 表格。",
+            )
+            return
+
+        if not output_text:
+            messagebox.showwarning("缺少目录", "请选择保存位置。")
+            return
+
+        is_collect_all = self.material_collect_all.get()
+
+        selected_materials: list[str] | None = None
+        if not is_collect_all:
+            selected_materials = [
+                mat for mat, var in self.material_types_selected.items() if var.get()
+            ]
+            if not selected_materials:
+                messagebox.showwarning("未选择材料", "请至少勾选一种需要提取的材料类型，或者勾选「全部」直接拷贝整个文件夹。")
+                return
+
+        create_zip_val = self.material_create_zip.get()
+
+        output_dir = self._prepare_result_output_dir(Path(output_text))
+        if output_dir is None:
+            return
+        self._begin_tool_run()
+        self._clear_log()
+        if is_collect_all:
+            self._write_log("开始检索并拷贝员工整个资料文件夹，请稍候...")
+        else:
+            self._write_log("开始检索并打包指定材料，请稍候...")
+
+        self._start_tool_worker(
+            collect_employee_materials,
+            lib_path,
+            output_dir,
+            roster_source=roster_source,
+            material_types=selected_materials,
+            mode=MODE_BY_EMPLOYEE,
+            create_zip=create_zip_val,
+            generate_report=True,
+            collect_all=is_collect_all,
+        )
+
     def _begin_tool_run(self) -> None:
         """进入运行状态：主按钮变为“停止”，并为本次运行分配编号。"""
         self._tool_run_token += 1
@@ -8921,6 +9255,9 @@ class HRToolkitApp:
                     sources.append(SourceSpec(path=root_dir, role="input_path", suffixes=None))
                     output_dir = root_dir
                 continue
+            if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
+                parameters[name] = self._history_serializable(value)
+                continue
             if name not in HISTORY_PATH_ARGUMENTS or value is None:
                 parameters[name] = self._history_serializable(value)
                 continue
@@ -8969,6 +9306,8 @@ class HRToolkitApp:
             records_by_role.setdefault(record.role, []).append(record.archived_path)
 
         for name, value in tuple(bound.arguments.items()):
+            if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
+                continue
             if name not in HISTORY_PATH_ARGUMENTS or value is None:
                 continue
             role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS else name
@@ -9146,6 +9485,8 @@ class HRToolkitApp:
             if name == "output_dir":
                 bound.arguments[name] = result_dir
                 continue
+            if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
+                continue
             if value is None or name not in HISTORY_PATH_ARGUMENTS | {"root_dir"}:
                 continue
             role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS or name == "root_dir" else name
@@ -9159,7 +9500,7 @@ class HRToolkitApp:
                 if len(copied_paths) != 1 or not copied_paths[0].is_dir():
                     raise RuntimeError("人员资料文件夹快照不完整。")
                 replacement = self._copy_project_directory_for_result(store, batch_id, copied_paths[0])
-            elif name == "template_path" and original_was_directory:
+            elif name in {"template_path", "library_dir"} and original_was_directory:
                 replacement = copied_paths[0]
             elif isinstance(value, (list, tuple)) or original_was_directory:
                 replacement = copied_paths
@@ -9494,6 +9835,34 @@ class HRToolkitApp:
                     if item.get("file_path"):
                         self._write_log(f"  输出：{item['file_path']}")
                 message = "工资表已拆分完成，可以打开结果文件夹查看。"
+            elif self.current_tool == "material_collector":
+                self._write_log("员工资料检索与打包完成。")
+                self._write_log(f"目标员工数：{payload['total_employees']} 人")
+                self._write_log(f"材料齐全人数：{payload['complete_employee_count']} 人")
+                self._write_log(f"提取文件总数：{payload['matched_file_count']} 个")
+                if payload.get("report_path"):
+                    self._write_log(f"汇总报告：{payload['report_path']}")
+                if payload.get("zip_path"):
+                    self._write_log(f"压缩包输出：{payload['zip_path']}")
+                if payload.get("missing_records"):
+                    self._write_log("存在缺件的员工：")
+                    for emp, missing in payload["missing_records"].items():
+                        self._write_log(f"- {emp} 缺少：{', '.join(missing)}")
+                mismatches = [
+                    f"- {m['employee_name']}（{m['material_type']}）：{m['mismatch_warning']}"
+                    for m in payload.get("matches", [])
+                    if m.get("mismatch_warning")
+                ]
+                if mismatches:
+                    self._write_log("⚠️【信息核对预警】以下提取的资料与目标人员信息不一致：")
+                    for warn_text in mismatches:
+                        self._write_log(warn_text)
+                for warning in payload.get("warnings", []):
+                    self._write_log(f"提醒：{warning}")
+                if mismatches:
+                    message = "员工资料已打包完成，但存在【姓名/号码不一致】的预警，详情请查看汇总 Excel 或运行日志。"
+                else:
+                    message = "员工资料已检索打包完成，可以打开结果文件夹查看。"
             else:
                 message = "处理完成。"
         self._update_project_output_controls()

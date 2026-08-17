@@ -8,6 +8,7 @@ from pathlib import Path
 from hr_toolkit.runtime_checks import run_headless_command
 
 from .tools.folder_rename import rename_person_folders, FILE_TYPE_FOLDER
+from .tools.material_collector import collect_employee_materials, MODE_BY_EMPLOYEE
 from .tools.archive_import import export_company_archive_tables, import_archive_transfers
 from .tools.data_statistics import generate_data_statistics_reports
 from .tools.insurance_ledger import generate_insurance_ledger
@@ -429,6 +430,58 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
     )
+
+    material_collector = subparsers.add_parser(
+        "material-collector",
+        help="需求9：员工资料自动打包与信息提取",
+    )
+    material_collector.add_argument(
+        "-l",
+        "--library",
+        required=True,
+        type=Path,
+        help="员工资料库根目录",
+    )
+    material_collector.add_argument(
+        "-r",
+        "--roster",
+        required=True,
+        help="员工名单 Excel 文件路径或名单文本",
+    )
+    material_collector.add_argument(
+        "-o",
+        "--output",
+        required=True,
+        type=Path,
+        help="提取文件输出目录",
+    )
+    material_collector.add_argument(
+        "-m",
+        "--materials",
+        nargs="*",
+        help="指定需要提取的材料类型列表（如 身份证 劳动合同 学历证明）",
+    )
+    material_collector.add_argument(
+        "--mode",
+        choices=["by_employee", "by_material", "flat"],
+        default="by_employee",
+        help="归类方式：by_employee（按员工）、by_material（按材料）、flat（平铺）",
+    )
+    material_collector.add_argument(
+        "--zip",
+        action="store_true",
+        help="自动生成 .zip 压缩包",
+    )
+    material_collector.add_argument(
+        "--no-report",
+        action="store_true",
+        help="不生成 Excel 汇总报告",
+    )
+    material_collector.add_argument(
+        "--json",
+        action="store_true",
+        help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
+    )
     return parser
 
 
@@ -589,6 +642,23 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             _print_folder_rename_summary(payload)
+        return 0
+
+    if args.command == "material-collector":
+        result = collect_employee_materials(
+            library_dir=args.library,
+            output_dir=args.output,
+            roster_source=args.roster,
+            material_types=args.materials if args.materials else None,
+            mode=args.mode,
+            create_zip=args.zip,
+            generate_report=not args.no_report,
+        )
+        payload = result.to_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_material_collector_summary(payload)
         return 0
 
     parser.print_help(sys.stderr)
@@ -810,6 +880,28 @@ def _print_folder_rename_summary(payload: dict) -> None:
     for operation in payload["operations"]:
         print(f"- {operation['source_name']} -> {operation['target_name']}")
     if payload["warnings"]:
+        print("提醒：")
+        for warning in payload["warnings"]:
+            print(f"- {warning}")
+
+
+def _print_material_collector_summary(payload: dict) -> None:
+    print(f"工具：{payload['tool_name']}")
+    print(f"资料库目录：{payload['library_dir']}")
+    print(f"输出目录：{payload['output_dir']}")
+    print(f"归类方式：{payload['mode']}")
+    print(f"目标员工数：{payload['total_employees']} 人")
+    print(f"材料齐全员工数：{payload['complete_employee_count']} 人")
+    print(f"提取文件总数：{payload['matched_file_count']} 个")
+    if payload.get("zip_path"):
+        print(f"压缩包文件：{payload['zip_path']}")
+    if payload.get("report_path"):
+        print(f"汇总报告：{payload['report_path']}")
+    if payload.get("missing_records"):
+        print("缺件明细：")
+        for emp, missing in payload["missing_records"].items():
+            print(f"- {emp} 缺少：{', '.join(missing)}")
+    if payload.get("warnings"):
         print("提醒：")
         for warning in payload["warnings"]:
             print(f"- {warning}")

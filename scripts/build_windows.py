@@ -259,6 +259,7 @@ def pyinstaller_commands(
         )
     for module in HIDDEN_IMPORTS:
         main.extend(["--hidden-import", module])
+    main.extend(["--collect-all", "rapidocr_onnxruntime"])
     main.append(str(APP_ENTRYPOINT))
 
     updater = [
