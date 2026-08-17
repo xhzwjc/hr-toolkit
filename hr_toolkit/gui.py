@@ -128,7 +128,7 @@ HISTORY_STATUS_LABELS = {
 HISTORY_TOOL_FILTER_ALL = "全部功能"
 HISTORY_DATE_FILTER_ALL = "全部时间"
 HISTORY_DATE_FILTERS = (HISTORY_DATE_FILTER_ALL, "今天", "最近7天", "最近30天", "今年")
-HISTORY_PRIMARY_PATH_ARGUMENTS = {"input_path", "input_dir", "summary_input", "summary_path", "library_dir"}
+HISTORY_PRIMARY_PATH_ARGUMENTS = {"input_path", "input_dir", "summary_input", "summary_path"}
 HISTORY_SUPPORTING_PATH_ARGUMENTS = {
     "roster_path",
     "roster_source",
@@ -4035,7 +4035,17 @@ class HRToolkitApp:
 
     def _workspace_visible_children(self, path: Path) -> list[Path]:
         try:
-            children = [child for child in path.iterdir() if not self._workspace_should_hide_path(child)]
+            children = []
+            for child in path.iterdir():
+                if self._workspace_should_hide_path(child):
+                    continue
+                if child.name == "上传资料" and child.is_dir():
+                    try:
+                        if not any(child.iterdir()):
+                            continue
+                    except OSError:
+                        pass
+                children.append(child)
         except OSError:
             return []
         return sorted(children, key=lambda child: (not child.is_dir(), child.name.casefold()))
@@ -7362,10 +7372,10 @@ class HRToolkitApp:
             self.run_button_text.set("开始拆分")
         elif self.current_tool == "material_collector":
             self.tool_title.set("员工资料智能检索与打包")
-            self.tool_description.set("选择员工资料库根目录和员工名单 Excel 文件，勾选所需材料类型，一键打包导出并生成缺失清单。")
-            self.input_label.set("员工资料库根目录")
-            self.input_hint.set("选择包含员工资料/扫描件/文件夹的根目录")
-            self._input_drop_title = "选择员工资料库根目录"
+            self.tool_description.set("选择员工资料库根目录和员工名单，勾选所需材料类型，一键打包导出并生成缺失清单。")
+            self.input_label.set("员工资料库路径（只读检索）")
+            self.input_hint.set("仅做本地只读扫描，不复制原资料库，支持上万人超大资料库")
+            self._input_drop_title = "选择员工资料库路径（只读扫描）"
             self.choose_input_text.set("选择文件夹")
             self.summary_label.set("员工名单文件（Excel）")
             self.summary_button_text.set("选择名单")
@@ -7727,12 +7737,23 @@ class HRToolkitApp:
                 fill=COLOR_PRIMARY_SOFT,
                 outline="",
             )
-            arrow = {"fill": COLOR_PRIMARY, "width": max(1.0, self._pxf(1.6)), "capstyle": "round", "joinstyle": "round"}
-            icon_cx = center_x
-            icon_cy = icon_top + icon_size / 2
-            zone.create_line(icon_cx, icon_cy + self._pxf(5), icon_cx, icon_cy - self._pxf(7), **arrow)
-            zone.create_line(icon_cx - self._pxf(5), icon_cy - self._pxf(2), icon_cx, icon_cy - self._pxf(7), icon_cx + self._pxf(5), icon_cy - self._pxf(2), **arrow)
-            zone.create_line(icon_cx - self._pxf(7), icon_cy + self._pxf(9), icon_cx + self._pxf(7), icon_cy + self._pxf(9), **arrow)
+            if self.current_tool in {"material_collector", "folder_rename"}:
+                _paint_tool_icon(
+                    zone,
+                    "folder_rename",
+                    COLOR_PRIMARY,
+                    center_x - icon_size * 0.25,
+                    icon_top + icon_size * 0.25,
+                    icon_size * 0.5,
+                    max(1.0, self._pxf(1.6)),
+                )
+            else:
+                arrow = {"fill": COLOR_PRIMARY, "width": max(1.0, self._pxf(1.6)), "capstyle": "round", "joinstyle": "round"}
+                icon_cx = center_x
+                icon_cy = icon_top + icon_size / 2
+                zone.create_line(icon_cx, icon_cy + self._pxf(5), icon_cx, icon_cy - self._pxf(7), **arrow)
+                zone.create_line(icon_cx - self._pxf(5), icon_cy - self._pxf(2), icon_cx, icon_cy - self._pxf(7), icon_cx + self._pxf(5), icon_cy - self._pxf(2), **arrow)
+                zone.create_line(icon_cx - self._pxf(7), icon_cy + self._pxf(9), icon_cx + self._pxf(7), icon_cy + self._pxf(9), **arrow)
             title_y = icon_top + icon_size + self._pxf(18)
             zone.create_text(
                 center_x,
@@ -7745,11 +7766,12 @@ class HRToolkitApp:
             if self._input_file_cmd is not None:
                 links.append(("浏览文件", self._input_file_cmd))
             if self._input_folder_cmd is not None:
-                links.append(("选择文件夹", self._input_folder_cmd))
+                folder_label = "点击浏览文件夹路径" if self._input_file_cmd is None else "选择文件夹"
+                links.append((folder_label, self._input_folder_cmd))
             link_y = title_y + self._pxf(21)
             segments: list[tuple[str, str, object | None]] = []
-            if links:
-                segments.append(("或 " if len(links) > 0 else "", COLOR_FAINT, None))
+            if links and self._input_file_cmd is not None:
+                segments.append(("或 ", COLOR_FAINT, None))
             for link_index, (label, command) in enumerate(links):
                 if link_index > 0:
                     segments.append((" · ", COLOR_FAINT, None))
@@ -9140,6 +9162,16 @@ class HRToolkitApp:
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")
             return
+        out_candidate = Path(output_text).resolve()
+        try:
+            if out_candidate == lib_path.resolve() or out_candidate.is_relative_to(lib_path.resolve()):
+                messagebox.showwarning(
+                    "保存目录无效",
+                    "保存目录不能设在资料库目录内部（会导致循环嵌套复制）。\n请选择一个位于资料库外部的独立保存文件夹。",
+                )
+                return
+        except Exception:
+            pass
 
         is_collect_all = self.material_collect_all.get()
 
@@ -9255,6 +9287,9 @@ class HRToolkitApp:
                     sources.append(SourceSpec(path=root_dir, role="input_path", suffixes=None))
                     output_dir = root_dir
                 continue
+            if name == "library_dir" and value is not None:
+                parameters[name] = str(value)
+                continue
             if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
                 parameters[name] = self._history_serializable(value)
                 continue
@@ -9306,6 +9341,8 @@ class HRToolkitApp:
             records_by_role.setdefault(record.role, []).append(record.archived_path)
 
         for name, value in tuple(bound.arguments.items()):
+            if name == "library_dir":
+                continue
             if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
                 continue
             if name not in HISTORY_PATH_ARGUMENTS or value is None:
@@ -9485,6 +9522,8 @@ class HRToolkitApp:
             if name == "output_dir":
                 bound.arguments[name] = result_dir
                 continue
+            if name == "library_dir":
+                continue
             if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
                 continue
             if value is None or name not in HISTORY_PATH_ARGUMENTS | {"root_dir"}:
@@ -9500,7 +9539,7 @@ class HRToolkitApp:
                 if len(copied_paths) != 1 or not copied_paths[0].is_dir():
                     raise RuntimeError("人员资料文件夹快照不完整。")
                 replacement = self._copy_project_directory_for_result(store, batch_id, copied_paths[0])
-            elif name in {"template_path", "library_dir"} and original_was_directory:
+            elif name == "template_path" and original_was_directory:
                 replacement = copied_paths[0]
             elif isinstance(value, (list, tuple)) or original_was_directory:
                 replacement = copied_paths
@@ -9590,6 +9629,12 @@ class HRToolkitApp:
                 if cancel_event.is_set():
                     raise RuntimeError("本次处理已停止。")
                 store.mark_success(batch_id)
+                try:
+                    upload_path = Path(store.root) / running.directories["uploads"]
+                    if upload_path.is_dir() and not any(upload_path.iterdir()):
+                        upload_path.rmdir()
+                except Exception:
+                    pass
             except Exception as exc:
                 stopped = cancel_event.is_set()
                 finalization_error = None

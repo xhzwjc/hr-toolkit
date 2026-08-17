@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
+import threading
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -16,21 +18,23 @@ from openpyxl.utils import get_column_letter
 from ..common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from ..common.filenames import safe_filename
 
-# OCR 引擎全局单例缓存（延迟初始化）
+# OCR 引擎全局单例与线程安全锁
 _OCR_ENGINE = None
 _OCR_ATTEMPTED = False
+_OCR_LOCK = threading.Lock()
 
 
 def _get_ocr_engine():
     global _OCR_ENGINE, _OCR_ATTEMPTED
-    if not _OCR_ATTEMPTED:
-        _OCR_ATTEMPTED = True
-        try:
-            from rapidocr_onnxruntime import RapidOCR
-            _OCR_ENGINE = RapidOCR()
-        except Exception:
-            _OCR_ENGINE = None
-    return _OCR_ENGINE
+    with _OCR_LOCK:
+        if not _OCR_ATTEMPTED:
+            _OCR_ATTEMPTED = True
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+                _OCR_ENGINE = RapidOCR()
+            except Exception:
+                _OCR_ENGINE = None
+        return _OCR_ENGINE
 
 
 TOOL_NAME = "需求9-员工资料自动打包与信息提取"
@@ -115,8 +119,45 @@ SUPPORTED_FILE_EXTENSIONS = {
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 DOC_EXTENSIONS = {".doc", ".docx", ".pdf", ".txt"}
 
+_IGNORED_FILENAMES = {
+    ".ds_store", "thumbs.db", "desktop.ini", ".localized", "ehthumbs.db",
+}
+
 _PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
 _ID_CARD_RE = re.compile(r"^\d{17}[\dXx]$|^\d{15}$")
+
+
+def _is_junk_or_temp_file(path: Path | str) -> bool:
+    """检查是否为系统垃圾文件或 Office 临时锁文件。"""
+    name = Path(path).name.lower()
+    if name.startswith(".") or name.startswith("~$") or name in _IGNORED_FILENAMES:
+        return True
+    return False
+
+
+def _is_path_nested(child: Path, parent: Path) -> bool:
+    """检查 child 路径是否处于 parent 路径内部或为同一路径。"""
+    try:
+        child_res = child.resolve()
+        parent_res = parent.resolve()
+        if child_res == parent_res:
+            return True
+        child_res.relative_to(parent_res)
+        return True
+    except (ValueError, RuntimeError):
+        return False
+
+
+def _get_file_signature(path: Path) -> tuple[int, str]:
+    """计算文件大小和前 64KB 哈希，作为同员工去重特征。"""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            chunk = f.read(65536)
+        h = hashlib.md5(chunk).hexdigest()
+        return size, h
+    except Exception:
+        return -1, str(path)
 
 
 @dataclass(frozen=True)
@@ -128,6 +169,11 @@ class TargetEmployee:
     phone: str = ""
     per_person_materials: tuple[str, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def identity_key(self) -> str:
+        """员工唯一复合主键，防止同名员工覆盖。"""
+        return f"{self.name}_{self.id_card}_{self.phone}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,7 +192,7 @@ class MaterialFileMatch:
     material_type: str
     source_path: Path
     relative_source_path: str
-    matched_by: str  # "filename", "ocr", "doc_content", "id_card", "phone"
+    matched_by: str  # "filename", "ocr", "doc_content", "id_card", "phone", "read_failed"
     target_filename: str = ""
     target_path: Path | None = None
     extracted_person_name: str = ""
@@ -321,7 +367,7 @@ def parse_employee_roster(
     def _add_emp(emp: TargetEmployee | None) -> None:
         if not emp or not emp.name:
             return
-        key = f"{emp.name}_{emp.id_card}_{emp.phone}"
+        key = emp.identity_key
         if key not in seen_keys:
             seen_keys.add(key)
             employees.append(emp)
@@ -371,7 +417,7 @@ def parse_employee_roster(
             max_r = ws.max_row or 1
             max_c = ws.max_column or 1
 
-            for r in range(1, min(max_r, 10) + 1):
+            for r in range(1, min(max_r, 15) + 1):
                 for c in range(1, max_c + 1):
                     val = str(ws.cell(r, c).value or "").strip()
                     if not val:
@@ -511,7 +557,7 @@ def _extract_document_text(file_path: Path) -> str:
     elif ext == ".pdf":
         try:
             with open(file_path, "rb") as f:
-                content = f.read(100000)
+                content = f.read(150000)
             texts = re.findall(rb"\((.*?)\)[\s]*Tj", content)
             if texts:
                 return b" ".join(texts).decode("utf-8", errors="ignore")
@@ -521,7 +567,7 @@ def _extract_document_text(file_path: Path) -> str:
     elif ext == ".doc":
         try:
             with open(file_path, "rb") as f:
-                content = f.read(100000)
+                content = f.read(150000)
             return content.decode("utf-8", errors="ignore")
         except Exception:
             pass
@@ -548,7 +594,8 @@ def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
         return None, "", "", "", ""
 
     try:
-        result, _ = engine(str(file_path))
+        with _OCR_LOCK:
+            result, _ = engine(str(file_path))
         if not result:
             return None, "", "", "", ""
         texts = [item[1] for item in result]
@@ -652,12 +699,15 @@ def _classify_material_type(file_path: Path, filename: str, requested_types: lis
 def _scan_folder_index(
     lib_path: Path,
     max_depth: int = 1,
+    skip_dir: Path | None = None,
 ) -> dict[str, list[Path]]:
-    """扫描资料库，建立"文件夹名 → 文件夹路径列表"的索引。"""
+    """扫描资料库，建立"文件夹名 → 文件夹路径列表"的索引，主动跳过输出目录。"""
     folder_index: dict[str, list[Path]] = {}
 
     def _scan(parent: Path, depth: int) -> None:
         if depth > max_depth:
+            return
+        if skip_dir and _is_path_nested(parent, skip_dir):
             return
         try:
             entries = list(os.scandir(parent))
@@ -666,9 +716,11 @@ def _scan_folder_index(
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
                 name = entry.name
-                if name.startswith("."):
+                if name.startswith(".") or name in _IGNORED_FILENAMES:
                     continue
                 path = Path(entry.path)
+                if skip_dir and _is_path_nested(path, skip_dir):
+                    continue
                 folder_index.setdefault(name, []).append(path)
                 if depth < max_depth:
                     _scan(path, depth + 1)
@@ -701,6 +753,15 @@ def collect_employee_materials(
     if not lib_path.exists() or not lib_path.is_dir():
         raise FileNotFoundError(f"资料库目录不存在：{lib_path}")
 
+    # P0 防递归死循环：输出目录严禁处于资料库内部
+    if _is_path_nested(out_path, lib_path):
+        raise ValueError(
+            f"保存目录不能在资料库目录内部（会导致循环嵌套复制）：\n"
+            f"资料库：{lib_path}\n"
+            f"保存目录：{out_path}\n"
+            f"请选择一个位于资料库外部的独立文件夹作为保存目录。"
+        )
+
     if mode not in MODES:
         raise ValueError(f"不支持的归类模式：{mode}，可选值：{MODES}")
 
@@ -717,7 +778,7 @@ def collect_employee_materials(
 
     if progress_callback:
         progress_callback(0, len(employees), "正在扫描资料库文件夹索引...")
-    folder_index = _scan_folder_index(lib_path, max_depth=scan_depth)
+    folder_index = _scan_folder_index(lib_path, max_depth=scan_depth, skip_dir=out_path)
 
     total_steps = len(employees)
     matches: list[MaterialFileMatch] = []
@@ -726,8 +787,9 @@ def collect_employee_materials(
     folder_match_counts: dict[str, int] = {}
 
     for idx, emp in enumerate(employees):
+        emp_key = emp.name
         if progress_callback:
-            progress_callback(idx + 1, total_steps, f"正在识别与匹配：{emp.name}")
+            progress_callback(idx + 1, total_steps, f"[{idx + 1}/{total_steps}] 正在检索与匹配：{emp.name}")
 
         if collect_all:
             emp_materials: list[str] | None = None
@@ -743,32 +805,41 @@ def collect_employee_materials(
                 for p in paths:
                     matched_folders.append((p, reason))
 
-        folder_match_counts[emp.name] = len(matched_folders)
+        folder_match_counts[emp_key] = len(matched_folders)
+
+        # 同名文件夹防错配检测：如果一个名字匹配到多个不同路径的文件夹
+        duplicate_folder_warning = ""
+        if len(matched_folders) > 1:
+            duplicate_folder_warning = f"⚠️ 资料库中存在 {len(matched_folders)} 个同名文件夹，已全部提取归档，请注意核实！"
+            warnings.append(f"员工【{emp.name}】：{duplicate_folder_warning}")
 
         if not matched_folders:
             if emp_materials is not None:
-                missing_records[emp.name] = list(emp_materials) if emp_materials else list(global_materials)
+                missing_records[emp_key] = list(emp_materials) if emp_materials else list(global_materials)
             else:
-                missing_records[emp.name] = ["（整个文件夹）"]
+                missing_records[emp_key] = ["（整个文件夹）"]
             continue
 
         if emp_materials is None:
             _collect_all_from_folders(
-                emp, matched_folders, out_path, mode, matches, warnings,
+                emp, matched_folders, out_path, mode, matches, warnings, duplicate_folder_warning,
             )
         else:
             emp_missing = _collect_specific_materials(
-                emp, matched_folders, out_path, mode, emp_materials, matches, warnings,
+                emp, matched_folders, out_path, mode, emp_materials, matches, warnings, duplicate_folder_warning,
             )
             if emp_missing:
-                missing_records[emp.name] = emp_missing
+                missing_records[emp_key] = emp_missing
 
     zip_path: Path | None = None
     if create_zip:
         zip_path = out_path.parent / f"{out_path.name}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(out_path):
+            for root, dirs, files in os.walk(out_path):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
                 for f in files:
+                    if _is_junk_or_temp_file(f):
+                        continue
                     full_p = Path(root) / f
                     arcname = full_p.relative_to(out_path)
                     zf.write(full_p, arcname=str(arcname))
@@ -780,7 +851,7 @@ def collect_employee_materials(
         report_materials = global_materials
     if generate_report:
         report_path = out_path / "《员工资料提取汇总与缺失清单》.xlsx"
-        _write_excel_report(report_path, employees, report_materials, matches, collect_all)
+        _write_excel_report(report_path, employees, report_materials, matches, collect_all, warnings)
 
     return MaterialCollectResult(
         library_dir=lib_path,
@@ -801,14 +872,16 @@ def collect_employee_materials(
 # 收集策略实现
 # ---------------------------------------------------------------------------
 
-def _check_mismatch_warning(emp: TargetEmployee, extracted_name: str, extracted_id: str) -> str:
+def _check_mismatch_warning(emp: TargetEmployee, extracted_name: str, extracted_id: str, duplicate_warning: str = "") -> str:
     """核对识别到的证件人名/号码与目标员工是否一致。"""
-    warnings: list[str] = []
+    warns: list[str] = []
+    if duplicate_warning:
+        warns.append(duplicate_warning)
     if extracted_name and emp.name and extracted_name != emp.name and emp.name not in extracted_name:
-        warnings.append(f"⚠️ 证件姓名【{extracted_name}】与目标【{emp.name}】不一致")
+        warns.append(f"⚠️ 证件姓名【{extracted_name}】与目标【{emp.name}】不一致")
     if extracted_id and emp.id_card and extracted_id != emp.id_card:
-        warnings.append(f"⚠️ 证件号码【{extracted_id}】与目标【{emp.id_card}】不一致")
-    return "；".join(warnings)
+        warns.append(f"⚠️ 证件号码【{extracted_id}】与目标【{emp.id_card}】不一致")
+    return "；".join(warns)
 
 
 def _collect_all_from_folders(
@@ -818,12 +891,14 @@ def _collect_all_from_folders(
     mode: str,
     matches: list[MaterialFileMatch],
     warnings: list[str],
+    duplicate_warning: str = "",
 ) -> None:
     """全部材料模式：将匹配到的文件夹整体拷贝到输出目录。"""
     clean_emp = safe_filename(emp.name)
+    seen_hashes: set[tuple[int, str]] = set()
 
     for folder_idx, (folder_path, match_reason) in enumerate(matched_folders):
-        suffix = f"_{folder_idx + 1}" if len(matched_folders) > 1 else ""
+        suffix = f"_同名{folder_idx + 1}" if len(matched_folders) > 1 else ""
         dest_name = f"{clean_emp}{suffix}"
 
         dest_dir = out_path / dest_name
@@ -837,14 +912,31 @@ def _collect_all_from_folders(
                 target_root.mkdir(parents=True, exist_ok=True)
 
                 for f in files:
-                    if f.startswith(".") or f.startswith("~$"):
+                    if _is_junk_or_temp_file(f):
                         continue
                     src = Path(root) / f
+
+                    # 同一员工内部跨目录重复文件 Hash 去重
+                    sig = _get_file_signature(src)
+                    if sig in seen_hashes:
+                        continue
+                    seen_hashes.add(sig)
+
                     dst = target_root / f
                     try:
                         shutil.copy2(src, dst)
                     except Exception as e:
-                        warnings.append(f"复制失败：{src} → {dst}: {e}")
+                        err_msg = f"复制失败：{src} → {dst}: {e}"
+                        warnings.append(err_msg)
+                        matches.append(MaterialFileMatch(
+                            employee_name=emp.name,
+                            material_type="全部",
+                            source_path=src,
+                            relative_source_path=src.name,
+                            matched_by="读取失败",
+                            target_filename=f,
+                            mismatch_warning=f"⚠️ 文件复制或读取失败: {e}",
+                        ))
                         continue
 
                     try:
@@ -856,7 +948,7 @@ def _collect_all_from_folders(
                     ocr_name, ocr_id = "", ""
                     if src.suffix.lower() in IMAGE_EXTENSIONS:
                         _, _, _, ocr_name, ocr_id = _classify_by_ocr(src)
-                    mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id)
+                    mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id, duplicate_warning)
 
                     matches.append(MaterialFileMatch(
                         employee_name=emp.name,
@@ -882,6 +974,7 @@ def _collect_specific_materials(
     requested_materials: list[str],
     matches: list[MaterialFileMatch],
     warnings: list[str],
+    duplicate_warning: str = "",
 ) -> list[str]:
     """指定材料模式：在匹配到的文件夹中精准搜集对应材料类型的文件。
 
@@ -891,17 +984,23 @@ def _collect_specific_materials(
     clean_emp = safe_filename(emp.name)
     # mat_type -> list of (source_path, rel_source, match_reason, subtype, ocr_name, ocr_id)
     found: dict[str, list[tuple[Path, str, str, str, str, str]]] = {m: [] for m in requested_materials}
+    seen_hashes: set[tuple[int, str]] = set()
 
     for folder_path, folder_reason in matched_folders:
         try:
             for root, dirs, files in os.walk(folder_path):
                 dirs[:] = [d for d in dirs if not d.startswith(".")]
                 for f in files:
-                    if f.startswith(".") or f.startswith("~$"):
+                    if _is_junk_or_temp_file(f):
                         continue
                     f_path = Path(root) / f
                     ext = f_path.suffix.lower()
                     if ext not in SUPPORTED_FILE_EXTENSIONS:
+                        continue
+
+                    # 同一员工内部跨目录完全相同文件去重
+                    sig = _get_file_signature(f_path)
+                    if sig in seen_hashes:
                         continue
 
                     try:
@@ -910,11 +1009,29 @@ def _collect_specific_materials(
                         rel_p = f_path.name
 
                     # 深度分类：三级智能识别（文件名 + 正文 + OCR）
-                    classified_mat_type, match_method, subtype, ocr_name, ocr_id = _classify_material_type(f_path, f, requested_materials)
+                    try:
+                        classified_mat_type, match_method, subtype, ocr_name, ocr_id = _classify_material_type(
+                            f_path, f, requested_materials
+                        )
+                    except Exception as exc:
+                        warnings.append(f"文件读取异常 {f_path.name}: {exc}")
+                        matches.append(MaterialFileMatch(
+                            employee_name=emp.name,
+                            material_type="未知",
+                            source_path=f_path,
+                            relative_source_path=rel_p,
+                            matched_by="读取失败",
+                            target_filename=f,
+                            mismatch_warning=f"⚠️ 文件读取损坏或异常: {exc}",
+                        ))
+                        continue
 
                     if classified_mat_type and classified_mat_type in requested_materials:
                         if not any(existing[0] == f_path for existing in found[classified_mat_type]):
-                            found[classified_mat_type].append((f_path, rel_p, match_method or folder_reason, subtype, ocr_name, ocr_id))
+                            seen_hashes.add(sig)
+                            found[classified_mat_type].append(
+                                (f_path, rel_p, match_method or folder_reason, subtype, ocr_name, ocr_id)
+                            )
         except Exception as e:
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")
 
@@ -929,7 +1046,7 @@ def _collect_specific_materials(
         for seq, (src_path, rel_p, match_reason, subtype, ocr_name, ocr_id) in enumerate(m_list, start=1):
             ext = src_path.suffix
             clean_mat = safe_filename(mat_type)
-            
+
             # 如果 OCR 或文件名识别出具体子类型（如"正面"、"反面"）
             if subtype:
                 target_name = f"{clean_emp}_{clean_mat}_{subtype}{ext}"
@@ -951,9 +1068,18 @@ def _collect_specific_materials(
                 shutil.copy2(src_path, dest_file)
             except Exception as e:
                 warnings.append(f"复制失败：{src_path} → {dest_file}: {e}")
+                matches.append(MaterialFileMatch(
+                    employee_name=emp.name,
+                    material_type=mat_type,
+                    source_path=src_path,
+                    relative_source_path=rel_p,
+                    matched_by="写入失败",
+                    target_filename=target_name,
+                    mismatch_warning=f"⚠️ 文件复制失败: {e}",
+                ))
                 continue
 
-            mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id)
+            mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id, duplicate_warning)
 
             matches.append(MaterialFileMatch(
                 employee_name=emp.name,
@@ -981,8 +1107,9 @@ def _write_excel_report(
     requested_materials: list[str],
     all_matches: list[MaterialFileMatch],
     collect_all: bool,
+    warnings: list[str] | None = None,
 ) -> None:
-    """Generate structured summary and missing Excel report."""
+    """Generate structured summary and missing Excel report with optimized columns and wrap text."""
     wb = Workbook()
     ws_summary = wb.active
     ws_summary.title = "资料提取汇总与缺失清单"
@@ -1086,14 +1213,14 @@ def _write_excel_report(
 
             warn_cell = ws_summary.cell(current_r, 6)
             if warn_list:
-                warn_cell.value = "；".join(warn_list)
+                warn_cell.value = "；".join(sorted(set(warn_list)))
                 warn_cell.fill = warning_fill
                 warn_cell.font = warning_font
             else:
                 warn_cell.value = "正常 (信息一致)" if file_count > 0 else "-"
                 warn_cell.fill = ok_fill if file_count > 0 else stat_fill
                 warn_cell.font = ok_font if file_count > 0 else normal_font
-            warn_cell.alignment = Alignment(horizontal="left", vertical="center")
+            warn_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
         else:
             emp_matches_by_type: dict[str, int] = {}
             for m in all_matches:
@@ -1128,14 +1255,14 @@ def _write_excel_report(
             warn_col_idx = 5 + len(requested_materials)
             warn_cell = ws_summary.cell(current_r, warn_col_idx)
             if warn_list:
-                warn_cell.value = "；".join(warn_list)
+                warn_cell.value = "；".join(sorted(set(warn_list)))
                 warn_cell.fill = warning_fill
                 warn_cell.font = warning_font
             else:
                 warn_cell.value = "正常 (信息一致)" if found_count > 0 else "-"
                 warn_cell.fill = ok_fill if found_count > 0 else stat_fill
                 warn_cell.font = ok_font if found_count > 0 else normal_font
-            warn_cell.alignment = Alignment(horizontal="left", vertical="center")
+            warn_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
         for c in range(1, len(headers) + 1):
             ws_summary.cell(current_r, c).border = thin_border
@@ -1144,10 +1271,15 @@ def _write_excel_report(
 
         current_r += 1
 
+    # 优化列宽：预警列固定 38 并换行，普通列自适应
     for col in ws_summary.columns:
         col_letter = get_column_letter(col[0].column)
-        max_len = max(len(str(cell.value or "")) for cell in col)
-        ws_summary.column_dimensions[col_letter].width = max(max_len * 2 + 2, 14)
+        col_name = str(ws_summary.cell(start_row, col[0].column).value or "")
+        if "预警" in col_name or "备注" in col_name:
+            ws_summary.column_dimensions[col_letter].width = 38
+        else:
+            max_len = max(len(str(cell.value or "")) for cell in col if cell.row >= start_row)
+            ws_summary.column_dimensions[col_letter].width = max(min(max_len * 2 + 2, 28), 12)
 
     # Sheet 2: Matched File List
     ws_files = wb.create_sheet(title="提取文件明细清单")
@@ -1180,7 +1312,7 @@ def _write_excel_report(
         else:
             chk_cell.value = "-"
             chk_cell.font = normal_font
-        chk_cell.alignment = Alignment(horizontal="center", vertical="center")
+        chk_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
         ws_files.cell(r, 8, match_item.matched_by).alignment = Alignment(horizontal="center", vertical="center")
         ws_files.cell(r, 9, match_item.relative_source_path).alignment = Alignment(horizontal="left", vertical="center")
@@ -1193,8 +1325,12 @@ def _write_excel_report(
 
     for col in ws_files.columns:
         col_letter = get_column_letter(col[0].column)
-        max_len = max(len(str(cell.value or "")) for cell in col)
-        ws_files.column_dimensions[col_letter].width = max(min(max_len * 2 + 2, 60), 12)
+        col_name = str(ws_files.cell(1, col[0].column).value or "")
+        if "校验" in col_name or "路径" in col_name:
+            ws_files.column_dimensions[col_letter].width = 38
+        else:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws_files.column_dimensions[col_letter].width = max(min(max_len * 2 + 2, 30), 12)
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(report_path)

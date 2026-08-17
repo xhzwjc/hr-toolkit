@@ -19,6 +19,8 @@ from hr_toolkit.tools.material_collector import (
     _scan_folder_index,
     _is_valid_person_name,
     _classify_material_type,
+    _is_junk_or_temp_file,
+    _is_path_nested,
 )
 
 
@@ -119,7 +121,6 @@ class TestExclusiveClassification(unittest.TestCase):
     """测试严密互斥分类：绝不把身份证、体检表等非合同文件作为劳动合同输出。"""
 
     def test_non_contract_files_not_collected_as_contract(self) -> None:
-        """当员工目录下只有身份证、体检表、离职证明时，勾选劳动合同应如实报缺失，绝不重命名输出！"""
         with tempfile.TemporaryDirectory() as td:
             lib = Path(td) / "资料库"
             lib.mkdir()
@@ -136,7 +137,6 @@ class TestExclusiveClassification(unittest.TestCase):
                 material_types=["劳动合同"],
             )
             self.assertEqual(result.total_employees, 1)
-            # 劳动合同应判定为缺失，0 个匹配！
             self.assertEqual(result.matched_file_count, 0)
             self.assertIn("王京川", result.missing_records)
             self.assertIn("劳动合同", result.missing_records["王京川"])
@@ -156,20 +156,17 @@ class TestExclusiveClassification(unittest.TestCase):
                 roster_source="王京川",
                 material_types=["劳动合同"],
             )
-            # 只有劳动合同被提取，身份证不被作为劳动合同！
             self.assertEqual(result.matched_file_count, 1)
             self.assertEqual(result.matches[0].material_type, "劳动合同")
             self.assertTrue(result.matches[0].target_filename.startswith("王京川_劳动合同"))
 
     def test_contract_identified_by_docx_content(self) -> None:
-        """非标准命名的 docx 文件（如 01.docx），内部含有劳动合同正文时精准识别。"""
         with tempfile.TemporaryDirectory() as td:
             lib = Path(td) / "资料库"
             lib.mkdir()
             w = lib / "王京川"
             w.mkdir()
             docx_path = w / "01.docx"
-            # 创建合法 docx 内部结构
             with zipfile.ZipFile(docx_path, "w") as zf:
                 zf.writestr(
                     "word/document.xml",
@@ -206,6 +203,75 @@ class TestCollectAll(unittest.TestCase):
             self.assertEqual(result.matched_file_count, 1)
             self.assertTrue((out / "张三").is_dir())
             self.assertFalse((out / "李四").exists())
+
+
+class TestSafetyAndRobustness(unittest.TestCase):
+    def test_nested_output_dir_raises_error(self) -> None:
+        """测试保存目录在资料库内部时立即抛出异常，防止无限递归。"""
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "资料库"
+            lib.mkdir()
+            (lib / "张三").mkdir()
+            (lib / "张三" / "身份证.pdf").write_text("id")
+            nested_out = lib / "output_nested"
+
+            with self.assertRaises(ValueError) as ctx:
+                collect_employee_materials(
+                    lib, nested_out,
+                    roster_source="张三",
+                )
+            self.assertIn("保存目录不能在资料库目录内部", str(ctx.exception))
+
+    def test_duplicate_folders_for_same_person_preserved_and_warned(self) -> None:
+        """测试同名人员有多个文件夹时全部保留且记录警告。"""
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "资料库"
+            lib.mkdir()
+            (lib / "部门A").mkdir()
+            (lib / "部门A" / "张三").mkdir()
+            (lib / "部门A" / "张三" / "张三_身份证.jpg").write_text("id1")
+
+            (lib / "部门B").mkdir()
+            (lib / "部门B" / "张三").mkdir()
+            (lib / "部门B" / "张三" / "张三_学历证书.jpg").write_text("degree2")
+
+            out = Path(td) / "输出"
+            result = collect_employee_materials(
+                lib, out,
+                roster_source="张三",
+                material_types=["身份证", "学历证明"],
+                scan_depth=2,
+            )
+            self.assertEqual(result.matched_file_count, 2)
+            # 应有同名文件夹预警
+            self.assertTrue(any("同名文件夹" in w for w in result.warnings))
+
+    def test_same_person_cross_dir_duplicate_file_deduped(self) -> None:
+        """测试同一员工在不同备份目录下存在完全相同的内容哈希文件时自动去重。"""
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "资料库"
+            lib.mkdir()
+            (lib / "张三").mkdir()
+            (lib / "张三" / "身份证.jpg").write_bytes(b"SAME_ID_IMAGE_BYTES_12345")
+            (lib / "张三" / "备份").mkdir()
+            (lib / "张三" / "备份" / "身份证_副本.jpg").write_bytes(b"SAME_ID_IMAGE_BYTES_12345")
+
+            out = Path(td) / "输出"
+            result = collect_employee_materials(
+                lib, out,
+                roster_source="张三",
+                material_types=["身份证"],
+                scan_depth=2,
+            )
+            # 完全重复的文件只提取 1 份，不去重会导致复制 2 份
+            self.assertEqual(result.matched_file_count, 1)
+
+    def test_junk_files_filtered_out(self) -> None:
+        """测试 .DS_Store, Thumbs.db, ~$临时文件被全局过滤。"""
+        self.assertTrue(_is_junk_or_temp_file(".DS_Store"))
+        self.assertTrue(_is_junk_or_temp_file("Thumbs.db"))
+        self.assertTrue(_is_junk_or_temp_file("~$员工名单.xlsx"))
+        self.assertFalse(_is_junk_or_temp_file("张三_身份证.jpg"))
 
 
 if __name__ == "__main__":
