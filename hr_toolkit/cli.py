@@ -478,6 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="不生成 Excel 汇总报告",
     )
     material_collector.add_argument(
+        "--no-ocr-cache",
+        action="store_true",
+        help="关闭 OCR 智能索引缓存（默认开启；关闭后所有图片都将实时 OCR）",
+    )
+    material_collector.add_argument(
         "--json",
         action="store_true",
         help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成",
@@ -653,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             create_zip=args.zip,
             generate_report=not args.no_report,
+            use_ocr_cache=not args.no_ocr_cache,
         )
         payload = result.to_dict()
         if args.json:
@@ -893,6 +899,15 @@ def _print_material_collector_summary(payload: dict) -> None:
     print(f"目标员工数：{payload['total_employees']} 人")
     print(f"材料齐全员工数：{payload['complete_employee_count']} 人")
     print(f"提取文件总数：{payload['matched_file_count']} 个")
+    if payload.get("ocr_cache_enabled"):
+        hits = payload.get("ocr_cache_hits", 0)
+        misses = payload.get("ocr_cache_misses", 0)
+        print(f"OCR 缓存：命中 {hits} 次，实时识别 {misses} 次"
+              + (f"（缓存文件：{payload['ocr_cache_path']}）" if payload.get("ocr_cache_path") else ""))
+        if payload.get("ocr_cache_skipped_reason"):
+            print(f"OCR 缓存说明：{payload['ocr_cache_skipped_reason']}")
+    else:
+        print("OCR 缓存：已关闭（按 --no-ocr-cache 或 GUI 取消勾选）")
     if payload.get("zip_path"):
         print(f"压缩包文件：{payload['zip_path']}")
     if payload.get("report_path"):

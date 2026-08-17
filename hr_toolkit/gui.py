@@ -1080,6 +1080,8 @@ class HRToolkitApp:
         self.material_mode = StringVar(value="按员工归类（每人一个文件夹）")
         self.material_create_zip = BooleanVar(value=False)
         self.material_collect_all = BooleanVar(value=True)
+        # OCR 智能索引缓存：默认开启，二次扫描可秒级命中
+        self.material_use_ocr_cache = BooleanVar(value=True)
         self.material_target_input = StringVar(value="")
         self.material_types_selected: dict[str, BooleanVar] = {
             "身份证": BooleanVar(value=True),
@@ -2406,6 +2408,14 @@ class HRToolkitApp:
             style="App.TCheckbutton",
         )
         self.material_zip_check.grid(row=2, column=2, sticky="w", padx=self._px(12), pady=self._px(5))
+
+        self.material_use_ocr_cache_check = ttk.Checkbutton(
+            self.material_options_frame,
+            text="启用 OCR 识别缓存（秒级二次极速检索）",
+            variable=self.material_use_ocr_cache,
+            style="App.TCheckbutton",
+        )
+        self.material_use_ocr_cache_check.grid(row=2, column=3, columnspan=2, sticky="w", padx=self._px(12), pady=self._px(5))
 
         # 第 3 行：提取材料（全部模式下隐藏）
         self.material_types_header = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
@@ -9185,6 +9195,7 @@ class HRToolkitApp:
                 return
 
         create_zip_val = self.material_create_zip.get()
+        use_ocr_cache_val = self.material_use_ocr_cache.get()
 
         output_dir = self._prepare_result_output_dir(Path(output_text))
         if output_dir is None:
@@ -9195,6 +9206,8 @@ class HRToolkitApp:
             self._write_log("开始检索并拷贝员工整个资料文件夹，请稍候...")
         else:
             self._write_log("开始检索并打包指定材料，请稍候...")
+        if use_ocr_cache_val:
+            self._write_log("OCR 智能索引缓存已启用：首次扫描会建立资料库缓存；二次扫描将秒级命中。")
 
         self._start_tool_worker(
             collect_employee_materials,
@@ -9206,6 +9219,7 @@ class HRToolkitApp:
             create_zip=create_zip_val,
             generate_report=True,
             collect_all=is_collect_all,
+            use_ocr_cache=use_ocr_cache_val,
         )
 
     def _begin_tool_run(self) -> None:
