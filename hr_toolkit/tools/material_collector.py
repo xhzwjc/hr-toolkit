@@ -312,9 +312,6 @@ MATERIAL_SYNONYMS: dict[str, list[str]] = {
         "zhengmian", "fanmian", "zm", "fm",
         "身份证正面", "身份证反面", "身份证正反面", "身份证复印件", "身份证照片", "身份证件", "证件",
     ],
-    "护照": [
-        "护照", "passport", "通行证", "港澳通行证", "台湾通行证", "国际旅行证件",
-    ],
     "劳动合同": [
         "劳动合同", "劳动协议", "劳务合同", "劳务协议", "用工合同", "用工协议", "聘用合同", "聘用协议",
         "续签合同", "续签协议", "合同", "协议", "contract", "hetong", "ht", "劳动关系", "劳动手册", "协议书", "聘书", "用工",
@@ -325,25 +322,21 @@ MATERIAL_SYNONYMS: dict[str, list[str]] = {
         "学籍", "大专", "本科", "硕士", "博士", "中专", "高中",
     ],
     "资格证书": [
-        "资格证", "职业资格证", "职称证", "技能证", "操作证", "登高证", "电工证", "焊工证", "安全员",
-        "特种作业", "驾驶证", "驾照", "上岗证", "从业资格", "资格", "职称", "技能", "证书", "zige", "jineng",
+        "资格证", "职业资格证", "职称证", "技能证", "驾驶证", "驾照", "上岗证", "从业资格", "资格", "职称", "技能", "证书", "zige", "jineng",
         "certificate", "license",
     ],
-    "体检报告": [
-        "体检", "体检报告", "体检表", "入职体检", "健康体检", "健康证", "健康检查", "健康证明",
-        "报告单", "tijian", "jiankang", "医院", "诊断", "化验单",
+    "安全员证": [
+        "安全员证", "安全员", "安全员证书", "安全考核合格证", "建安C证", "建安A证", "建安B证",
+        "安管人员", "安全生产考核", "C证", "A证", "B证", "安全考核", "安全员合格证", "anquanyuan",
+    ],
+    "特种证书": [
+        "特种证书", "特种作业证", "特种作业操作证", "特种作业证书", "特种作业", "特种设备",
+        "特种操作证", "特种工", "高处作业", "电工作业", "焊接作业", "电工证", "焊工证", "登高证",
+        "操作证", "tezhong",
     ],
     "证件照片": [
         "一寸照", "二寸照", "证件照", "寸照", "登记照", "蓝底", "白底", "红底", "个人照片", "照片",
         "相片", "头像", "个人照", "photo", "pic", "avatar", "head",
-    ],
-    "离职证明": [
-        "离职证明", "解除劳动合同证明", "解除劳动关系", "解除协议", "离职申请", "退工证明", "解除证明",
-        "离职表", "退工单", "离职", "退工", "lizhi", "tuigong",
-    ],
-    "个人简历": [
-        "简历", "个人简历", "履历表", "员工登记表", "入职登记表", "应聘登记表", "花名册",
-        "履历", "resume", "cv", "jianli", "基本信息",
     ],
     "银行卡": [
         "银行卡", "工资卡", "卡号", "开户行", "存折", "银行账号", "bank", "card", "yinhang",
@@ -852,6 +845,33 @@ def _extract_document_text(file_path: Path) -> str:
     return ""
 
 
+def _extract_pdf_image_bytes(file_path: Path) -> bytes | None:
+    """如果 PDF 为纯图片扫描版，从二进制流中提取首张内嵌图片（JPEG/PNG）用于 OCR。"""
+    try:
+        data = file_path.read_bytes()
+        idx = 0
+        while True:
+            s_idx = data.find(b"stream", idx)
+            if s_idx == -1:
+                break
+            start = s_idx + 6
+            if data[start:start+2] == b"\r\n":
+                start += 2
+            elif data[start:start+1] == b"\n":
+                start += 1
+            e_idx = data.find(b"endstream", start)
+            if e_idx == -1:
+                break
+            chunk = data[start:e_idx]
+            # JPEG 魔数 \xff\xd8\xff 或 PNG 魔数 \x89PNG
+            if chunk.startswith(b"\xff\xd8\xff") or chunk.startswith(b"\x89PNG\r\n\x1a\n"):
+                return chunk
+            idx = e_idx + 9
+    except Exception:
+        pass
+    return None
+
+
 def _build_doc_format_hint(file_path: Path) -> str | None:
     """针对旧版 .doc 文件给出友好提示，避免静默失败。
 
@@ -939,10 +959,10 @@ def _store_ocr_cache(
 
 _DOC_CONTENT_PATTERNS: dict[str, list[str]] = {
     "劳动合同": ["劳动合同", "用工合同", "劳务合同", "聘用合同", "用工协议", "劳动期限", "工作内容", "劳动报酬", "劳动争议", "解除劳动合同", "劳动法", "甲乙双方根据", "试用期"],
-    "个人简历": ["个人简历", "个人履历", "工作经历", "教育经历", "求职意向", "应聘登记", "员工登记表", "基本信息表"],
-    "体检报告": ["体检报告", "体格检查", "体检结论", "健康体检", "化验单", "检验报告单", "心电图", "胸透", "体检合格"],
     "学历证明": ["毕业证书", "学位证书", "教育部学历证书", "学信网", "普通高等学校", "学士学位", "硕士学位", "博士学位"],
-    "离职证明": ["离职证明", "解除劳动关系证明", "退工证明", "解除劳动合同通知书"],
+    "安全员证": ["安全生产考核合格证书", "建筑施工企业项目负责人安全生产考核合格证书", "建筑施工企业专职安全生产管理人员安全生产考核合格证书", "安全员考核合格证", "安全员C证", "安全员A证", "安全员B证"],
+    "特种证书": ["特种作业操作证", "特种作业人员操作证", "特种设备作业人员证", "特种作业", "特种设备作业"],
+    "资格证书": ["职业资格证书", "专业技术职务资格证书", "职称证书", "技能等级证书", "中华人民共和国机动车驾驶证"],
 }
 
 
@@ -956,9 +976,16 @@ def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
     if engine is None:
         return None, "", "", "", ""
 
+    target_input: str | bytes = str(file_path)
+    if file_path.suffix.lower() == ".pdf":
+        img_bytes = _extract_pdf_image_bytes(file_path)
+        if not img_bytes:
+            return None, "", "", "", ""
+        target_input = img_bytes
+
     try:
         with _OCR_LOCK:
-            result, _ = engine(str(file_path))
+            result, _ = engine(target_input)
         if not result:
             return None, "", "", "", ""
         texts = [item[1] for item in result]
@@ -984,41 +1011,37 @@ def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
                 extracted_name = texts[idx + 1].strip()
                 break
 
-    # 1. 护照（特征极强，优先判断，防止因包含姓名/出生日期被误判为身份证）
-    if "PASSPORT" in full_text.upper() or "护照" in full_text or "外交部" in full_text or "国家移民管理局" in full_text:
-        return "护照", "ocr_passport", "", extracted_name, extracted_id
+    # 1. 特种证书（特征极强，优先判断）
+    if "特种作业操作证" in full_text or "特种作业" in full_text or "特种设备作业" in full_text or "特种作业人员" in full_text:
+        return "特种证书", "ocr_special_cert", "", extracted_name, extracted_id
 
-    # 2. 身份证反面（国徽面）
-    if "居民身份证" in full_text or ("签发机关" in full_text and "有效期限" in full_text):
-        return "身份证", "ocr_id_back", "反面", extracted_name, extracted_id
+    # 2. 安全员证（特征极强，优先判断）
+    if "安全生产考核" in full_text or "安全考核合格" in full_text or "建安C证" in full_text or "建安A证" in full_text or "建安B证" in full_text or "安全员" in full_text:
+        return "安全员证", "ocr_safety_cert", "", extracted_name, extracted_id
 
-    # 3. 身份证正面（人像面）
-    if "公民身份号码" in full_text or ("姓名" in full_text and ("住址" in full_text or "民族" in full_text)) or extracted_id:
-        return "身份证", "ocr_id_front", "正面", extracted_name, extracted_id
-
-    # 4. 劳动合同（照片扫描件）
+    # 3. 劳动合同（照片扫描件）
     if "劳动合同" in full_text or "用工合同" in full_text or ("甲方" in full_text and "乙方" in full_text and ("劳动" in full_text or "报酬" in full_text or "工作内容" in full_text)):
         return "劳动合同", "ocr_contract", "", extracted_name, extracted_id
 
-    # 5. 学历证明
+    # 4. 学历证明
     if "毕业证书" in full_text or "学位证书" in full_text or "学信网" in full_text or "学历证书" in full_text or "普通高等学校" in full_text:
         return "学历证明", "ocr_degree", "", extracted_name, extracted_id
 
-    # 6. 体检报告
-    if "体检报告" in full_text or "体格检查" in full_text or "检验报告" in full_text or "化验单" in full_text:
-        return "体检报告", "ocr_medical", "", extracted_name, extracted_id
-
-    # 7. 资格证书 / 驾驶证
-    if "机动车驾驶证" in full_text or "驾驶证" in full_text or "职业资格" in full_text or "特种作业" in full_text:
+    # 5. 资格证书 / 驾驶证
+    if "机动车驾驶证" in full_text or "驾驶证" in full_text or "职业资格证书" in full_text or "职业资格" in full_text:
         return "资格证书", "ocr_certificate", "", extracted_name, extracted_id
 
-    # 8. 银行卡
+    # 6. 银行卡
     if re.search(r"\d{16,19}", full_text) and ("银行" in full_text or "银联" in full_text or "Bank" in full_text):
         return "银行卡", "ocr_bank", "", extracted_name, extracted_id
 
-    # 9. 个人简历
-    if "个人简历" in full_text or "个人履历" in full_text or "应聘登记" in full_text:
-        return "个人简历", "ocr_resume", "", extracted_name, extracted_id
+    # 7. 身份证反面（国徽面）
+    if "居民身份证" in full_text or ("签发机关" in full_text and "有效期限" in full_text and "特种" not in full_text and "安全" not in full_text):
+        return "身份证", "ocr_id_back", "反面", extracted_name, extracted_id
+
+    # 8. 身份证正面（人像面）
+    if "公民身份号码" in full_text or ("姓名" in full_text and ("住址" in full_text or "民族" in full_text or "出生" in full_text)) or extracted_id:
+        return "身份证", "ocr_id_front", "正面", extracted_name, extracted_id
 
     return None, "", "", extracted_name, extracted_id
 
@@ -1042,13 +1065,23 @@ def _classify_material_type(
     """
     stem = Path(filename).stem.lower()
 
-    # 1. 身份证号判断：文件名包含 18 位或 15 位数字
-    if re.search(r"\d{17}[\dxX]|\d{15}", stem):
-        return "身份证", "id_number_in_filename", "", "", "", False
+    # 1. 优先匹配当前请求列表中明确包含在文件名里的材料（标准或自定义，按关键词长度降序最长优先匹配）
+    sorted_req_types = sorted(
+        [r for r in requested_types if r and r.strip()],
+        key=lambda x: len(x),
+        reverse=True,
+    )
+    for req_type in sorted_req_types:
+        syns = MATERIAL_SYNONYMS.get(req_type, [req_type])
+        # 按同义词长度降序，最长精确匹配优先（例如"保密协议"优先于"协议"）
+        for syn in sorted(syns, key=lambda s: len(s), reverse=True):
+            if syn.lower() in stem:
+                sub = "正面" if "正面" in stem or "人像" in stem else ("反面" if "反面" in stem or "国徽" in stem else "")
+                return req_type, "filename_keyword", sub, "", "", False
 
-    # 2. 全量同义词库匹配（按优先级互斥判断）
+    # 2b. 全量同义词库匹配（按优先级互斥判断）
     for mat_type, synonyms in MATERIAL_SYNONYMS.items():
-        for syn in synonyms:
+        for syn in sorted(synonyms, key=lambda s: len(s), reverse=True):
             if syn.lower() in stem:
                 sub = "正面" if "正面" in stem or "人像" in stem else ("反面" if "反面" in stem or "国徽" in stem else "")
                 return mat_type, "filename_keyword", sub, "", "", False
@@ -1061,9 +1094,9 @@ def _classify_material_type(
                 if kw in doc_text:
                     return mat_type, "doc_content", "", "", "", False
 
-    # 4. 本地离线 OCR 视觉图文识别（针对纯哈希/随机命名的图片：如 a5d6e67cd.jpg）
+    # 4. 本地离线 OCR 视觉图文识别（针对纯哈希/随机命名的图片或扫描版 PDF）
     ext = file_path.suffix.lower()
-    if ext in IMAGE_EXTENSIONS:
+    if ext in IMAGE_EXTENSIONS or ext == ".pdf":
         # 4a. 先查缓存（基于文件二进制内容 SHA256 哈希指纹，改名或移动均能 100% 秒级命中）
         if use_cache and cache is not None:
             hit = _lookup_ocr_cache(cache, file_path, employee_key=employee_key, rel_path=rel_path)
@@ -1463,6 +1496,68 @@ def _collect_all_from_folders(
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")
 
 
+def _score_file_candidate(
+    filename: str,
+    requested_materials: list[str],
+) -> int:
+    """计算文件对当前请求材料的相关性优先级评分（分数越高越优先做 OCR/内容识别）。
+
+    100分: 文件名明确包含请求的材料名称或同义词（如"身份证"、"特种作业"、"安全员"、"劳动合同"）
+     80分: 文件名包含编号特征线索（如 T+身份证号、A/B/C+编号、纯身份证号等高疑似文件名）
+     50分: 随机/乱码命名的图片、扫描版 PDF 或普通文件
+     10分: 文件名明确属于其他【未请求】的材料类型（降级到最后兜底）
+    """
+    stem = Path(filename).stem.lower()
+
+    # 1. 文件名直接命中当前请求材料或其同义词 -> 100分
+    for req_type in requested_materials:
+        if not req_type:
+            continue
+        syns = MATERIAL_SYNONYMS.get(req_type, [req_type])
+        for syn in syns:
+            if syn.lower() in stem:
+                return 100
+
+    # 2. 文件名包含线索编号特征 -> 80分
+    if "特种证书" in requested_materials or "资格证书" in requested_materials:
+        if re.search(r"(?:^|_)t\d{17}[\dxX]|(?:^|_)t\d{15}", stem):
+            return 80
+    if "安全员证" in requested_materials:
+        if re.search(r"(?:^|_)[abc]\d{17}[\dxX]|(?:^|_)[abc]\d{15}", stem):
+            return 80
+    if "身份证" in requested_materials:
+        if re.search(r"(?:^|[^a-z0-9])\d{17}[\dxX](?:[^a-z0-9]|$)|(?:^|[^a-z0-9])\d{15}(?:[^a-z0-9]|$)", stem):
+            return 80
+
+    # 3. 检查是否明确包含其他【未请求】材料的同义词 -> 10分
+    for other_mat, other_syns in MATERIAL_SYNONYMS.items():
+        if other_mat not in requested_materials:
+            for s in other_syns:
+                if s.lower() in stem:
+                    return 10
+
+    # 4. 其他普通文件（随机命名图片/PDF等） -> 50分
+    return 50
+
+
+def _is_all_requested_materials_satisfied(
+    found: dict[str, list[Any]],
+    requested_materials: list[str],
+) -> bool:
+    """检查当前员工所需材料是否已全部找齐（用于触发短路早停，跳过后续无谓 OCR）。"""
+    for mat in requested_materials:
+        items = found.get(mat)
+        if not items:
+            return False
+        # 如果是身份证且区分正反面，若只有单侧（只有正面无反面，或只有反面无正面），不算完全找齐，继续找另一侧
+        if mat == "身份证":
+            subtypes = {it[3] for it in items if len(it) > 3}
+            if "" not in subtypes:
+                if ("正面" in subtypes and "反面" not in subtypes) or ("反面" in subtypes and "正面" not in subtypes):
+                    return False
+    return True
+
+
 def _collect_specific_materials(
     emp: TargetEmployee,
     matched_folders: list[tuple[Path, str]],
@@ -1480,17 +1575,17 @@ def _collect_specific_materials(
 ) -> list[str]:
     """指定材料模式：在匹配到的文件夹中精准搜集对应材料类型的文件。
 
-    使用 文件名特征 + 文档内容检索 + 离线视觉 OCR 进行三级精准识别，
-    如实判定存在与缺失，并自动核对证件姓名/号码一致性。
-
-    TODO: 未来若用户有"公共材料共享"需求，应作为独立配置项引入；
-    本次（需求9 一人一档边界）不做公共目录无差别复制。
+    使用 启发式优先级排序 + 文件名特征 + 文档内容检索 + 离线视觉 OCR 进行识别：
+    1. 优先将高疑似度的文件（如明确命名或含证件编号特征的文件）排在前面进行 OCR / 正文识别；
+    2. 一旦目标员工所需材料全部找齐，且无后续高置信度同名候选文件，立即短路早停，跳过后续无谓识别，极速省时；
+    3. 若前序文件未找齐，绝不遗漏，自动兜底继续逐个识别后续所有文件，直到找齐或扫描完毕。
     """
     clean_emp = safe_filename(emp.name)
-    # mat_type -> list of (source_path, rel_source, match_reason, subtype, ocr_name, ocr_id, cache_hit)
     found: dict[str, list[tuple[Path, str, str, str, str, str, bool]]] = {m: [] for m in requested_materials}
     seen_hashes: set[tuple[int, str]] = set()
 
+    # 1. 扫描匹配到的所有文件夹，收集所有候选文件
+    raw_candidates: list[tuple[Path, str, str]] = []
     for folder_path, folder_reason in matched_folders:
         try:
             for root, dirs, files in os.walk(folder_path):
@@ -1502,53 +1597,64 @@ def _collect_specific_materials(
                     ext = f_path.suffix.lower()
                     if ext not in SUPPORTED_FILE_EXTENSIONS:
                         continue
-
-                    # 同一员工内部跨目录完全相同文件去重
-                    sig = _get_file_signature(f_path)
-                    if sig in seen_hashes:
-                        continue
-
                     try:
                         rel_p = str(f_path.relative_to(folder_path.parent))
                     except ValueError:
                         rel_p = f_path.name
-
-                    # .doc 旧格式无法可靠解析时给出友好提示（去重后只提示一次）
-                    doc_hint = _build_doc_format_hint(f_path)
-
-                    # 深度分类：三级智能识别（文件名 + 正文 + OCR 缓存）
-                    try:
-                        classified_mat_type, match_method, subtype, ocr_name, ocr_id, cache_hit = _classify_material_type(
-                            f_path, f, requested_materials,
-                            employee_key=employee_key,
-                            rel_path=rel_p,
-                            cache=ocr_cache,
-                            use_cache=use_ocr_cache,
-                            cache_stats=cache_stats,
-                        )
-                    except Exception as exc:
-                        warnings.append(f"文件读取异常 {f_path.name}: {exc}")
-                        if doc_hint:
-                            warnings.append(doc_hint)
-                        matches.append(MaterialFileMatch(
-                            employee_name=emp.name,
-                            material_type="未知",
-                            source_path=f_path,
-                            relative_source_path=rel_p,
-                            matched_by="读取失败",
-                            target_filename=f,
-                            mismatch_warning=f"⚠️ 文件读取损坏或异常: {exc}",
-                        ))
-                        continue
-
-                    if classified_mat_type and classified_mat_type in requested_materials:
-                        if not any(existing[0] == f_path for existing in found[classified_mat_type]):
-                            seen_hashes.add(sig)
-                            found[classified_mat_type].append(
-                                (f_path, rel_p, match_method or folder_reason, subtype, ocr_name, ocr_id, cache_hit)
-                            )
+                    raw_candidates.append((f_path, rel_p, folder_reason))
         except Exception as e:
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")
+
+    # 2. 按线索优先级评分降序排序（高疑似度文件排在最前面优先做 OCR/内容识别）
+    scored_candidates: list[tuple[int, Path, str, str]] = [
+        (_score_file_candidate(f_path.name, requested_materials), f_path, rel_p, folder_reason)
+        for f_path, rel_p, folder_reason in raw_candidates
+    ]
+    scored_candidates.sort(key=lambda item: item[0], reverse=True)
+
+    # 3. 按优先级顺序逐个进行精准识别（支持短路早停）
+    for idx_cand, (cand_score, f_path, rel_p, folder_reason) in enumerate(scored_candidates):
+        sig = _get_file_signature(f_path)
+        if sig in seen_hashes:
+            continue
+
+        doc_hint = _build_doc_format_hint(f_path)
+        try:
+            classified_mat_type, match_method, subtype, ocr_name, ocr_id, cache_hit = _classify_material_type(
+                f_path, f_path.name, requested_materials,
+                employee_key=employee_key,
+                rel_path=rel_p,
+                cache=ocr_cache,
+                use_cache=use_ocr_cache,
+                cache_stats=cache_stats,
+            )
+        except Exception as exc:
+            warnings.append(f"文件读取异常 {f_path.name}: {exc}")
+            if doc_hint:
+                warnings.append(doc_hint)
+            matches.append(MaterialFileMatch(
+                employee_name=emp.name,
+                material_type="未知",
+                source_path=f_path,
+                relative_source_path=rel_p,
+                matched_by="读取失败",
+                target_filename=f_path.name,
+                mismatch_warning=f"⚠️ 文件读取损坏或异常: {exc}",
+            ))
+            continue
+
+        if classified_mat_type and classified_mat_type in requested_materials:
+            if not any(existing[0] == f_path for existing in found[classified_mat_type]):
+                seen_hashes.add(sig)
+                found[classified_mat_type].append(
+                    (f_path, rel_p, match_method or folder_reason, subtype, ocr_name, ocr_id, cache_hit)
+                )
+
+        # 4. 短路早停：如果所有请求的材料都已经找齐，且后续没有高置信度同名候选文件（如多页合同/多个证书），立即停止扫描后续文件！
+        if _is_all_requested_materials_satisfied(found, requested_materials):
+            next_score = scored_candidates[idx_cand + 1][0] if idx_cand + 1 < len(scored_candidates) else 0
+            if next_score < 80:
+                break
 
     # 复制匹配到的真实文件到输出目录
     missing_list: list[str] = []

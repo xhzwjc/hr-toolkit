@@ -137,8 +137,8 @@ class TestExclusiveClassification(unittest.TestCase):
             w = lib / "王京川"
             w.mkdir()
             (w / "王京川_身份证正面.jpg").write_text("id front")
-            (w / "王京川_体检报告.pdf").write_text("health report")
-            (w / "王京川_离职证明.doc").write_text("resignation")
+            (w / "王京川_安全员C证.pdf").write_text("safety cert")
+            (w / "王京川_特种作业操作证.pdf").write_text("special cert")
 
             out = Path(td) / "输出"
             result = collect_employee_materials(
@@ -826,6 +826,82 @@ class TestOCRCacheIO(unittest.TestCase):
             _trim_cache_by_age_and_size(data)
             self.assertNotIn("stale", data["entries"])
             self.assertIn("fresh", data["entries"])
+
+    def test_safety_and_special_cert_collection(self) -> None:
+        """测试新增的安全员证与特种证书的精准检索与提取。"""
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "资料库"
+            lib.mkdir()
+            emp = lib / "张三"
+            emp.mkdir()
+            (emp / "张三_安全员C证.pdf").write_text("c cert")
+            (emp / "张三_特种作业操作证.jpg").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+            out = Path(td) / "输出"
+            result = collect_employee_materials(
+                lib, out,
+                roster_source="张三",
+                material_types=["安全员证", "特种证书"],
+            )
+            self.assertEqual(result.total_employees, 1)
+            self.assertEqual(result.matched_file_count, 2)
+            self.assertEqual(len(result.missing_records), 0)
+
+    def test_custom_other_material_collection(self) -> None:
+        """测试用户通过「其他」手动输入的自定义材料（如入职证明、保密协议）。"""
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "资料库"
+            lib.mkdir()
+            emp = lib / "李四"
+            emp.mkdir()
+            (emp / "李四_入职证明.pdf").write_text("onboarding proof")
+            (emp / "李四_保密协议.docx").write_text("nda doc")
+
+            out = Path(td) / "输出"
+            result = collect_employee_materials(
+                lib, out,
+                roster_source="李四",
+                material_types=["入职证明", "保密协议"],
+            )
+            self.assertEqual(result.total_employees, 1)
+            self.assertEqual(result.matched_file_count, 2)
+            self.assertEqual(len(result.missing_records), 0)
+            self.assertTrue((out / "李四" / "李四_入职证明.pdf").exists())
+            self.assertTrue((out / "李四" / "李四_保密协议.docx").exists())
+
+    def test_multipage_contract_and_reverse_order_id_card(self) -> None:
+        """测试多页合同全量提取不被早停截断，以及身份证反面先被扫描时依然完整提取正反双面。"""
+        with tempfile.TemporaryDirectory() as td:
+            lib = Path(td) / "资料库"
+            lib.mkdir()
+            emp = lib / "王五"
+            emp.mkdir()
+            # 模拟多页合同
+            (emp / "王五_劳动合同_第1页.jpg").write_bytes(b"\x89PNG\r\n\x1a\npage1")
+            (emp / "王五_劳动合同_第2页.jpg").write_bytes(b"\x89PNG\r\n\x1a\npage2")
+            # 模拟反面命名排在前面或先被扫描的身份证
+            (emp / "王五_身份证反面.jpg").write_bytes(b"\x89PNG\r\n\x1a\nback")
+            (emp / "王五_身份证正面.jpg").write_bytes(b"\x89PNG\r\n\x1a\nfront")
+            # 模拟大量低优先级普通无关图片
+            (emp / "无关图片_01.jpg").write_bytes(b"\x89PNG\r\n\x1a\nirrelevant")
+            (emp / "无关图片_02.jpg").write_bytes(b"\x89PNG\r\n\x1a\nirrelevant2")
+
+            out = Path(td) / "输出"
+            result = collect_employee_materials(
+                lib, out,
+                roster_source="王五",
+                material_types=["劳动合同", "身份证"],
+            )
+            self.assertEqual(result.total_employees, 1)
+            # 应该提取到 2页合同 + 2面身份证 = 4个文件，绝不截断丢页
+            self.assertEqual(result.matched_file_count, 4)
+            self.assertEqual(len(result.missing_records), 0)
+
+            emp_out = out / "王五"
+            self.assertTrue((emp_out / "王五_劳动合同_1.jpg").exists())
+            self.assertTrue((emp_out / "王五_劳动合同_2.jpg").exists())
+            self.assertTrue((emp_out / "王五_身份证_正面.jpg").exists())
+            self.assertTrue((emp_out / "王五_身份证_反面.jpg").exists())
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -1085,16 +1086,16 @@ class HRToolkitApp:
         self.material_target_input = StringVar(value="")
         self.material_types_selected: dict[str, BooleanVar] = {
             "身份证": BooleanVar(value=True),
-            "护照": BooleanVar(value=True),
             "劳动合同": BooleanVar(value=True),
             "学历证明": BooleanVar(value=True),
             "资格证书": BooleanVar(value=True),
-            "体检报告": BooleanVar(value=True),
+            "安全员证": BooleanVar(value=True),
+            "特种证书": BooleanVar(value=True),
             "证件照片": BooleanVar(value=True),
-            "离职证明": BooleanVar(value=True),
-            "个人简历": BooleanVar(value=True),
             "银行卡": BooleanVar(value=True),
         }
+        self.material_custom_enabled = BooleanVar(value=False)
+        self.material_custom_types = StringVar(value="")
         self.input_path = StringVar()
         self.summary_path = StringVar()
         self.stats_week_start = StringVar()
@@ -2477,11 +2478,40 @@ class HRToolkitApp:
 
         self._material_check_widgets: list = []
         for idx, (mat_name, var) in enumerate(self.material_types_selected.items()):
-            r = idx // 5
-            c = idx % 5
+            r = idx // 4
+            c = idx % 4
             cb = ttk.Checkbutton(self.mat_checks_frame, text=mat_name, variable=var, style="App.TCheckbutton")
             cb.grid(row=r, column=c, sticky="w", padx=self._px(8), pady=self._px(4))
             self._material_check_widgets.append(cb)
+
+        # ── 「其他」自定义材料行 ──
+        other_row = ttk.Frame(self.mat_checks_frame, style="InputWrap.TFrame")
+        other_row.grid(row=2, column=0, columnspan=4, sticky="ew", padx=self._px(8), pady=(self._px(4), self._px(2)))
+
+        self.material_other_check = ttk.Checkbutton(
+            other_row,
+            text="其他",
+            variable=self.material_custom_enabled,
+            command=self._on_material_custom_toggled,
+            style="App.TCheckbutton",
+        )
+        self.material_other_check.pack(side=LEFT)
+
+        self.material_custom_entry = ttk.Entry(
+            other_row,
+            textvariable=self.material_custom_types,
+            style="App.TEntry",
+        )
+        self.material_custom_entry.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), self._px(8)))
+
+        self.material_custom_hint = ttk.Label(
+            other_row,
+            text="（如：入职证明, 社保证明；多个用逗号隔开）",
+            style="CardHint.TLabel",
+        )
+        self.material_custom_hint.pack(side=LEFT)
+
+        self._on_material_custom_toggled()
 
         # 初始状态同步
         self._on_material_collect_all_changed()
@@ -8097,6 +8127,18 @@ class HRToolkitApp:
     def _deselect_all_material_types(self) -> None:
         for var in self.material_types_selected.values():
             var.set(False)
+        self.material_custom_enabled.set(False)
+        self._on_material_custom_toggled()
+
+    def _on_material_custom_toggled(self) -> None:
+        """勾选/取消勾选「其他」自定义材料时，启用/禁用自定义输入框。"""
+        if not hasattr(self, "material_custom_entry"):
+            return
+        if self.material_custom_enabled.get():
+            self.material_custom_entry.configure(state="normal")
+            self.material_custom_entry.focus_set()
+        else:
+            self.material_custom_entry.configure(state="disabled")
 
     def _on_material_collect_all_changed(self) -> None:
         """全部模式切换：勾选时隐藏材料类型选择，取消时显示。"""
@@ -9205,8 +9247,18 @@ class HRToolkitApp:
             selected_materials = [
                 mat for mat, var in self.material_types_selected.items() if var.get()
             ]
+            if self.material_custom_enabled.get():
+                custom_raw = self.material_custom_types.get().strip()
+                if custom_raw:
+                    custom_items = [c.strip() for c in re.split(r"[,，、;；\s]+", custom_raw) if c.strip()]
+                    for item in custom_items:
+                        if item not in selected_materials:
+                            selected_materials.append(item)
             if not selected_materials:
-                messagebox.showwarning("未选择材料", "请至少勾选一种需要提取的材料类型，或者勾选「全部」直接拷贝整个文件夹。")
+                messagebox.showwarning(
+                    "未选择材料",
+                    "请至少勾选一种需要提取的材料类型，或者勾选「其他」输入自定义材料，或者勾选「全部」直接拷贝整个文件夹。",
+                )
                 return
 
         create_zip_val = self.material_create_zip.get()
