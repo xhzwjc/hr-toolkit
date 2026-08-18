@@ -49,6 +49,10 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertEqual(main[-1], str(build_windows.APP_ENTRYPOINT))
         self.assertEqual(updater[-1], str(build_windows.UPDATER_ENTRYPOINT))
 
+        for excluded in build_windows.EXCLUDED_MODULES:
+            self.assertIn(excluded, main)
+            self.assertIn(excluded, updater)
+
         data_values = [main[index + 1] for index, value in enumerate(main[:-1]) if value == "--add-data"]
         self.assertEqual(len(data_values), 1 + len(build_windows.release_template_files()))
         self.assertTrue(any(value.startswith(str(build_windows.README_FILE) + ";") for value in data_values))

@@ -46,6 +46,22 @@ HIDDEN_IMPORTS = (
     "win32timezone",
     "xlrd",
 )
+EXCLUDED_MODULES = (
+    "pytest",
+    "unittest",
+    "test",
+    "tests",
+    "tkinter.test",
+    "sqlite3.test",
+    "ctypes.test",
+    "distutils",
+    "idlelib",
+    "pydoc",
+    "pdb",
+    "turtle",
+    "doctest",
+    "lib2to3",
+)
 RELEASE_TEMPLATE_NAMES = (
     "archive_company_template.xlsx",
     "archive_summary_template.xlsx",
@@ -259,6 +275,8 @@ def pyinstaller_commands(
         )
     for module in HIDDEN_IMPORTS:
         main.extend(["--hidden-import", module])
+    for module in EXCLUDED_MODULES:
+        main.extend(["--exclude-module", module])
     main.extend(["--collect-all", "rapidocr_onnxruntime"])
     main.append(str(APP_ENTRYPOINT))
 
@@ -282,8 +300,10 @@ def pyinstaller_commands(
         "--windowed",
         "--workpath",
         str(work_dir / UPDATER_NAME),
-        str(UPDATER_ENTRYPOINT),
     ]
+    for module in EXCLUDED_MODULES:
+        updater.extend(["--exclude-module", module])
+    updater.append(str(UPDATER_ENTRYPOINT))
     return main, updater
 
 
