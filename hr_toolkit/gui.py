@@ -1544,31 +1544,45 @@ class HRToolkitApp:
 
         # 自定义清晰对勾复选框指示器（彻底解决 clam 默认绘制 "X" 叉号引发的用户困惑）
         try:
-            self._img_checkbox_unchecked = tk.PhotoImage(width=18, height=18)
-            self._img_checkbox_checked = tk.PhotoImage(width=18, height=18)
-            # 未勾选：浅灰边框、纯白背景
-            for x in range(18):
-                for y in range(18):
-                    if x in (0, 1, 16, 17) or y in (0, 1, 16, 17):
-                        self._img_checkbox_unchecked.put("#94A3B8", (x, y))
+            self._img_checkbox_unchecked = PhotoImage(master=self.root, width=16, height=16)
+            self._img_checkbox_checked = PhotoImage(master=self.root, width=16, height=16)
+            # 未勾选：浅灰圆角边框、纯白背景
+            for x in range(16):
+                for y in range(16):
+                    if (x in (0, 15) and y in (0, 15)):
+                        self._img_checkbox_unchecked.put(COLOR_SURFACE, (x, y))
+                    elif x in (0, 15) or y in (0, 15):
+                        self._img_checkbox_unchecked.put("#CBD5E1", (x, y))
                     else:
                         self._img_checkbox_unchecked.put("#FFFFFF", (x, y))
-            # 已勾选：品牌主色实心底色 + 加粗清晰白色对勾 ✓
-            for x in range(18):
-                for y in range(18):
-                    self._img_checkbox_checked.put("#1F4E79", (x, y))
-            # 绘制加粗白色清晰对勾 ✓（从左下到右上的经典折线）
-            check_points = [
-                (4, 9), (5, 10), (6, 11), (7, 12),
-                (8, 11), (9, 9), (10, 8), (11, 6), (12, 5), (13, 4)
-            ]
-            for px, py in check_points:
-                for dx in (0, 1):
-                    for dy in (0, 1):
-                        if 0 <= px + dx < 18 and 0 <= py + dy < 18:
-                            self._img_checkbox_checked.put("#FFFFFF", (px + dx, py + dy))
 
-            style.element_create("App.Checkbutton.indicator", "image", self._img_checkbox_unchecked, ("selected", self._img_checkbox_checked))
+            # 已勾选：品牌主色实心底色 + 加粗清晰白色对勾 ✓
+            for x in range(16):
+                for y in range(16):
+                    if (x in (0, 15) and y in (0, 15)):
+                        self._img_checkbox_checked.put(COLOR_SURFACE, (x, y))
+                    else:
+                        self._img_checkbox_checked.put(COLOR_PRIMARY, (x, y))
+
+            # 绘制加粗清晰白色对勾 ✓（左短右长）
+            check_pixels: set[tuple[int, int]] = set()
+            for t in range(3):
+                check_pixels.add((3 + t, 8 + t))
+                check_pixels.add((3 + t, 9 + t))
+            for t in range(7):
+                check_pixels.add((6 + t, 9 - t))
+                check_pixels.add((6 + t, 10 - t))
+
+            for px, py in check_pixels:
+                if 0 <= px < 16 and 0 <= py < 16:
+                    self._img_checkbox_checked.put("#FFFFFF", (px, py))
+
+            style.element_create(
+                "App.Checkbutton.indicator",
+                "image",
+                self._img_checkbox_unchecked,
+                ("selected", self._img_checkbox_checked),
+            )
 
             for style_name in ("TCheckbutton", "App.TCheckbutton"):
                 style.layout(style_name, [
