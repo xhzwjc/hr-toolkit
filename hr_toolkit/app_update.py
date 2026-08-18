@@ -51,6 +51,10 @@ class UpdateError(RuntimeError):
     """Raised when update metadata, download, or launch fails."""
 
 
+class UpdateCancelledError(UpdateError):
+    """Raised when update metadata, download, or launch is cancelled by the user."""
+
+
 @dataclass(frozen=True)
 class UpdateInfo:
     version: str
@@ -210,6 +214,7 @@ def download_update_package(
     update: UpdateInfo,
     dest_dir: Path | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    cancel_event: Any | None = None,
 ) -> Path:
     if update.update_mode != "auto":
         raise UpdateError("当前平台使用手动安装包，不能交给自动更新器。")
@@ -223,6 +228,10 @@ def download_update_package(
     temp_path = dest_dir / f"{filename}.download"
     failures: list[str] = []
     for download_url in update.download_urls:
+        if cancel_event is not None and cancel_event.is_set():
+            temp_path.unlink(missing_ok=True)
+            final_path.unlink(missing_ok=True)
+            raise UpdateCancelledError("用户已取消更新包下载。")
         request = urllib.request.Request(download_url, headers={"User-Agent": USER_AGENT})
         temp_path.unlink(missing_ok=True)
         final_path.unlink(missing_ok=True)
@@ -233,18 +242,30 @@ def download_update_package(
                 downloaded = 0
                 with temp_path.open("wb") as output:
                     while True:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise UpdateCancelledError("用户已取消更新包下载。")
                         chunk = response.read(1024 * 256)
                         if not chunk:
                             break
                         output.write(chunk)
                         downloaded += len(chunk)
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise UpdateCancelledError("用户已取消更新包下载。")
                         if progress_callback is not None:
                             progress_callback(downloaded, total)
+            if cancel_event is not None and cancel_event.is_set():
+                temp_path.unlink(missing_ok=True)
+                final_path.unlink(missing_ok=True)
+                raise UpdateCancelledError("用户已取消更新包下载。")
             os.replace(temp_path, final_path)
             actual_sha256 = sha256_file(final_path)
             if actual_sha256.lower() != update.sha256.lower():
                 raise UpdateError("更新包 SHA256 校验失败。")
             return final_path
+        except UpdateCancelledError:
+            temp_path.unlink(missing_ok=True)
+            final_path.unlink(missing_ok=True)
+            raise
         except Exception as exc:
             temp_path.unlink(missing_ok=True)
             final_path.unlink(missing_ok=True)

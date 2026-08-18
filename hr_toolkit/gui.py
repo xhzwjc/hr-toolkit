@@ -22,6 +22,7 @@ from tkinter import ttk
 
 from hr_toolkit import __version__, runlog
 from hr_toolkit.app_update import (
+    UpdateCancelledError,
     UpdateInfo,
     check_for_update,
     cleanup_stale_update_files,
@@ -1129,6 +1130,7 @@ class HRToolkitApp:
         self.manual_update_check_active = False
         self.update_check_dismissed = False
         self._download_speed_anchor: tuple[float, int] | None = None
+        self._update_download_cancel_event: threading.Event | None = None
         self._tool_run_token = 0
         self._tool_running = False
         self._idle_run_button_text = ""
@@ -6764,7 +6766,7 @@ class HRToolkitApp:
             title=f"准备下载 v{update.version}",
             detail="正在连接国内下载源；不可用时会自动尝试 GitHub 备用源。",
             indeterminate=True,
-            close_command=None,
+            close_command=self._close_update_window,
         )
         worker = threading.Thread(target=self._manual_update_worker, args=(update,), daemon=True)
         worker.start()
@@ -6796,6 +6798,12 @@ class HRToolkitApp:
         self._write_log("已选择稍后更新，下次启动时会再次提醒。")
         self._close_update_window()
 
+    def _cancel_update_download(self) -> None:
+        if self._update_download_cancel_event is not None:
+            self._update_download_cancel_event.set()
+        self._write_log("已取消更新包下载。")
+        self._close_update_window()
+
     def _start_update_download(self, update: UpdateInfo) -> None:
         if self._tool_running or self._history_task_by_token:
             messagebox.showwarning(
@@ -6807,11 +6815,12 @@ class HRToolkitApp:
         self._write_log(f"开始下载更新包：v{update.version}")
         self._write_log(f"下载地址：{update.file_url}")
         self._download_speed_anchor = None
+        self._update_download_cancel_event = threading.Event()
         self._show_update_progress_window(
             title=f"正在下载 v{update.version}",
             detail="请不要关闭程序，下载完成后会自动开始安装。",
             indeterminate=False,
-            close_command=None,
+            close_command=self._cancel_update_download,
         )
 
         worker = threading.Thread(target=self._download_update_worker, args=(update,), daemon=True)
@@ -6822,9 +6831,19 @@ class HRToolkitApp:
             self.update_queue.put(("download_progress", (downloaded, total)))
 
         try:
-            package_path = download_update_package(update, progress_callback=progress)
+            package_path = download_update_package(
+                update,
+                progress_callback=progress,
+                cancel_event=self._update_download_cancel_event,
+            )
+        except UpdateCancelledError:
+            return
         except Exception as exc:
+            if self._update_download_cancel_event is not None and self._update_download_cancel_event.is_set():
+                return
             self.update_queue.put(("download_error", exc))
+            return
+        if self._update_download_cancel_event is not None and self._update_download_cancel_event.is_set():
             return
         self.update_queue.put(("download_ready", package_path))
 

@@ -16,6 +16,7 @@ from hr_toolkit.app_update import (
     DEFAULT_UPDATE_MANIFEST_URLS,
     GITEE_LATEST_RELEASE_API_URL,
     GITHUB_LATEST_MANIFEST_URL,
+    UpdateCancelledError,
     UpdateError,
     check_for_update,
     cleanup_stale_update_files,
@@ -261,6 +262,34 @@ class AppUpdateTests(unittest.TestCase):
 
             downloaded = download_update_package(update, dest_dir=tmp_dir / "download")
             self.assertEqual(downloaded.read_bytes(), b"fallback payload")
+
+    def test_download_package_cancelled_by_event(self) -> None:
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            pkg = tmp_dir / "package.zip"
+            pkg.write_bytes(b"A" * (1024 * 512))
+            update = parse_update_manifest(
+                {
+                    "version": "0.2.3",
+                    "file_url": "file://" + urllib.request.pathname2url(str(pkg)),
+                    "sha256": sha256_file(pkg),
+                },
+                manifest_url="file://" + urllib.request.pathname2url(str(tmp_dir / "latest.json")),
+                platform="windows",
+            )
+
+            cancel_event = threading.Event()
+            # 设置取消事件
+            cancel_event.set()
+            with self.assertRaises(UpdateCancelledError):
+                download_update_package(update, dest_dir=tmp_dir / "download", cancel_event=cancel_event)
+
+            # 验证临时文件已被自动清理干净
+            download_dir = tmp_dir / "download"
+            if download_dir.exists():
+                files = list(download_dir.iterdir())
+                self.assertEqual(files, [], "取消下载后临时文件必须被完全清理")
 
     def test_manual_download_url_falls_back_to_github(self) -> None:
         update = parse_update_manifest(
