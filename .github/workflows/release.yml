@@ -146,7 +146,7 @@ jobs:
   build-macos-universal:
     name: Build verified macOS universal2 DMG
     needs: validate
-    runs-on: macos-15-intel
+    runs-on: macos-13
     outputs:
       universal_ok: ${{ steps.mode.outputs.universal_ok }}
     env:
@@ -219,10 +219,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-intel
+          - runner: macos-13
             architecture: x86_64
             asset_suffix: x64
-          - runner: macos-15
+          - runner: macos-14
             architecture: arm64
             asset_suffix: arm64
     runs-on: ${{ matrix.runner }}
