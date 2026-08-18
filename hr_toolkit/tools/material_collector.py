@@ -116,14 +116,18 @@ def _compute_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
 
 
 def _compute_cache_key(
-    employee_key: str,
-    rel_path: str,
-    size: int,
-    mtime: float,
-) -> str:
-    """根据 (员工维度 + 相对路径 + size + mtime) 生成稳定 cache_key。"""
-    payload = f"{employee_key}|{rel_path}|{size}|{mtime}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:32]
+    file_path: Path,
+    employee_key: str = "",
+) -> str | None:
+    """根据文件二进制内容哈希 + 文件大小生成唯一指纹（完全脱离文件名与路径）。
+
+    不管文件被重命名为任何名称、移动到任何子目录，只要内容未变，指纹恒定不变。
+    """
+    fingerprint = _compute_file_fingerprint(file_path)
+    if fingerprint is None:
+        return None
+    size, _mtime, sha = fingerprint
+    return f"{sha[:24]}_{size}"
 
 
 def _mask_id_card(id_card: str) -> str:
@@ -222,24 +226,15 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     return True
 
 
-def _trim_cache_by_age_and_size(data: dict[str, Any], lib_path: Path | None = None) -> None:
-    """对缓存做 LRU + 体积治理：清理已删除文件、过期与超量条目。"""
+def _trim_cache_by_age_and_size(data: dict[str, Any]) -> None:
+    """对缓存做 LRU + 体积治理：清理过期与超量条目。
+
+    注：当前 cache key 基于 (content_hash + size)，不依赖文件路径，
+因此文件改名/移动不会导致缓存失效；文件被删除后条目会自然过期（90 天未命中后清理）。
+    """
     entries: dict[str, Any] = data.get("entries") or {}
     if not entries:
         return
-
-    # 0. 清理已在磁盘上被删除的文件条目
-    if lib_path is not None and lib_path.is_dir():
-        deleted_keys: list[str] = []
-        for key, entry in entries.items():
-            if isinstance(entry, dict) and "source_relpath" in entry:
-                try:
-                    if not (lib_path / entry["source_relpath"]).exists():
-                        deleted_keys.append(key)
-                except Exception:
-                    pass
-        for key in deleted_keys:
-            entries.pop(key, None)
 
     # 1. 清理超过 90 天未验证的条目
     now = datetime.now(tz=_BEIJING_TZ)
@@ -880,24 +875,22 @@ def _build_employee_key(emp: TargetEmployee) -> str:
 
 def _lookup_ocr_cache(
     cache: dict[str, Any],
-    employee_key: str,
-    rel_path: str,
     file_path: Path,
+    employee_key: str = "",
+    rel_path: str = "",
 ) -> tuple[str, str, str, str, str] | None:
-    """按 (path, size, mtime) 三重校验查询缓存；命中则返回 (material, method, sub, name, id_hash)。
+    """按文件内容哈希指纹查询缓存；命中则返回 (material, method, sub, name, id_hash)。
 
-    引擎升级（engine_signature 不一致）→ 视为全量失效，调用方应在调用本函数前清空 entries。
+    只要文件二进制内容没变，无论文件名如何修改、移动到何处，都能 100% 瞬间命中。
     """
     entries: dict[str, Any] = cache.get("entries") or {}
     if not entries:
         return None
 
-    fingerprint = _compute_file_fingerprint(file_path)
-    if fingerprint is None:
+    target_key = _compute_cache_key(file_path, employee_key)
+    if not target_key:
         return None
-    size, mtime, _ = fingerprint
 
-    target_key = _compute_cache_key(employee_key, rel_path, size, mtime)
     entry = entries.get(target_key)
     if not isinstance(entry, dict):
         return None
@@ -913,26 +906,25 @@ def _lookup_ocr_cache(
 
 def _store_ocr_cache(
     cache: dict[str, Any],
-    employee_key: str,
-    rel_path: str,
     file_path: Path,
     material_type: str,
     match_method: str,
     subtype: str,
     extracted_name: str,
     extracted_id: str,
+    employee_key: str = "",
+    rel_path: str = "",
 ) -> None:
-    """OCR 成功后回写缓存条目；失败（含文件不可访问）静默跳过。"""
+    """OCR 成功后按文件内容哈希指纹回写缓存条目。"""
     fingerprint = _compute_file_fingerprint(file_path)
     if fingerprint is None:
         return
-    size, mtime, _ = fingerprint
+    size, mtime, sha = fingerprint
 
-    cache_key = _compute_cache_key(employee_key, rel_path, size, mtime)
+    cache_key = f"{sha[:24]}_{size}"
     entries: dict[str, Any] = cache.setdefault("entries", {})
     entries[cache_key] = {
-        "employee_key": employee_key,
-        "source_relpath": rel_path,
+        "content_hash": sha[:24],
         "source_size": size,
         "source_mtime": mtime,
         "material_type": material_type,
@@ -941,6 +933,7 @@ def _store_ocr_cache(
         "extracted_name": extracted_name,
         "extracted_id_hash": _hash_id_card(extracted_id),
         "verified_at": _beijing_now_str(),
+        "sample_filename": file_path.name,
     }
 
 
@@ -1071,9 +1064,9 @@ def _classify_material_type(
     # 4. 本地离线 OCR 视觉图文识别（针对纯哈希/随机命名的图片：如 a5d6e67cd.jpg）
     ext = file_path.suffix.lower()
     if ext in IMAGE_EXTENSIONS:
-        # 4a. 先查缓存（基于路径+size+mtime 三重校验）
-        if use_cache and cache is not None and employee_key and rel_path:
-            hit = _lookup_ocr_cache(cache, employee_key, rel_path, file_path)
+        # 4a. 先查缓存（基于文件二进制内容 SHA256 哈希指纹，改名或移动均能 100% 秒级命中）
+        if use_cache and cache is not None:
+            hit = _lookup_ocr_cache(cache, file_path, employee_key=employee_key, rel_path=rel_path)
             if hit is not None:
                 if cache_stats is not None:
                     cache_stats["hits"] = cache_stats.get("hits", 0) + 1
@@ -1081,15 +1074,15 @@ def _classify_material_type(
                 return mat, method, sub, name, "", True
             if cache_stats is not None:
                 cache_stats["misses"] = cache_stats.get("misses", 0) + 1
-                cache_stats["invalidated"] = cache_stats.get("invalidated", 0) + 1
 
         # 4b. 缓存未命中或不可用 → 真实 OCR
         ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id = _classify_by_ocr(file_path)
         if ocr_mat:
-            # 4c. 仅在成功识别时回写缓存
-            if use_cache and cache is not None and employee_key and rel_path:
-                _store_ocr_cache(cache, employee_key, rel_path, file_path,
-                                 ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id)
+            # 4c. 仅在成功识别时回写缓存（以内容哈希为主键）
+            if use_cache and cache is not None:
+                _store_ocr_cache(cache, file_path,
+                                 ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id,
+                                 employee_key=employee_key, rel_path=rel_path)
             return ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id, False
 
     return None, "", "", "", "", False
@@ -1282,7 +1275,7 @@ def collect_employee_materials(
     # === OCR 缓存：跑完一轮后汇总写一次（而非每张图片即写）"""
     cache_write_ok = True
     if use_ocr_cache and ocr_cache is not None and cache_path is not None and ocr_cache.get("entries"):
-        _trim_cache_by_age_and_size(ocr_cache, lib_path=lib_path)
+        _trim_cache_by_age_and_size(ocr_cache)
         if not _save_ocr_cache(cache_path, ocr_cache):
             cache_write_ok = False
             warnings.append(
@@ -1432,7 +1425,10 @@ def _collect_all_from_folders(
                     if src.suffix.lower() in IMAGE_EXTENSIONS:
                         cached = None
                         if use_ocr_cache and ocr_cache is not None:
-                            cached = _lookup_ocr_cache(ocr_cache, employee_key, rel_p, src)
+                            cached = _lookup_ocr_cache(
+                                ocr_cache, src,
+                                employee_key=employee_key, rel_path=rel_p,
+                            )
                         if cached is not None:
                             _, _, _, ocr_name, _ = cached
                             cache_hit = True
@@ -1444,8 +1440,9 @@ def _collect_all_from_folders(
                                 cache_stats["misses"] += 1
                             if use_ocr_cache and ocr_cache is not None and ocr_mat:
                                 _store_ocr_cache(
-                                    ocr_cache, employee_key, rel_p, src,
+                                    ocr_cache, src,
                                     ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id,
+                                    employee_key=employee_key, rel_path=rel_p,
                                 )
                     mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id, duplicate_warning)
 

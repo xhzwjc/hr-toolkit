@@ -214,6 +214,65 @@ class TestCollectAll(unittest.TestCase):
             self.assertTrue((out / "张三").is_dir())
             self.assertFalse((out / "李四").exists())
 
+    def test_collect_all_with_images_uses_ocr_cache(self) -> None:
+        """collect_all=True + 图片场景必须能正确触发缓存读写，不抛异常。
+
+        回归测试：防止 _collect_all_from_folders 内对 _lookup_ocr_cache /
+        _store_ocr_cache 的旧位置参数调用（会触发 AttributeError）再次回归。
+        """
+        from hr_toolkit.tools import material_collector as mc
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class FakeEngine:
+                call_count = 0
+                def __call__(self, path):
+                    type(self).call_count += 1
+                    return (
+                        [["姓名", "张三"], ["公民身份号码", "440111199001011234"]],
+                        None,
+                    )
+            FakeEngine.call_count = 0
+            mc._OCR_ENGINE = FakeEngine()
+            mc._OCR_ATTEMPTED = True
+
+            with tempfile.TemporaryDirectory() as td:
+                lib = Path(td) / "资料库"
+                lib.mkdir()
+                emp = lib / "张三"
+                emp.mkdir()
+                pic = emp / "a5d6e67cd.jpg"
+                pic.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+                out1 = Path(td) / "输出1"
+                # 第一次 collect_all + 图片：不能抛 AttributeError
+                result = collect_employee_materials(
+                    lib, out1,
+                    roster_source="张三",
+                    collect_all=True,
+                )
+                self.assertEqual(result.total_employees, 1)
+                self.assertEqual(result.matched_file_count, 1)
+                # OCR 应被调用至少一次
+                self.assertGreaterEqual(FakeEngine.call_count, 1)
+                # 缓存应已写入
+                cache_file = lib / _OCR_CACHE_FILE_NAME
+                self.assertTrue(cache_file.exists())
+
+                # 第二次：缓存命中，OCR 调用次数不变
+                out2 = Path(td) / "输出2"
+                result2 = collect_employee_materials(
+                    lib, out2,
+                    roster_source="张三",
+                    collect_all=True,
+                )
+                self.assertEqual(FakeEngine.call_count, 1,
+                                 "第二次 collect_all 应命中缓存，不重复调用 OCR")
+                self.assertGreaterEqual(result2.ocr_cache_hits, 1)
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
 
 class TestSafetyAndRobustness(unittest.TestCase):
     def test_nested_output_dir_raises_error(self) -> None:
@@ -293,18 +352,25 @@ class TestOCRCacheHelpers(unittest.TestCase):
         self.assertIn("rapidocr_onnxruntime", sig)
 
     def test_compute_cache_key_stable(self) -> None:
-        k1 = _compute_cache_key("张三|440111199001011234", "张三/id.png", 100, 1.5)
-        k2 = _compute_cache_key("张三|440111199001011234", "张三/id.png", 100, 1.5)
-        self.assertEqual(k1, k2)
-        self.assertEqual(len(k1), 32)
+        with tempfile.TemporaryDirectory() as td:
+            p1 = Path(td) / "a.png"
+            p1.write_bytes(b"test_image_data")
+            k1 = _compute_cache_key(p1)
+            k2 = _compute_cache_key(p1)
+            self.assertEqual(k1, k2)
+            self.assertIn("_", k1)
 
-    def test_compute_cache_key_sensitive(self) -> None:
-        """任何维度变化都应得到不同的 key。"""
-        base = _compute_cache_key("张三", "a.png", 100, 1.0)
-        self.assertNotEqual(base, _compute_cache_key("李四", "a.png", 100, 1.0))
-        self.assertNotEqual(base, _compute_cache_key("张三", "b.png", 100, 1.0))
-        self.assertNotEqual(base, _compute_cache_key("张三", "a.png", 101, 1.0))
-        self.assertNotEqual(base, _compute_cache_key("张三", "a.png", 100, 2.0))
+    def test_compute_cache_key_invariant_to_filename(self) -> None:
+        """重命名文件，只要内容相同，生成的 cache_key 必须完全相同。"""
+        with tempfile.TemporaryDirectory() as td:
+            p1 = Path(td) / "original_name.jpg"
+            p1.write_bytes(b"identical_binary_content")
+            k1 = _compute_cache_key(p1)
+
+            p2 = Path(td) / "completely_different_name.png"
+            p2.write_bytes(b"identical_binary_content")
+            k2 = _compute_cache_key(p2)
+            self.assertEqual(k1, k2, "相同内容的不同文件名必须生成完全相同的 content hash key")
 
     def test_compute_file_fingerprint_returns_size_mtime_hash(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -425,6 +491,53 @@ class TestOCRCacheIO(unittest.TestCase):
                 self.assertEqual(CountingEngine.call_count, first_count,
                                  "二次跑不应再调用 OCR")
                 self.assertGreaterEqual(result.ocr_cache_hits, 1)
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_cache_hit_after_file_renamed_or_moved(self) -> None:
+        """文件被重命名或移动到深层子目录后，只要内容不变，依然 100% 命中 OCR 缓存。"""
+        from hr_toolkit.tools import material_collector as mc
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class CountingEngine:
+                call_count = 0
+                def __call__(self, path):
+                    type(self).call_count += 1
+                    return (
+                        [["姓名", "张三"], ["公民身份号码", "440111199001011234"]],
+                        None,
+                    )
+            CountingEngine.call_count = 0
+            mc._OCR_ENGINE = CountingEngine()
+            mc._OCR_ATTEMPTED = True
+
+            with tempfile.TemporaryDirectory() as td:
+                lib = Path(td) / "资料库"
+                lib.mkdir()
+                emp = lib / "张三"
+                emp.mkdir()
+                pic = emp / "old_random_hash_name.jpg"
+                pic.write_bytes(b"\x89PNG\r\n\x1a\nfake_image_bytes")
+
+                out1 = Path(td) / "输出1"
+                # 首次运行：写入内容哈希指纹缓存
+                collect_employee_materials(lib, out1, roster_source="张三", material_types=["身份证"])
+                first_count = CountingEngine.call_count
+                self.assertEqual(first_count, 1)
+
+                # 重命名文件并移动到深层子目录
+                sub_dir = emp / "2026新证件"
+                sub_dir.mkdir()
+                new_pic = sub_dir / "renamed_random_name_0x8f2a.png"
+                pic.rename(new_pic)
+
+                out2 = Path(td) / "输出2"
+                # 第二次运行：即使文件名和路径彻底改变，因内容哈希一致，依然秒级命中缓存，OCR 调用次数不变！
+                res2 = collect_employee_materials(lib, out2, roster_source="张三", material_types=["身份证"])
+                self.assertEqual(CountingEngine.call_count, first_count, "文件重命名后不应重新调用 OCR，必须命中缓存")
+                self.assertGreaterEqual(res2.ocr_cache_hits, 1)
         finally:
             mc._OCR_ENGINE = real_engine
             mc._OCR_ATTEMPTED = real_attempted
