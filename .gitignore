@@ -50,12 +50,29 @@ release/scripthub_static/hr-toolkit/releases/*
 # Generated HR tool outputs
 outputs/
 
-# Local HR source materials / copied customer files
+# Local HR source materials / copied customer files / local summary workbooks
 附件/
+*附件*/
+二期新增的附件/
+二期新增的附件*/
 模板/
 问题1-3相关数据及模板/
+*相关数据*/
+*问题汇总*.xlsx
+*问题汇总*.xls
+*问题汇总表*.xlsx
+*问题汇总表*.xls
+二期问题汇总表*.xlsx
+二期问题汇总表*.xls
 问题汇总*.xlsx
+问题汇总*.xls
+*问题清单*.xlsx
+*问题清单*.xls
 需求*问题清单*.xlsx
+上传资料/
+处理结果/
+补充资料/
+共用资料/
 hr_toolkit/*.zip
 
 # Office lock / temporary files

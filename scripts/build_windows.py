@@ -86,6 +86,10 @@ FORBIDDEN_PAYLOAD_PARTS = {
     "共用资料",
     "附件",
     "二期新增的附件",
+    "问题汇总",
+    "二期问题汇总表",
+    "问题1-3相关数据及模板",
+    "模板",
 }
 FORBIDDEN_DATA_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 FORBIDDEN_DATA_FILENAMES = {

@@ -1,6 +1,17 @@
 # HR Toolkit
 
-人事 Excel 自动化工具箱。当前已落地：**需求1：社保明细与汇总**、**需求2：考勤与周月报统计**、**需求3：保险台账与增减预警**、**需求4：工资表按入职公司拆分**、**需求5：多月工资合并个人薪资汇总**、**需求6：异动表汇总与花名册更新**、**需求7：档案移交表入库**、**需求8：人员资料文件夹改名**。
+人事 Excel 自动化工具箱。当前已落地：
+- **需求1：社保明细与汇总**
+- **需求2：考勤与周月报统计**
+- **需求3：保险台账与增减预警**
+- **需求4：工资表按入职公司拆分**
+- **需求5：多月工资合并个人薪资汇总**
+- **需求6：异动表汇总与花名册更新**
+- **需求7：档案移交表入库与导出**
+- **需求8：人员资料文件夹改名**
+- **需求9：员工资料收集与本地离线 OCR 打包**
+
+---
 
 ## 已实现工具
 
@@ -20,6 +31,8 @@
 - 未匹配花名册的人员、姓名不一致、未识别账单期会在日志和异常提醒中列出
 
 公积金、残保金、管理费暂无数据时留空；后续人事提供单独数据后可继续补充。
+
+---
 
 ### 需求2-考勤与周月报统计
 
@@ -53,6 +66,8 @@
 - **上一期已经交过，周二到周四又交了一份**：这份视为提前交的下一期周报，不记超时，下一期也不会记未写。例如小王 6.15 周一按时交了，6.18 周四因为要请假提前把本周的交了，那 6.22 那期就算他已交。
 - **归属期超出所选日期范围**：选了统计日期时，归属期不在范围内的周报本次不统计，留给下一次，避免重复统计或错记超时。例如范围选到 6.24，某人 6.26（周五）交的周报属于 6.29 截止那期，本次统计里不会出现，下次统计到 6.29 那期时才会算。
 
+---
+
 ### 需求3-保险台账与增减预警
 
 输入各保单人员清单、zip 压缩包，或一个包含多个保单清单/压缩包的文件夹，再选择需求6的人力资源分析表，自动生成保险台账。输入支持 `.xlsx` 和 `.xls`。
@@ -69,6 +84,8 @@
 
 人事已确认岗位保险规则暂取消，当前只做台账明细和人员增减预警。
 
+---
+
 ### 需求4-工资表按入职公司拆分
 
 输入一个包含 `汇总表`、`明细表` 的工资表，按明细表中的 `入职公司` 字段拆分为多个 Excel 工作簿。输入支持 `.xlsx` 和 `.xls`。
@@ -80,6 +97,8 @@
 - 明细表只保留对应公司的员工行
 - 明细表保留原模板分段小计和底部总计文案
 - 汇总表引用拆分后明细表中的分段小计
+
+---
 
 ### 需求5-多月工资合并个人薪资汇总
 
@@ -93,6 +112,8 @@
 - 新月份中出现的新员工会自动新增一行
 - 人员在某个月没有工资时自动填 `0`
 - 输出 `个人薪资汇总表.xlsx`
+
+---
 
 ### 需求6-异动表汇总
 
@@ -116,6 +137,8 @@
 
 薪酬、产值和同行对比分析暂不处理，等需求6第三部分数据源确认后再单独实现。
 
+---
+
 ### 需求7-档案移交表入库
 
 输入项目部提交的人事档案移交表，按 `公司` 写入档案汇总表；也可以从一份或多份档案汇总表生成各公司独立档案表。
@@ -135,13 +158,7 @@
 - 生成公司档案表时会自动改标题公司名，并为新增人员补边框、居中和公式
 - 档案表生成会按公司输出 `公司名-档案表.xlsx`
 
-### Excel 旧格式兼容
-
-- 已实现的 Excel 类工具均支持上传 `.xlsx` 和 `.xls`
-- 文件夹和 zip 压缩包中也会识别 `.xls`
-- 输出文件统一为 `.xlsx`
-- 需求1的老 `.xls` 社保清单和参保花名册会用内置依赖直接读取
-- 其他工具遇到 `.xls` 会先自动转换为 `.xlsx` 再处理；Windows 电脑需要安装 Excel 或 WPS 表格，Mac/Linux 需要安装 LibreOffice 才能自动转换
+---
 
 ### 需求8-人员资料文件夹改名
 
@@ -154,6 +171,33 @@
 - 批量删除结尾文字，例如 `张三_劳动合同`、`李四劳动合同` -> `张三`、`李四`
 - 指定单个人员/单文件处理，例如只处理 `张三` 或 `张三.pdf`
 - 替换单个名称，例如 `张三` -> `章五`；替换文件时会自动补全原扩展名
+
+---
+
+### 需求9-员工资料收集与本地离线 OCR 打包
+
+选择待整理的原始混乱员工资料总目录，自动按目标员工名单（支持上传花名册 Excel 或手动输入人员信息）进行材料识别、分类和归档打包。
+
+核心功能与特性：
+
+- **本地离线深度学习 OCR 识别**：内置 RapidOCR + ONNXRuntime 推理引擎，在本地 CPU 上直接识别图片（JPG/PNG/WEBP/BMP）、扫描件 PDF 及 Word 文档，**不依赖外部网络与云端 API，保障敏感身份信息绝对安全**；
+- **智能双重匹配**：
+  - 优先按 18 位身份证号码精准匹配；
+  - 结合姓名模糊匹配、拼音容错匹配，从复杂的合同、体检表、证件照片中提取所属员工；
+- **多类别材料自动分类**：自动归类身份证（正反面）、体检报告、劳动合同、银行卡、学历证书、离职证明等材料；
+- **规范输出**：生成按员工姓名命名的独立文件夹或统一 ZIP 归档包，并输出详细的识别与匹配报告日志。
+
+---
+
+### Excel 旧格式兼容
+
+- 已实现的 Excel 类工具均支持上传 `.xlsx` 和 `.xls`
+- 文件夹和 zip 压缩包中也会识别 `.xls`
+- 输出文件统一为 `.xlsx`
+- 需求1的老 `.xls` 社保清单和参保花名册会用内置依赖直接读取
+- 其他工具遇到 `.xls` 会先自动转换为 `.xlsx` 再处理；Windows 电脑需要安装 Excel 或 WPS 表格，Mac/Linux 需要安装 LibreOffice 才能自动转换
+
+---
 
 ## 桌面版使用
 
@@ -168,7 +212,7 @@ python3 -m hr_toolkit
 1. 首次使用时通过“新建工作项目”填写名称并确认保存位置，或打开电脑上已有的项目文件夹
 2. 在左侧选择工具，再从电脑添加文件、压缩包或文件夹
 3. 外部资料会先复制到当前项目的“上传资料”，工具只处理项目内的副本
-4. 点击 `开始拆分`、`开始合并`、`开始汇总`、`开始入库` 或 `预览`
+4. 点击 `开始拆分`、`开始合并`、`开始汇总`、`开始入库` 或 `开始提取`
 5. 正式结果直接保存到当前项目的“处理结果”，不再额外保存一份隐藏结果副本
 6. 在右侧项目文件区查看上传资料、处理结果和以前的处理批次
 
@@ -203,84 +247,82 @@ python3 -m hr_toolkit
 - `移到回收站` 只对完整处理批次生效，会把该批次的上传资料、处理结果和补充资料一起移入项目内部回收站，不会立即永久删除；可在右侧“项目回收站”中搜索并恢复，同名位置会使用新名称且不覆盖现有资料
 - 项目功能不会主动上传资料；如需把完整项目备份到 OneDrive、企业网盘、NAS 或 U 盘，请先退出 HR Toolkit，再按公司的数据安全规定复制项目文件夹
 
-需要迁移或备份时，请先退出 HR Toolkit，再完整复制项目文件夹（包括隐藏的 `.hrtoolkit`）；不要单独编辑或复制正在使用的项目元数据和批次清单。升级前由旧版本留存的资料不在项目文件夹内，如需保留，请在“旧版记录”页打开其归档目录后单独备份。
+需要迁移或备份时，请先退出 HR Toolkit，再完整复制项目文件夹（包括隐藏的 `.hrtoolkit`）；不要单独编辑或复制正在使用的项目元数据和批次清单。
 
-## Mac 本机验证
+---
+
+## 本机 CLI 验证与调用
 
 当前目录执行：
 
 ```bash
 python3 -m pip install -r requirements.txt
+```
+
+### 1. 社保明细与汇总：
+```bash
 python3 -m hr_toolkit social-security \
-  --input "问题1-3相关数据及模板/1.社保类模板" \
-  --roster "问题1-3相关数据及模板/1.社保类模板/参保人员花名册.xlsx" \
+  --input "社保原始清单文件夹" \
+  --roster "参保人员花名册.xlsx" \
   --output "outputs/social_security_demo"
 ```
 
-考勤与周月报统计：
-
+### 2. 考勤与周月报统计：
 ```bash
 python3 -m hr_toolkit data-statistics \
-  --input "问题1-3相关数据及模板/2.数据统计类模板" \
+  --input "考勤数据文件夹" \
   --output "outputs/data_statistics_demo"
 ```
 
 如有人事提供的应汇报人员名单，可追加：
-
 ```bash
 python3 -m hr_toolkit data-statistics \
-  --input "问题1-3相关数据及模板/2.数据统计类模板" \
+  --input "考勤数据文件夹" \
   --staff "应汇报人员名单.xlsx" \
   --output "outputs/data_statistics_demo"
 ```
 
 只统计指定日期范围内周一截止的周报（两个日期需同时提供）：
-
 ```bash
 python3 -m hr_toolkit data-statistics \
-  --input "问题1-3相关数据及模板/2.数据统计类模板" \
+  --input "考勤数据文件夹" \
   --week-start 2026-06-02 \
   --week-end 2026-06-30 \
   --output "outputs/data_statistics_demo"
 ```
 
-保险台账：
-
+### 3. 保险台账：
 ```bash
 python3 -m hr_toolkit insurance-ledger \
-  --input "问题1-3相关数据及模板/3.保险类模板" \
-  --roster "问题6-2026年4月人力资源分析.xlsx" \
+  --input "保单文件夹" \
+  --roster "人力资源分析表.xlsx" \
   --output "outputs/insurance_ledger_demo"
 ```
 
-工资表拆分：
-
+### 4. 工资表拆分：
 ```bash
 python3 -m hr_toolkit salary-split \
-  --input "附件/问题4-薪资表模板(1).xlsx" \
+  --input "月度薪资表.xlsx" \
   --output "outputs/salary_split_demo"
 ```
 
 预览模式，不生成文件：
-
 ```bash
 python3 -m hr_toolkit salary-split \
-  --input "附件/问题4-薪资表模板(1).xlsx" \
+  --input "月度薪资表.xlsx" \
   --output "outputs/salary_split_demo" \
   --dry-run
 ```
 
 系统集成时建议使用 JSON 输出：
-
 ```bash
 python3 -m hr_toolkit salary-split \
-  --input "附件/问题4-薪资表模板(1).xlsx" \
+  --input "月度薪资表.xlsx" \
   --output "outputs/salary_split_demo" \
   --json
 ```
 
-多月工资合并：
-
+### 5. 多月工资合并：
 ```bash
 python3 -m hr_toolkit salary-merge \
   --input-dir "某项目工资表文件夹" \
@@ -288,7 +330,6 @@ python3 -m hr_toolkit salary-merge \
 ```
 
 已有汇总表追加新月份：
-
 ```bash
 python3 -m hr_toolkit salary-merge \
   --input-dir "第三月工资表文件夹" \
@@ -296,60 +337,31 @@ python3 -m hr_toolkit salary-merge \
   --output "outputs/salary_merge_demo"
 ```
 
-异动表汇总：
-
+### 6. 异动表汇总：
 ```bash
 python3 -m hr_toolkit change-merge \
   --input-dir "各项目异动表文件夹" \
-  --output "outputs/change_merge_demo"
-```
-
-单个异动表也可以直接处理：
-
-```bash
-python3 -m hr_toolkit change-merge \
-  --input-dir "问题6-2026年4月南昌分公司异动表.xlsx" \
   --output "outputs/change_merge_demo"
 ```
 
 追加到已有异动汇总表：
-
 ```bash
 python3 -m hr_toolkit change-merge \
   --input-dir "各项目异动表文件夹" \
   --template "已有异动汇总表.xlsx" \
-  --output "outputs/change_merge_demo"
-```
-
-追加到一个包含多个月份汇总表的文件夹：
-
-```bash
-python3 -m hr_toolkit change-merge \
-  --input-dir "各项目异动表文件夹" \
-  --template "已有月度汇总表文件夹" \
-  --output "outputs/change_merge_demo"
-```
-
-zip 压缩包也可以直接处理：
-
-```bash
-python3 -m hr_toolkit change-merge \
-  --input-dir "项目部异动表.zip" \
   --output "outputs/change_merge_demo"
 ```
 
 指定人力资源分析表并同步更新花名册：
-
 ```bash
 python3 -m hr_toolkit change-merge \
   --input-dir "各项目异动表文件夹" \
   --template "已有异动汇总表.xlsx" \
-  --analysis-template "问题6-2026年4月人力资源分析.xlsx" \
+  --analysis-template "人力资源分析表.xlsx" \
   --output "outputs/change_merge_demo"
 ```
 
 只用已有异动汇总表单独更新花名册：
-
 ```bash
 python3 -m hr_toolkit roster-update \
   --input "已有月度汇总表文件夹" \
@@ -357,8 +369,7 @@ python3 -m hr_toolkit roster-update \
   --output "outputs/roster_update_demo"
 ```
 
-档案移交表入库：
-
+### 7. 档案移交表入库：
 ```bash
 python3 -m hr_toolkit archive-import \
   --input "档案移交表文件夹" \
@@ -366,7 +377,6 @@ python3 -m hr_toolkit archive-import \
 ```
 
 追加到已有档案汇总表：
-
 ```bash
 python3 -m hr_toolkit archive-import \
   --input "档案移交表文件夹" \
@@ -374,44 +384,22 @@ python3 -m hr_toolkit archive-import \
   --output "outputs/archive_import_demo"
 ```
 
-档案入库预览，不生成文件：
-
-```bash
-python3 -m hr_toolkit archive-import \
-  --input "档案移交表文件夹" \
-  --output "outputs/archive_import_demo" \
-  --dry-run
-```
-
 按公司生成独立档案表：
-
 ```bash
 python3 -m hr_toolkit archive-export \
   --summary "档案表汇总表.xlsx" \
   --output "outputs/archive_export_demo"
 ```
 
-追加到已有公司档案表：
-
+### 8. 人员资料文件夹改名：
 ```bash
-python3 -m hr_toolkit archive-export \
-  --summary "档案表汇总表.xlsx" \
-  --existing "已有公司档案表文件夹" \
-  --output "outputs/archive_export_demo"
-```
-
-人员资料文件夹改名预览：
-
-```bash
+# 预览
 python3 -m hr_toolkit folder-rename \
   --root "人员资料目录" \
   --mode append \
   --text "劳动合同"
-```
 
-确认执行改名：
-
-```bash
+# 执行
 python3 -m hr_toolkit folder-rename \
   --root "人员资料目录" \
   --mode append \
@@ -419,54 +407,28 @@ python3 -m hr_toolkit folder-rename \
   --apply
 ```
 
-删除结尾文字：
-
+### 9. 员工资料离线 OCR 提取打包：
 ```bash
-python3 -m hr_toolkit folder-rename \
-  --root "人员资料目录" \
-  --mode remove \
-  --text=_劳动合同 \
-  --apply
+python3 -m hr_toolkit material-collector \
+  --source-dir "待整理原始资料总目录" \
+  --roster "目标员工名单.xlsx" \
+  --output-dir "outputs/material_collector_demo"
 ```
 
-替换单个文件夹名：
-
-```bash
-python3 -m hr_toolkit folder-rename \
-  --root "人员资料目录" \
-  --mode replace \
-  --target "张三" \
-  --replacement "章五" \
-  --apply
-```
-
-## 后续扩展约定
-
-每个需求独立成一个工具模块：
-
-- `hr_toolkit/tools/social_security.py`：需求1，社保明细/汇总
-- `hr_toolkit/tools/data_statistics.py`：需求2，考勤与周月报统计
-- `hr_toolkit/tools/insurance_ledger.py`：需求3，保险台账
-- `hr_toolkit/tools/salary_split.py`：需求4，工资表拆分
-- `hr_toolkit/tools/salary_merge.py`：需求5，工资表合并
-- `hr_toolkit/tools/personnel_change_merge.py`：需求6，异动表汇总
-- `hr_toolkit/tools/archive_import.py`：需求7，档案移交表入库
-- `hr_toolkit/tools/folder_rename.py`：需求8，人员资料文件夹改名
-
-CLI 只是入口，核心函数可以直接被 ScriptHub 或 Web 后端调用。
+---
 
 ## 自动构建与发布
 
 日常发布只在本地 Mac 做版本检查、测试、版本提交、annotated Tag 和原子推送；Windows、macOS 构建与 GitHub Release 发布全部交给 GitHub Actions。正式发布命令为：
 
 ```bash
-npm run release -- 0.2.3
+npm run release -- 0.3.5
 ```
 
 首次使用先安装 Python 依赖和 Node.js。npm 入口会优先使用 `.venv/bin/python`，不存在时再使用 `python3`；两者之一必须能运行完整测试。发布前可执行不修改版本文件、commit、Tag 或远端的演练：
 
 ```bash
-npm run release -- 0.2.3 --dry-run
+npm run release -- 0.3.5 --dry-run
 ```
 
 无人值守环境审核完版本后可追加 `--yes`。发布脚本会严格检查 stable SemVer、clean `main`、`HEAD == origin/main`、本地/远端 Tag 冲突以及全部版本字段，然后运行 `unittest`、`compileall` 和 `git diff --check`。正式执行只会暂存 `hr_toolkit/__init__.py`、`package.json`、`package-lock.json`，不会运行本地跨平台构建，也不会使用 `git add .`。
@@ -477,7 +439,7 @@ npm run release -- 0.2.3 --dry-run
 
 ### GitHub Actions 产物
 
-普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行 Python 3.9+ 测试、编译和静态发布检查。只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag 和直接下载资产同步到 Gitee，并生成“Gitee 主地址 + GitHub 备用地址”的 `latest.json`。Gitee 镜像失败会让该工作流显示失败，方便运维重试，但不会删除或回滚已经发布的 GitHub Release。
+普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查。只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag 和直接下载资产同步到 Gitee，并生成“Gitee 主地址 + GitHub 备用地址”的 `latest.json`。
 
 每个版本的直接下载资产为（以下用 `<version>` 表示版本号）：
 
@@ -485,12 +447,11 @@ npm run release -- 0.2.3 --dry-run
 HRToolkit_<version>_universal.dmg
 HRToolkit_<version>_x64-setup.exe
 HRToolkit_<version>_x64.msi
-HRToolkit-<version>-win-update.zip
 latest.json
 SHA256SUMS.txt
 ```
 
-macOS 优先构建 universal2，并对 Bundle 中的 Mach-O 使用 `file`/`lipo` 验证 `arm64` 与 `x86_64`。如果 universal2 构建或验证失败，发布资产会改为两个真实架构文件：
+macOS 优先构建 universal2，并对 Bundle 中的 Mach-O 使用 `file`/`lipo` 验证 `arm64` 与 `x86_64`。如果 universal2 遇到架构专属 C++ 二进制，发布资产会自动降级拆分为两个真实架构文件：
 
 ```text
 HRToolkit_<version>_arm64.dmg
@@ -499,75 +460,39 @@ HRToolkit_<version>_x64.dmg
 
 不会把单架构程序改名伪装成 `universal`。DMG 内包含标准 `HRToolkit.app` 和指向 `/Applications` 的快捷方式。
 
-正式 PyInstaller 数据资源只允许 `README.md` 与 `hr_toolkit/templates/*.xlsx`。构建验证会拒绝附件、真实 Excel、outputs、日志、缓存和测试数据。打包后的主程序支持无界面检查：
+### Windows 安装与自动更新架构
 
-```bash
-HRToolkit --version
-HRToolkit --smoke-test
-```
+Windows 构建输出：
+- `HRToolkit_<version>_x64-setup.exe`：Inno Setup 极限固实压缩安装包（约 60MB），使用当前用户权限目录 `%LOCALAPPDATA%\Programs\HRToolkit`，普通用户双击安装无需管理员提权；
+- `HRToolkit_<version>_x64.msi`：WiX v4 生成的 per-user MSI 安装器，供企业 IT 批量分发；
+- `HRToolkitUpdater.exe`：内置独立更新器。
 
-### Windows 三阶段构建
+**自动更新机制**：
+- Windows 客户端在检测到新版本后，直接在后台下载 60MB 的 `setup.exe` 安装包；
+- 下载完成后唤起 `HRToolkitUpdater.exe` 并退出主程序；
+- 更新器在后台通过静默指令 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` 秒级完成程序目录覆盖并自动重新打开新版本；
+- 体积远低于 Gitee 100MB 附件限制，彻底解除国内分发瓶颈，并保留对旧版 ZIP 解压更新的向后兼容。
 
-Windows runner 按三个独立阶段执行：
+### 国内更新源、GitHub 回退与容灾
 
-```powershell
-python scripts\build_windows.py --version 0.2.3 --output-dir dist\windows
-python scripts\build_windows_installers.py --version 0.2.3 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
-python scripts\build_update_assets.py --version 0.2.3 --app-dir dist\windows\HRToolkit --updater dist\windows\HRToolkitUpdater.exe --output-dir artifacts\windows
-```
-
-兼容入口 `scripts/release_windows.py` 只负责依次调用这三个阶段，不再递增版本、不提交代码、不上传发布物。主程序是 PyInstaller onedir，Updater 是 onefile；更新 ZIP 根目录保持 `HRToolkit.exe`、`HRToolkitUpdater.exe` 和 `_internal/`，继续使用现有备份、替换与失败回滚逻辑。
-
-EXE 安装器是普通用户的主要下载项，MSI 用于企业部署。两者使用当前用户可写的 `%LOCALAPPDATA%\Programs\HRToolkit`，程序 payload 位于其 `app` 子目录，安装器/卸载器元数据留在外层，保证自更新器可以只替换 `app`。
-
-### macOS 本地检查
-
-当前 Mac 可以在不发布的情况下构建并检查当前版本 DMG：
-
-```bash
-python scripts/build_macos.py \
-  --version 0.2.3 \
-  --architecture arm64 \
-  --output-dir dist/release-assets
-```
-
-使用 universal2 Python 时把架构改为 `universal2`。构建脚本会生成 `.app`、创建 DMG、验证 Applications 快捷方式、Bundle 版本、资源白名单、无界面启动以及所有 Mach-O 的真实架构。
-
-### 国内更新源、GitHub 回退与旧客户端迁移
-
-新版客户端按以下顺序检查公开更新源：
+客户端按以下顺序检查公开更新源：
 
 ```text
-https://gitee.com/api/v5/repos/optimistic-little-sunspot/hr-toolkit/releases/latest
-https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json
+1. https://gitee.com/api/v5/repos/optimistic-little-sunspot/hr-toolkit/releases/latest
+2. https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json
 ```
 
-Gitee 最新 Release 接口会返回公开附件列表，客户端从中找到 `latest.json`。只要 Gitee 能返回有效配置，就不会访问 GitHub；Gitee 连接失败、超时、404、配置无效或缺少当前平台资产时，才自动尝试 GitHub。Gitee 版 `latest.json` 中每个平台的 `file_url` 指向 Gitee，同一 SHA256 的 GitHub 地址写入 `fallback_urls`。Windows 下载和 SHA256 校验失败时会继续尝试备用地址；macOS 点击“下载 DMG”后也会在后台选择第一个可访问地址，不阻塞界面。
+- Gitee 最新 Release 接口会返回公开附件列表，客户端从中找到 `latest.json`。只要 Gitee 能返回有效配置，就不会访问 GitHub；
+- Gitee 连接失败、超时或配置异常时，自动回退尝试 GitHub；
+- `latest.json` 中 Windows 平台的 `file_url` 优先指向 Gitee 国内 CDN，`fallback_urls` 配置 GitHub 镜像，下载失败时自动重试备用源；
+- 下载弹窗实时显示进度与速率，支持点击右上角 `×` 或按 `Esc` 随时安全取消，并自动清理未完成的临时文件。
 
-Windows 继续下载 `HRToolkit-<version>-win-update.zip` 并使用现有 Updater 自动替换。Windows 构建仍会提供 `legacy-server-latest.json`，其主下载地址现在指向 Gitee，GitHub 写作备用字段。只有在对应 Gitee Release 资产已经公开并验证后，才能把该文件部署到旧服务器原 `latest.json` 的位置；旧版客户端不认识多源配置，因此这一步必须保证 Gitee 主地址真实可下载。安装后的 `update_url.txt` 包含上面的 Gitee、GitHub 两行，后续不再依赖旧服务器。
+---
 
-已经安装的 v0.2.1/v0.2.2 客户端内置的是 GitHub 地址：能访问 GitHub 的客户端会先升级到首个双源版本；完全无法访问 GitHub 的机器需要通过 Gitee Release、内网共享或 U 盘手动安装一次双源版本。完成这一次迁移后，后续检查与下载默认走 Gitee。
+## 运行日志与数据隐私
 
-macOS 第一阶段只支持 DMG 手动更新。新版客户端发现更新后只打开已验证可访问的 DMG 下载地址，不会调用 ZIP 替换器，也不应宣传为 Mac 自动更新。旧 Mac 客户端不能安全消费标准 `.app` DMG，应通过人工通知和 DMG 安装迁移，旧服务器桥接清单只提供 Windows 条目。
-
-Gitee 镜像发布需要在 GitHub 仓库 Actions Secrets 中配置 `GITEE_TOKEN`。Token 需要对 `optimistic-little-sunspot/hr-toolkit` 具备推送源码/Tag、创建或更新 Release、删除和上传 Release 附件的权限；不要把 Token 写入仓库、命令输出或聊天记录。镜像脚本会先删除该 Tag Release 的旧附件，上传二进制和校验文件，最后上传 `latest.json`，因此失败中的不完整 Release 不会被新版客户端当作有效国内更新源。
-
-### 签名预留
-
-当前版本不做 Windows Authenticode、Apple Developer ID 签名或 notarization，因此正式构建不要求额外签名 Secret。Windows 安装器保留 `--inno-sign-tool-name`，macOS 构建保留 `--codesign-identity` / `MACOS_CODESIGN_IDENTITY` 与 entitlements 入口；未来启用时再配置证书、密码、Developer ID、Apple ID/App Store Connect 凭据，并在 Release 发布门禁前加入完整签名与公证验证。
-
-应用图标（窗口/任务栏/exe）由 `scripts/generate_app_icons.py` 生成：品牌绿圆角方块加白色 “HR” 字标，与侧栏标识一致。调整图标后运行该脚本，重新生成 `hr_toolkit/_icon_data.py` 与 `packaging/windows/HRToolkit.ico`；macOS 构建会基于同一图形生成 `.icns`。
-
-## 自动更新行为
-
-启动时的检查在后台静默进行，只有发现新版本才会弹窗提示；主界面右上角也有“检查更新”，可手动检查。更新提示遵循 `latest.json` 中的 `mandatory` 字段：强制更新（默认）只能“立即更新”或退出程序；非强制更新（`"mandatory": false`）可选择“稍后再说”，下次启动时再次提醒。
-
-Windows 下载完成后会启动 `HRToolkitUpdater.exe`，关闭主程序，替换整个 payload 目录后自动重新打开新版本。更新成功会清理下载包和临时文件；失败时会保留或恢复备份，并在安装目录同级写入 `HRToolkit_update.log`。
-
-如果旧版本更新失败后只剩 `HRToolkit_backup_时间`，先把该文件夹改名回 `HRToolkit`，再打开 `HRToolkit.exe` 检查更新。正常版本不需要单独下载更新器，更新器已包含在更新 ZIP 中。
-
-## 运行日志
-
-程序在 `HRToolkit_update.log` 同一位置写入 `HRToolkit_app.log`（开发环境写到当前目录，可用环境变量 `HR_TOOLKIT_APP_LOG` 指定路径）。远程排查问题时，让使用者把这两个日志文件发过来即可。
-
-记录内容：程序启动（版本号）、每次工具运行的开始（工具名、输入文件名和大小、参数）、完成（耗时、提醒条数）、失败（耗时和完整错误堆栈）、用户手动停止，以及界面和后台线程的未捕获异常。**只记录文件名和统计数字，不记录任何表格内容**（身份证、工资等敏感数据不会进日志），日志文件可以放心外发。日志超过 1MB 时自动截断，只保留最近的内容。
+- **全离线计算**：所有数据统计、表格拆分合并、OCR 图像识别均在用户本机内存与本地磁盘中运行，不连接任何第三方 AI 云端或外部数据服务器。
+- **脱敏日志**：
+  - 运行日志统一输出至同级目录下的 `HRToolkit_app.log` 与 `HRToolkit_update.log`；
+  - **仅记录工具启动、耗时、处理文件数量与错误堆栈，严禁记录任何真实表格内容（身份证号、手机号、薪资金额等敏感信息绝不上报与外显）**；
+  - 日志设置自动滚动截断限制（最大 1MB），防止长期占用磁盘空间。
