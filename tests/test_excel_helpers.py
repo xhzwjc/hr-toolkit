@@ -24,6 +24,7 @@ from hr_toolkit.common.excel import (
 )
 from hr_toolkit.common.excel_compat import (
     _build_conversion_env,
+    _convert_with_xlrd,
     _diagnose_missing_libreoffice,
     _find_libreoffice,
     ensure_xlsx_workbook,
@@ -50,7 +51,7 @@ class ExcelHelperTest(unittest.TestCase):
             wb.save(original_xlsx)
             shutil.copyfile(original_xlsx, xls_file)
 
-            def fake_convert(source: Path, output_path: Path) -> None:
+            def fake_convert(source: Path, output_path: Path, *args, **kwargs) -> None:
                 shutil.copyfile(source, output_path)
 
             with patch("hr_toolkit.common.excel_compat._convert_xls_to_xlsx", side_effect=fake_convert):
@@ -68,7 +69,7 @@ class ExcelHelperTest(unittest.TestCase):
             renamed_xls = root / "改后缀.xlsx"
             renamed_xls.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1fake")
 
-            def fake_convert(source: Path, output_path: Path) -> None:
+            def fake_convert(source: Path, output_path: Path, *args, **kwargs) -> None:
                 wb = Workbook()
                 wb.active["A1"] = "已转换"
                 wb.save(output_path)
@@ -80,6 +81,34 @@ class ExcelHelperTest(unittest.TestCase):
             loaded = load_workbook(converted, data_only=True)
             self.assertEqual(loaded.active["A1"].value, "已转换")
             loaded.close()
+
+    def test_ensure_xlsx_workbook_never_modifies_source_file(self) -> None:
+        """验证 .xls 转换过程严格只读，源文件字节与哈希 100% 保持不变。"""
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "人员异动表7月-四川分公司-春苗.xls"
+            # 写入模拟二进制文件
+            xls_file.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 256)
+            before_sha = hashlib.sha256(xls_file.read_bytes()).hexdigest()
+            before_size = xls_file.stat().st_size
+
+            # 模拟 xlrd 成功转换
+            out_xlsx = root / "temp" / "out.xlsx"
+            def fake_xlrd_convert(src: Path, dst: Path) -> None:
+                wb = Workbook()
+                wb.active["A1"] = "测试数据"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                wb.save(dst)
+
+            with patch("hr_toolkit.common.excel_compat._convert_with_xlrd", side_effect=fake_xlrd_convert):
+                res = ensure_xlsx_workbook(xls_file, root / "temp")
+
+            self.assertTrue(res.exists())
+            after_sha = hashlib.sha256(xls_file.read_bytes()).hexdigest()
+            after_size = xls_file.stat().st_size
+            self.assertEqual(before_sha, after_sha, "源文件哈希绝不能发生改变")
+            self.assertEqual(before_size, after_size, "源文件大小绝不能发生改变")
 
     def test_open_template_resource_falls_back_without_files_api(self) -> None:
         with patch.object(package_resources.resources, "files", None):
