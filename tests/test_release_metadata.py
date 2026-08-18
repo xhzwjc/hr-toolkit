@@ -122,7 +122,7 @@ class ReleaseMetadataTests(unittest.TestCase):
                 windows["fallback_urls"],
                 [
                     "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/"
-                    "HRToolkit-0.2.1-win-update.zip"
+                    "HRToolkit_0.2.1_x64-setup.exe"
                 ],
             )
             self.assertEqual(

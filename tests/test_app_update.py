@@ -557,5 +557,68 @@ class AppUpdateTests(unittest.TestCase):
             self.assertTrue(data.startswith(b"(...earlier log trimmed...)\n"))
             self.assertTrue(data.endswith(b"line\n"))
 
+    def test_update_runner_runs_installer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            app_dir.mkdir()
+            (app_dir / "HRToolkit.exe").write_text("old", encoding="utf-8")
+
+            installer = tmp_dir / "HRToolkit_setup.exe"
+            installer.write_bytes(b"MZfake_setup")
+            log_file = tmp_dir / "HRToolkit_update.log"
+
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                exit_code = self._run_update_runner([
+                    "--installer",
+                    str(installer),
+                    "--app-dir",
+                    str(app_dir),
+                    "--launcher",
+                    "HRToolkit.exe",
+                    "--log-file",
+                    str(log_file),
+                ])
+
+                self.assertEqual(exit_code, 0)
+                mock_run.assert_called_once_with(
+                    [str(installer.resolve()), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                    check=False,
+                )
+                self.assertFalse(installer.exists())
+
+    def test_launch_update_replacement_with_exe_uses_installer_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            app_dir.mkdir()
+            updater_name = "HRToolkitUpdater.exe" if sys.platform.startswith("win") else "HRToolkitUpdater"
+            updater = app_dir / updater_name
+            updater.write_text("updater", encoding="utf-8")
+            installer = tmp_dir / "HRToolkit_0.3.5_x64-setup.exe"
+            installer.write_bytes(b"MZ")
+
+            captured: dict = {}
+
+            def fake_popen(args, **kwargs):  # type: ignore[no-untyped-def]
+                captured["args"] = args
+                captured["kwargs"] = kwargs
+                return object()
+
+            with patch("subprocess.Popen", side_effect=fake_popen):
+                launch_update_replacement(
+                    package_path=installer,
+                    app_dir=app_dir,
+                    launcher_path=app_dir / "HRToolkit.exe",
+                    wait_pid=1234,
+                )
+
+            args = captured["args"]
+            self.assertIn("--installer", args)
+            self.assertIn(str(installer), args)
+            self.assertNotIn("--zip", args)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from build_update_assets import LEGACY_MANIFEST_NAME, update_zip_name
+from build_update_assets import LEGACY_MANIFEST_NAME
 from build_windows import APP_NAME, UPDATER_NAME, validate_build_version
 from build_windows_installers import installer_asset_names
 from versioning import read_project_version
@@ -74,7 +74,6 @@ def main(argv: list[str] | None = None) -> int:
     expected = (
         args.output_dir.resolve() / exe_name,
         args.output_dir.resolve() / msi_name,
-        args.output_dir.resolve() / update_zip_name(version),
         args.output_dir.resolve() / LEGACY_MANIFEST_NAME,
     )
     missing = [path for path in expected if not path.is_file()]

@@ -316,9 +316,10 @@ def launch_update_replacement(
     if not sys.platform.startswith("win"):
         temp_updater.chmod(temp_updater.stat().st_mode | 0o111)
 
+    pkg_flag = "--installer" if package_path.suffix.lower() == ".exe" else "--zip"
     args = [
         str(temp_updater),
-        "--zip",
+        pkg_flag,
         str(package_path),
         "--app-dir",
         str(app_dir),
@@ -353,6 +354,8 @@ def find_updater_executable(app_dir: Path) -> Path:
 
 
 def _extract_package_updater(package_path: Path, temp_dir: Path) -> Path | None:
+    if package_path.suffix.lower() == ".exe":
+        return None
     names = ["HRToolkitUpdater.exe"] if sys.platform.startswith("win") else ["HRToolkitUpdater"]
     try:
         with zipfile.ZipFile(package_path) as archive:

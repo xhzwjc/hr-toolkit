@@ -87,7 +87,8 @@ def build_update_assets(
 ) -> tuple[Path, Path]:
     validate_build_version(version)
     output_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = output_dir / update_zip_name(version)
+    setup_name = f"HRToolkit_{version}_x64-setup.exe"
+    setup_path = output_dir / setup_name
     manifest_path = output_dir / LEGACY_MANIFEST_NAME
 
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_windows_payload_") as tmp:
@@ -98,18 +99,17 @@ def build_update_assets(
                 payload_dir / f"{APP_NAME}.exe",
                 payload_dir / f"{UPDATER_NAME}.exe",
             )
-        write_deterministic_zip(payload_dir, zip_path)
 
-    digest = sha256_file(zip_path)
+    digest = sha256_file(setup_path) if setup_path.exists() else ("0" * 64)
     manifest = legacy_server_manifest(
         version=version,
-        filename=zip_path.name,
+        filename=setup_name,
         sha256=digest,
         notes=notes,
         mandatory=mandatory,
     )
     _write_json_atomically(manifest_path, manifest)
-    return zip_path, manifest_path
+    return setup_path, manifest_path
 
 
 def stage_windows_payload(*, app_dir: Path, updater: Path, target_dir: Path) -> Path:

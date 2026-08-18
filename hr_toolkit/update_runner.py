@@ -26,7 +26,8 @@ StatusCallback = Callable[[str], None]
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="HR工具箱独立更新程序")
-    parser.add_argument("--zip", required=True, type=Path, help="更新包 zip 路径")
+    parser.add_argument("--zip", type=Path, help="更新包 zip 路径")
+    parser.add_argument("--installer", type=Path, help="安装包 EXE 路径")
     parser.add_argument("--app-dir", required=True, type=Path, help="当前程序目录")
     parser.add_argument("--launcher", required=True, help="主程序文件名")
     parser.add_argument("--wait-pid", type=int, help="需要等待退出的主程序 PID")
@@ -140,9 +141,11 @@ class _UpdaterUI:
         self._root.update_idletasks()
         width = self._root.winfo_reqwidth()
         height = self._root.winfo_reqheight()
-        x = max((self._root.winfo_screenwidth() - width) // 2, 0)
-        y = max((self._root.winfo_screenheight() - height) // 2, 0)
-        self._root.geometry(f"{width}x{height}+{x}+{y}")
+        screen_width = self._root.winfo_screenwidth()
+        screen_height = self._root.winfo_screenheight()
+        x = max(0, (screen_width - width) // 2)
+        y = max(0, (screen_height - height) // 2)
+        self._root.geometry(f"+{x}+{y}")
 
     def set_status(self, text: str) -> None:
         self._events.put(text)
@@ -157,26 +160,29 @@ class _UpdaterUI:
     def _poll(self) -> None:
         try:
             while True:
-                event = self._events.get_nowait()
-                if event is None:
-                    # 留给用户看清最后一条状态
-                    self._root.after(600, self._root.destroy)
+                item = self._events.get_nowait()
+                if item is None:
+                    self._root.destroy()
                     return
-                self._status_label.configure(text=event)
+                self._status_label.config(text=item)
         except queue.Empty:
             pass
         self._root.after(self._POLL_MS, self._poll)
 
 
 def _run_update(args: argparse.Namespace, log_file: Path, status: StatusCallback | None = None) -> None:
-    package_path = args.zip.resolve()
     app_dir = args.app_dir.resolve()
+    package_path = (args.installer or args.zip or Path("")).resolve()
     _append_log(log_file, f"系统平台：{sys.platform}")
     _append_log(log_file, f"更新程序：{Path(sys.argv[0]).resolve()}")
     _append_log(log_file, f"更新包路径：{package_path}")
     _append_log(log_file, f"程序目录：{app_dir}")
     _append_log(log_file, f"主程序文件：{args.launcher}")
     _switch_working_dir(app_dir.parent, log_file)
+
+    if not args.installer and not args.zip:
+        raise RuntimeError("必须指定 --installer 或 --zip 参数。")
+
     if args.wait_pid:
         _notify(status, "正在等待原程序退出…")
         _append_log(log_file, f"等待主程序退出，PID：{args.wait_pid}")
@@ -184,31 +190,49 @@ def _run_update(args: argparse.Namespace, log_file: Path, status: StatusCallback
         if sys.platform.startswith("win"):
             time.sleep(1)
         _append_log(log_file, "主程序已退出。")
+
     if not package_path.exists():
-        raise RuntimeError(f"更新包不存在：{package_path}")
-    if not app_dir.exists():
-        raise RuntimeError(f"程序目录不存在：{app_dir}")
+        raise RuntimeError(f"更新文件不存在：{package_path}")
 
-    _notify(status, "正在解压更新包…")
-    extract_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_extract_"))
-    _append_log(log_file, f"解压目录：{extract_dir}")
-    _safe_extract_zip(package_path, extract_dir, log_file)
-    payload_root = _find_payload_root(extract_dir, log_file)
-    _append_log(log_file, f"更新包根目录：{payload_root}")
-    _validate_payload_root(payload_root, args.launcher)
-    _append_log(log_file, "更新包校验通过。")
-    _notify(status, "正在替换程序文件，可能需要几十秒…")
-    _replace_app_dir(payload_root, app_dir, log_file)
+    if args.installer or package_path.suffix.lower() == ".exe":
+        _notify(status, "正在静默安装最新版本…")
+        _append_log(log_file, f"运行安装程序：{package_path}")
+        cmd = [str(package_path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+        result = subprocess.run(cmd, check=False)
+        _append_log(log_file, f"安装程序执行结束，退出码：{result.returncode}")
+        if result.returncode != 0:
+            raise RuntimeError(f"安装程序执行失败（退出码 {result.returncode}）")
+        try:
+            package_path.unlink(missing_ok=True)
+            _append_log(log_file, f"已清理安装包：{package_path}")
+        except OSError as exc:
+            _append_log(log_file, f"清理安装包失败（忽略）：{exc}")
+    else:
+        if not app_dir.exists():
+            raise RuntimeError(f"程序目录不存在：{app_dir}")
 
-    _notify(status, "正在清理临时文件…")
-    _cleanup_after_success(package_path, extract_dir, log_file)
+        _notify(status, "正在解压更新包…")
+        extract_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_extract_"))
+        _append_log(log_file, f"解压目录：{extract_dir}")
+        _safe_extract_zip(package_path, extract_dir, log_file)
+        payload_root = _find_payload_root(extract_dir, log_file)
+        _append_log(log_file, f"更新包根目录：{payload_root}")
+        _validate_payload_root(payload_root, args.launcher)
+        _append_log(log_file, "更新包校验通过。")
+        _notify(status, "正在替换程序文件，可能需要几十秒…")
+        _replace_app_dir(payload_root, app_dir, log_file)
+
+        _notify(status, "正在清理临时文件…")
+        _cleanup_after_success(package_path, extract_dir, log_file)
 
     if args.relaunch:
         launcher = app_dir / args.launcher
+        if not launcher.exists() and (app_dir / "app" / args.launcher).exists():
+            launcher = app_dir / "app" / args.launcher
         if launcher.exists():
             _notify(status, "安装完成，正在打开新版本…")
             _append_log(log_file, f"重新打开主程序：{launcher}")
-            subprocess.Popen([str(launcher)], cwd=str(app_dir.parent), close_fds=True)
+            subprocess.Popen([str(launcher)], cwd=str(launcher.parent), close_fds=True)
         else:
             _append_log(log_file, f"跳过重新打开，未找到主程序：{launcher}")
 

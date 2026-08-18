@@ -112,8 +112,7 @@ jobs:
         run: |
           $expected = @(
             "artifacts/windows/HRToolkit_${env:VERSION}_x64-setup.exe",
-            "artifacts/windows/HRToolkit_${env:VERSION}_x64.msi",
-            "artifacts/windows/HRToolkit-${env:VERSION}-win-update.zip"
+            "artifacts/windows/HRToolkit_${env:VERSION}_x64.msi"
           )
           foreach ($path in $expected) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -131,7 +130,6 @@ jobs:
           path: |
             artifacts/windows/HRToolkit_${{ env.VERSION }}_x64-setup.exe
             artifacts/windows/HRToolkit_${{ env.VERSION }}_x64.msi
-            artifacts/windows/HRToolkit-${{ env.VERSION }}-win-update.zip
           if-no-files-found: error
           retention-days: 30
 

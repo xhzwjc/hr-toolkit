@@ -198,7 +198,11 @@ class WindowsPackagingTests(unittest.TestCase):
             tmp_dir = Path(tmp)
             app_dir, updater = self._fake_app(tmp_dir)
             output_dir = tmp_dir / "release-assets"
-            zip_path, manifest_path = build_update_assets.build_update_assets(
+            setup_name = f"HRToolkit_{self.version}_x64-setup.exe"
+            fake_setup = output_dir / setup_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+            fake_setup.write_bytes(b"MZ" + b"\0" * 32)
+            setup_path, manifest_path = build_update_assets.build_update_assets(
                 version=self.version,
                 app_dir=app_dir,
                 updater=updater,
@@ -206,39 +210,11 @@ class WindowsPackagingTests(unittest.TestCase):
                 notes=["桥接 GitHub Release"],
                 runtime_smoke=False,
             )
-            first_digest = build_update_assets.sha256_file(zip_path)
-            build_update_assets.build_update_assets(
-                version=self.version,
-                app_dir=app_dir,
-                updater=updater,
-                output_dir=output_dir,
-                notes=["桥接 GitHub Release"],
-                runtime_smoke=False,
-            )
-            self.assertEqual(first_digest, build_update_assets.sha256_file(zip_path))
+            first_digest = build_update_assets.sha256_file(setup_path)
 
-            self.assertEqual(zip_path.name, f"HRToolkit-{self.version}-win-update.zip")
+            self.assertEqual(setup_path.name, f"HRToolkit_{self.version}_x64-setup.exe")
             self.assertEqual(manifest_path.name, "legacy-server-latest.json")
             self.assertFalse((output_dir / "latest.json").exists())
-            with zipfile.ZipFile(zip_path) as archive:
-                names = archive.namelist()
-                self.assertIn("HRToolkit.exe", names)
-                self.assertIn("HRToolkitUpdater.exe", names)
-                self.assertIn("update_url.txt", names)
-                self.assertTrue(all(info.date_time == build_update_assets.ZIP_EPOCH for info in archive.infolist()))
-                update_urls = tuple(
-                    line.strip()
-                    for line in archive.read("update_url.txt").decode("utf-8").splitlines()
-                    if line.strip()
-                )
-                self.assertEqual(update_urls, build_update_assets.UPDATE_MANIFEST_URLS)
-                xlsx_names = [name for name in names if name.lower().endswith(".xlsx")]
-                self.assertEqual(
-                    {Path(name).name for name in xlsx_names},
-                    {path.name for path in build_windows.release_template_files()},
-                )
-                self.assertTrue(all("hr_toolkit/templates/" in name for name in xlsx_names))
-                self.assertFalse(any("tests/" in name or "outputs/" in name or "附件" in name for name in names))
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["version"], self.version)
@@ -249,17 +225,17 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertEqual(
                 windows["file_url"],
                 "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/"
-                f"v{self.version}/{zip_path.name}",
+                f"v{self.version}/{setup_path.name}",
             )
             self.assertEqual(
                 windows["fallback_urls"],
                 [
                     "https://github.com/xhzwjc/hr-toolkit/releases/download/"
-                    f"v{self.version}/{zip_path.name}"
+                    f"v{self.version}/{setup_path.name}"
                 ],
             )
 
-            # staging/zip 生成不得污染纯 PyInstaller 输出目录。
+            # staging 生成不得污染纯 PyInstaller 输出目录。
             self.assertFalse((app_dir / "HRToolkitUpdater.exe").exists())
             self.assertFalse((app_dir / "update_url.txt").exists())
 

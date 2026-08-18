@@ -51,7 +51,6 @@ def release_asset_names(version: str, *, mac_variant: str) -> tuple[str, ...]:
     windows = (
         f"HRToolkit_{version}_x64-setup.exe",
         f"HRToolkit_{version}_x64.msi",
-        f"HRToolkit-{version}-win-update.zip",
     )
     if mac_variant == "universal2":
         mac = (f"HRToolkit_{version}_universal.dmg",)
@@ -153,13 +152,13 @@ def build_latest_manifest(
             label="备用下载基础地址",
             strip_trailing_slash=True,
         )
-    windows_zip = f"HRToolkit-{version}-win-update.zip"
+    windows_installer = f"HRToolkit_{version}_x64-setup.exe"
     platforms = {
         "windows": _asset_payload(
             assets_dir,
             tag,
             version,
-            windows_zip,
+            windows_installer,
             update_mode="auto",
             download_base_url=download_base_url,
             fallback_download_base_url=fallback_download_base_url,
