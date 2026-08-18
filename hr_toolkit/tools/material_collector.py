@@ -27,9 +27,9 @@ except Exception:  # pragma: no cover - 兼容性回退
     _BEIJING_TZ = timezone(timedelta(hours=8))
 
 
-def _beijing_now_iso() -> str:
-    """统一使用北京时间生成 ISO 字符串，确保缓存时间戳与项目其他工具一致。"""
-    return datetime.now(tz=_BEIJING_TZ).isoformat(timespec="seconds")
+def _beijing_now_str() -> str:
+    """统一使用北京时间生成标准格式时间字符串 YYYY-MM-DD HH:MM:SS。"""
+    return datetime.now(tz=_BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # OCR 引擎全局单例与线程安全锁
@@ -148,8 +148,8 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         return {
             "version": _OCR_CACHE_VERSION,
             "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_iso(),
-            "updated_at": _beijing_now_iso(),
+            "created_at": _beijing_now_str(),
+            "updated_at": _beijing_now_str(),
             "entries": {},
         }
 
@@ -159,8 +159,8 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         return {
             "version": _OCR_CACHE_VERSION,
             "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_iso(),
-            "updated_at": _beijing_now_iso(),
+            "created_at": _beijing_now_str(),
+            "updated_at": _beijing_now_str(),
             "entries": {},
         }
 
@@ -170,8 +170,8 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         return {
             "version": _OCR_CACHE_VERSION,
             "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_iso(),
-            "updated_at": _beijing_now_iso(),
+            "created_at": _beijing_now_str(),
+            "updated_at": _beijing_now_str(),
             "entries": {},
         }
 
@@ -179,8 +179,8 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         return {
             "version": _OCR_CACHE_VERSION,
             "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_iso(),
-            "updated_at": _beijing_now_iso(),
+            "created_at": _beijing_now_str(),
+            "updated_at": _beijing_now_str(),
             "entries": {},
         }
 
@@ -196,7 +196,7 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     """
     data["version"] = _OCR_CACHE_VERSION
     data["engine_signature"] = _get_engine_signature()
-    data["updated_at"] = _beijing_now_iso()
+    data["updated_at"] = _beijing_now_str()
     data.setdefault("created_at", data["updated_at"])
     data.setdefault("entries", {})
 
@@ -222,11 +222,24 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     return True
 
 
-def _trim_cache_by_age_and_size(data: dict[str, Any]) -> None:
-    """对缓存做 LRU + 体积治理：清理过期与超量条目。"""
+def _trim_cache_by_age_and_size(data: dict[str, Any], lib_path: Path | None = None) -> None:
+    """对缓存做 LRU + 体积治理：清理已删除文件、过期与超量条目。"""
     entries: dict[str, Any] = data.get("entries") or {}
     if not entries:
         return
+
+    # 0. 清理已在磁盘上被删除的文件条目
+    if lib_path is not None and lib_path.is_dir():
+        deleted_keys: list[str] = []
+        for key, entry in entries.items():
+            if isinstance(entry, dict) and "source_relpath" in entry:
+                try:
+                    if not (lib_path / entry["source_relpath"]).exists():
+                        deleted_keys.append(key)
+                except Exception:
+                    pass
+        for key in deleted_keys:
+            entries.pop(key, None)
 
     # 1. 清理超过 90 天未验证的条目
     now = datetime.now(tz=_BEIJING_TZ)
@@ -234,9 +247,13 @@ def _trim_cache_by_age_and_size(data: dict[str, Any]) -> None:
 
     def _parse_ts(ts: str) -> datetime:
         try:
-            return datetime.fromisoformat(ts)
+            return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_BEIJING_TZ)
         except (TypeError, ValueError):
-            return now
+            try:
+                d = datetime.fromisoformat(ts)
+                return d if d.tzinfo is not None else d.replace(tzinfo=_BEIJING_TZ)
+            except (TypeError, ValueError):
+                return now
 
     stale_keys: list[str] = []
     for key, entry in entries.items():
@@ -923,7 +940,7 @@ def _store_ocr_cache(
         "subtype": subtype,
         "extracted_name": extracted_name,
         "extracted_id_hash": _hash_id_card(extracted_id),
-        "verified_at": _beijing_now_iso(),
+        "verified_at": _beijing_now_str(),
     }
 
 
@@ -1245,6 +1262,10 @@ def collect_employee_materials(
         if emp_materials is None:
             _collect_all_from_folders(
                 emp, matched_folders, out_path, mode, matches, warnings, duplicate_folder_warning,
+                employee_key=employee_key,
+                ocr_cache=ocr_cache,
+                use_ocr_cache=use_ocr_cache,
+                cache_stats=cache_stats,
             )
         else:
             emp_missing = _collect_specific_materials(
@@ -1261,7 +1282,7 @@ def collect_employee_materials(
     # === OCR 缓存：跑完一轮后汇总写一次（而非每张图片即写）"""
     cache_write_ok = True
     if use_ocr_cache and ocr_cache is not None and cache_path is not None and ocr_cache.get("entries"):
-        _trim_cache_by_age_and_size(ocr_cache)
+        _trim_cache_by_age_and_size(ocr_cache, lib_path=lib_path)
         if not _save_ocr_cache(cache_path, ocr_cache):
             cache_write_ok = False
             warnings.append(
@@ -1348,6 +1369,11 @@ def _collect_all_from_folders(
     matches: list[MaterialFileMatch],
     warnings: list[str],
     duplicate_warning: str = "",
+    *,
+    employee_key: str = "",
+    ocr_cache: dict[str, Any] | None = None,
+    use_ocr_cache: bool = True,
+    cache_stats: dict[str, int] | None = None,
 ) -> None:
     """全部材料模式：将匹配到的文件夹整体拷贝到输出目录。"""
     clean_emp = safe_filename(emp.name)
@@ -1400,10 +1426,27 @@ def _collect_all_from_folders(
                     except ValueError:
                         rel_p = src.name
 
-                    # 尝试轻量分析图片是否有信息不匹配
+                    # 尝试轻量分析图片是否有信息不匹配（优先查缓存）
                     ocr_name, ocr_id = "", ""
+                    cache_hit = False
                     if src.suffix.lower() in IMAGE_EXTENSIONS:
-                        _, _, _, ocr_name, ocr_id = _classify_by_ocr(src)
+                        cached = None
+                        if use_ocr_cache and ocr_cache is not None:
+                            cached = _lookup_ocr_cache(ocr_cache, employee_key, rel_p, src)
+                        if cached is not None:
+                            _, _, _, ocr_name, _ = cached
+                            cache_hit = True
+                            if cache_stats is not None:
+                                cache_stats["hits"] += 1
+                        else:
+                            ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id = _classify_by_ocr(src)
+                            if cache_stats is not None:
+                                cache_stats["misses"] += 1
+                            if use_ocr_cache and ocr_cache is not None and ocr_mat:
+                                _store_ocr_cache(
+                                    ocr_cache, employee_key, rel_p, src,
+                                    ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id,
+                                )
                     mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id, duplicate_warning)
 
                     matches.append(MaterialFileMatch(
@@ -1417,6 +1460,7 @@ def _collect_all_from_folders(
                         extracted_person_name=ocr_name,
                         extracted_id_card=ocr_id,
                         mismatch_warning=mismatch,
+                        cache_hit=cache_hit,
                     ))
         except Exception as e:
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")

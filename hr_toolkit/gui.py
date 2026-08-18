@@ -2364,16 +2364,22 @@ class HRToolkitApp:
         self.material_options_frame = ttk.LabelFrame(form, text="资料检索与打包设置", padding=self._px(12), style="Rename.TLabelframe")
         self.material_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
 
-        # 第 0 行：直接输入目标人员（姓名 / 身份证号）
-        ttk.Label(self.material_options_frame, text="目标人员", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=self._px(4))
-        target_wrap = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
-        target_wrap.grid(row=0, column=1, columnspan=2, sticky="ew", padx=self._px(10), pady=self._px(4))
+        # ── 1. 目标人员输入行（全宽拉伸） ──
+        target_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        target_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(4)))
+
+        ttk.Label(target_row, text="目标人员", style="App.TLabel", width=8).pack(side=LEFT, anchor="center")
+
+        target_wrap = ttk.Frame(target_row, style="InputWrap.TFrame")
+        target_wrap.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), 0))
+
         self.material_target_entry = ttk.Entry(
             target_wrap,
             textvariable=self.material_target_input,
             style="App.TEntry",
         )
-        self.material_target_entry.pack(side=LEFT, fill=BOTH, expand=True)
+        self.material_target_entry.pack(side=LEFT, fill="x", expand=True)
+
         self.material_target_clear_btn = CodexButton(
             target_wrap,
             text="✕ 清空",
@@ -2382,49 +2388,70 @@ class HRToolkitApp:
             min_width=48,
             variant="link",
         )
-        self.material_target_clear_btn.pack(side=RIGHT, padx=self._pad(6, 0))
+        self.material_target_clear_btn.pack(side=RIGHT, padx=(self._px(8), 0))
 
+        # 目标人员提示语（简短精炼）
         self.material_input_hint = ttk.Label(
             self.material_options_frame,
-            text="可在此直接输入姓名或身份证（如“张三”，或多人“张三, 李四”），无需制作Excel；也可在下方选择 Excel 名单文件",
+            text="输入姓名或身份证（多人用逗号隔开，如“张三, 李四”）；留空则按名单表格处理",
             style="CardHint.TLabel",
         )
-        self.material_input_hint.grid(row=1, column=1, columnspan=2, sticky="w", padx=self._px(10), pady=(0, self._px(6)))
+        self.material_input_hint.pack(fill="x", padx=(self._px(76), 0), pady=(0, self._px(8)))
 
-        # 第 2 行：全部模式 + ZIP
+        # ── 2. 打包与检索设置行 ──
+        opts_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        opts_row.pack(fill="x", pady=(self._px(4), self._px(4)))
+
+        ttk.Label(opts_row, text="打包设置", style="App.TLabel", width=8).pack(side=LEFT, anchor="center")
+
+        opts_checks_frame = ttk.Frame(opts_row, style="InputWrap.TFrame")
+        opts_checks_frame.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), 0))
+
         self.material_collect_all_check = ttk.Checkbutton(
-            self.material_options_frame,
+            opts_checks_frame,
             text="全部（直接拷贝匹配到的人员整个文件夹）",
             variable=self.material_collect_all,
             command=self._on_material_collect_all_changed,
             style="App.TCheckbutton",
         )
-        self.material_collect_all_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=self._px(5))
+        self.material_collect_all_check.pack(side=LEFT, padx=(0, self._px(16)))
 
         self.material_zip_check = ttk.Checkbutton(
-            self.material_options_frame,
+            opts_checks_frame,
             text="生成 ZIP 压缩包",
             variable=self.material_create_zip,
             style="App.TCheckbutton",
         )
-        self.material_zip_check.grid(row=2, column=2, sticky="w", padx=self._px(12), pady=self._px(5))
+        self.material_zip_check.pack(side=LEFT, padx=(0, self._px(16)))
 
+        # OCR 缓存：精简文案并置于右侧不起眼位置
         self.material_use_ocr_cache_check = ttk.Checkbutton(
-            self.material_options_frame,
-            text="启用 OCR 识别缓存（秒级二次极速检索）",
+            opts_checks_frame,
+            text="启用缓存",
             variable=self.material_use_ocr_cache,
             style="App.TCheckbutton",
         )
-        self.material_use_ocr_cache_check.grid(row=2, column=3, columnspan=2, sticky="w", padx=self._px(12), pady=self._px(5))
+        self.material_use_ocr_cache_check.pack(side=RIGHT, padx=(0, self._px(4)))
 
-        # 第 3 行：提取材料（全部模式下隐藏）
-        self.material_types_header = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
-        self.material_types_header.grid(row=3, column=0, sticky="nw", pady=self._px(5))
+        # 全部模式提示语（简短精炼）
+        self.material_types_hint = ttk.Label(
+            self.material_options_frame,
+            text="取消勾选「全部」后可按需勾选材料类型（如身份证、劳动合同等）",
+            style="CardHint.TLabel",
+        )
+        self.material_types_hint.pack(fill="x", padx=(self._px(76), 0), pady=(0, self._px(6)))
 
-        self.material_types_label = ttk.Label(self.material_types_header, text="指定材料", style="App.TLabel")
+        # ── 3. 指定材料选择区（全部模式下折叠隐藏） ──
+        self.material_types_section = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        self.material_types_section.pack(fill="x", pady=(self._px(6), self._px(2)))
+
+        mat_header_row = ttk.Frame(self.material_types_section, style="InputWrap.TFrame")
+        mat_header_row.pack(side=LEFT, anchor="nw", padx=(0, self._px(8)))
+
+        self.material_types_label = ttk.Label(mat_header_row, text="指定材料", style="App.TLabel", width=8)
         self.material_types_label.pack(side=TOP, anchor="w")
 
-        mat_actions_frame = ttk.Frame(self.material_types_header, style="InputWrap.TFrame")
+        mat_actions_frame = ttk.Frame(mat_header_row, style="InputWrap.TFrame")
         mat_actions_frame.pack(side=TOP, anchor="w", pady=(self._px(4), 0))
 
         CodexButton(
@@ -2445,26 +2472,18 @@ class HRToolkitApp:
             variant="link",
         ).pack(side=LEFT)
 
-        self.mat_checks_frame = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
-        self.mat_checks_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=self._px(12), pady=self._px(5))
+        self.mat_checks_frame = ttk.Frame(self.material_types_section, style="InputWrap.TFrame")
+        self.mat_checks_frame.pack(side=LEFT, fill="x", expand=True)
 
         self._material_check_widgets: list = []
         for idx, (mat_name, var) in enumerate(self.material_types_selected.items()):
-            r = idx // 4
-            c = idx % 4
+            r = idx // 5
+            c = idx % 5
             cb = ttk.Checkbutton(self.mat_checks_frame, text=mat_name, variable=var, style="App.TCheckbutton")
-            cb.grid(row=r, column=c, sticky="w", padx=self._px(6), pady=self._px(4))
+            cb.grid(row=r, column=c, sticky="w", padx=self._px(8), pady=self._px(4))
             self._material_check_widgets.append(cb)
 
-        self.material_types_hint = ttk.Label(
-            self.material_options_frame,
-            text="取消勾选「全部」可按材料类型精确提取（如员工名单已指定每人材料，此处为兜底默认值）",
-            style="App.TLabel",
-        )
-
-        self.material_options_frame.columnconfigure(1, weight=1)
-
-        # 初始状态：全部模式默认开，隐藏材料选择
+        # 初始状态同步
         self._on_material_collect_all_changed()
 
         # ──────── 区块 1：统计日期范围 ────────
@@ -8081,18 +8100,14 @@ class HRToolkitApp:
 
     def _on_material_collect_all_changed(self) -> None:
         """全部模式切换：勾选时隐藏材料类型选择，取消时显示。"""
-        if not hasattr(self, "mat_checks_frame"):
+        if not hasattr(self, "material_types_section"):
             return
         if self.material_collect_all.get():
-            if hasattr(self, "material_types_header"):
-                self.material_types_header.grid_remove()
-            self.mat_checks_frame.grid_remove()
-            self.material_types_hint.grid(row=3, column=0, columnspan=3, sticky="w", pady=self._px(5))
+            self.material_types_section.pack_forget()
+            self.material_types_hint.pack(fill="x", padx=(self._px(76), 0), pady=(0, self._px(6)))
         else:
-            self.material_types_hint.grid_remove()
-            if hasattr(self, "material_types_header"):
-                self.material_types_header.grid(row=3, column=0, sticky="nw", pady=self._px(5))
-            self.mat_checks_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=self._px(12), pady=self._px(5))
+            self.material_types_hint.pack_forget()
+            self.material_types_section.pack(fill="x", pady=(self._px(6), self._px(2)))
 
     def _update_change_picker_buttons(self) -> None:
         """配置合并后的上传入口动作，以及第二行（花名册/汇总表）的选择链接。"""
