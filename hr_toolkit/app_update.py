@@ -18,8 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-import certifi
-
 
 GITEE_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
 GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
@@ -74,7 +72,14 @@ class UpdateInfo:
 def create_https_context() -> ssl.SSLContext:
     """Create a validating TLS context backed by the bundled Mozilla CA store."""
     try:
+        import certifi
+
         context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        try:
+            context = ssl.create_default_context()
+        except (OSError, ssl.SSLError) as exc:
+            raise UpdateError(f"无法加载 HTTPS 根证书：{exc}") from exc
     except (OSError, ssl.SSLError) as exc:
         raise UpdateError(f"无法加载 HTTPS 根证书：{exc}") from exc
     if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:

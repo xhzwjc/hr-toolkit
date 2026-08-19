@@ -5,10 +5,12 @@
   （HR 文件包含身份证号、工资等敏感数据，日志必须可以放心外发）。
 - 日志失败绝不能影响业务，所有写入都是尽力而为。
 - 与更新日志 HRToolkit_update.log 放在同一位置，方便一次性收集。
+- 支持纯文本与结构化 JSON (通过环境变量 HR_TOOLKIT_LOG_JSON=1 开启) 两种模式。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -18,12 +20,38 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from hr_toolkit.app_update import current_app_dir, trim_log_file
-
 RUN_LOG_FILE = "HRToolkit_app.log"
 RUN_LOG_ENV = "HR_TOOLKIT_APP_LOG"
+RUN_LOG_JSON_ENV = "HR_TOOLKIT_LOG_JSON"
+LOG_MAX_BYTES = 1024 * 1024
+LOG_KEEP_BYTES = 256 * 1024
 
 _write_lock = threading.Lock()
+
+
+def current_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path.cwd().resolve()
+
+
+def trim_log_file(log_file: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KEEP_BYTES) -> None:
+    """日志超限时只保留末尾内容，避免日志文件无限增长。"""
+    try:
+        if not log_file.exists() or log_file.stat().st_size <= max_bytes:
+            return
+        data = log_file.read_bytes()[-keep_bytes:]
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+        log_file.write_bytes(b"(...earlier log trimmed...)\n" + data)
+    except OSError:
+        pass
+
+
+def is_json_log_enabled() -> bool:
+    val = os.environ.get(RUN_LOG_JSON_ENV, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
 
 
 def run_log_path() -> Path:
@@ -47,6 +75,36 @@ def log_line(text: str) -> None:
                 handle.write(f"[{timestamp}] {text}\n")
     except Exception:
         pass
+
+
+def log_event(event_name: str, **kwargs: Any) -> None:
+    """记录结构化运行事件。"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sanitized_kwargs = {
+        key: describe_value(value) if isinstance(value, (Path, list, tuple)) else value
+        for key, value in kwargs.items()
+        if value is not None
+    }
+    if is_json_log_enabled():
+        record = {
+            "timestamp": timestamp,
+            "event": event_name,
+            **sanitized_kwargs,
+        }
+        try:
+            line = json.dumps(record, ensure_ascii=False, default=str)
+            path = run_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _write_lock:
+                trim_log_file(path)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+        except Exception:
+            pass
+    else:
+        parts = [f"{k}={v}" for k, v in sanitized_kwargs.items()]
+        body = f"[EVENT: {event_name}] " + "；".join(parts) if parts else f"[EVENT: {event_name}]"
+        log_line(body)
 
 
 def log_exception(context: str, exc: BaseException, tb: TracebackType | None = None) -> None:

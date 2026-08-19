@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -13,9 +14,11 @@ class RunLogTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.log_file = Path(self._tmp.name) / "app.log"
         os.environ[runlog.RUN_LOG_ENV] = str(self.log_file)
+        os.environ.pop(runlog.RUN_LOG_JSON_ENV, None)
 
     def tearDown(self) -> None:
         os.environ.pop(runlog.RUN_LOG_ENV, None)
+        os.environ.pop(runlog.RUN_LOG_JSON_ENV, None)
         self._tmp.cleanup()
 
     def test_log_line_writes_timestamped_entry(self) -> None:
@@ -62,6 +65,34 @@ class RunLogTests(unittest.TestCase):
     def test_log_failure_is_silent(self) -> None:
         os.environ[runlog.RUN_LOG_ENV] = "/nonexistent-root/no-way/app.log"
         runlog.log_line("不应抛出异常")  # 只要不抛异常即通过
+
+    def test_log_event_plain_and_json(self) -> None:
+        # Plain event
+        runlog.log_event("task_start", tool="salary_split", count=10)
+        content = self.log_file.read_text(encoding="utf-8")
+        self.assertIn("[EVENT: task_start]", content)
+        self.assertIn("tool=salary_split", content)
+        self.assertIn("count=10", content)
+
+        # JSON event with standard and non-standard JSON types (datetime, set, custom)
+        from datetime import datetime
+        os.environ[runlog.RUN_LOG_JSON_ENV] = "1"
+        now = datetime(2026, 8, 19, 10, 30, 0)
+        runlog.log_event(
+            "task_finish",
+            tool="salary_split",
+            status="success",
+            started_at=now,
+            tags={"tag1", "tag2"},
+        )
+        lines = self.log_file.read_text(encoding="utf-8").strip().splitlines()
+        last_line = lines[-1]
+        record = json.loads(last_line)
+        self.assertEqual(record["event"], "task_finish")
+        self.assertEqual(record["tool"], "salary_split")
+        self.assertEqual(record["status"], "success")
+        self.assertIn("2026-08-19", str(record["started_at"]))
+        self.assertIn("timestamp", record)
 
 
 if __name__ == "__main__":

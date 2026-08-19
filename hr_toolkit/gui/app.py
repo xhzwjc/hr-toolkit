@@ -15,8 +15,7 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, Y, Canvas, Frame, Label, Menu, PhotoImage, Toplevel, filedialog, messagebox, simpledialog
-from tkinter import Tk, StringVar, BooleanVar, Text, TkVersion
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, Y, Canvas, Menu, StringVar, BooleanVar, Text, Tk, TkVersion
 from tkinter import font as tkfont
 from tkinter import ttk
 
@@ -65,873 +64,149 @@ from hr_toolkit.tools.salary_merge import merge_monthly_salary
 from hr_toolkit.tools.salary_split import split_salary_by_company
 from hr_toolkit.tools.social_security import generate_social_security_reports
 
-
-RENAME_MODE_LABELS = {
-    "追加文字": MODE_APPEND,
-    "删除结尾文字": MODE_REMOVE,
-    "修改单人名称": MODE_REPLACE,
-}
-
-RENAME_FILE_TYPE_LABELS = {
-    "文件夹": FILE_TYPE_FOLDER,
-    "PDF": FILE_TYPE_PDF,
-    "图片（jpg/png/gif等）": FILE_TYPE_IMAGE,
-    "文档（doc/xls/ppt/txt等）": FILE_TYPE_DOCUMENT,
-    "全部": FILE_TYPE_ALL,
-}
-RENAME_FILE_TYPE_LABELS_REVERSE = {v: k for k, v in RENAME_FILE_TYPE_LABELS.items()}
-
-TOOL_NAV_ITEMS = (
-    ("social_security", "社保明细与汇总"),
-    ("insurance_ledger", "保险台账与预警"),
-    ("data_statistics", "考勤与周月报"),
-    ("salary_split", "工资表拆分"),
-    ("salary_merge", "多月工资合并"),
-    ("personnel_change_merge", "异动汇总"),
-    ("archive_import", "档案入库"),
-    ("material_collector", "员工资料打包"),
-    ("folder_rename", "资料文件夹改名"),
+from .constants import (
+    COLOR_BADGE_DIR_BG,
+    COLOR_BADGE_DIR_FG,
+    COLOR_BADGE_XLS_BG,
+    COLOR_BADGE_XLS_FG,
+    COLOR_BADGE_ZIP_BG,
+    COLOR_BADGE_ZIP_FG,
+    COLOR_BG,
+    COLOR_BORDER,
+    COLOR_BORDER_FAINT,
+    COLOR_DANGER,
+    COLOR_DISABLED,
+    COLOR_DROP_BG,
+    COLOR_DROP_BORDER,
+    COLOR_FAINT,
+    COLOR_LOG_BG,
+    COLOR_LOG_MUTED,
+    COLOR_LOG_TEXT,
+    COLOR_MUTED,
+    COLOR_NAV_HOVER,
+    COLOR_NAV_SELECTED,
+    COLOR_NAV_TEXT,
+    COLOR_NAV_TEXT_SELECTED,
+    COLOR_PRIMARY,
+    COLOR_PRIMARY_ACTIVE,
+    COLOR_PRIMARY_SOFT,
+    COLOR_SIDEBAR,
+    COLOR_SIDEBAR_BORDER,
+    COLOR_SUCCESS,
+    COLOR_SUCCESS_DOT,
+    COLOR_SURFACE,
+    COLOR_SURFACE_ALT,
+    COLOR_SURFACE_PRESSED,
+    COLOR_TEXT,
+    COLOR_WARNING,
+    COLOR_WARNING_DOT,
+    COLOR_WARNING_SOFT,
+    HISTORY_DATE_FILTER_ALL,
+    HISTORY_DATE_FILTERS,
+    HISTORY_PATH_ARGUMENTS,
+    HISTORY_PRIMARY_PATH_ARGUMENTS,
+    HISTORY_STATUS_LABELS,
+    HISTORY_SUPPORTING_PATH_ARGUMENTS,
+    HISTORY_TOOL_FILTER_ALL,
+    MULTI_INPUT_TOOLS,
+    NAV_GROUPS,
+    RENAME_FILE_TYPE_LABELS,
+    RENAME_FILE_TYPE_LABELS_REVERSE,
+    RENAME_MODE_LABELS,
+    TOOL_GROUP_LABELS,
+    TOOL_LOG_LABELS,
+    TOOL_NAV_ITEMS,
+    TOOL_NAV_LABELS,
+    UPDATE_DIALOG_BG,
+    UPDATE_DIALOG_ICON_BG,
+    UPDATE_DIALOG_MUTED,
+    UPDATE_DIALOG_NOTES_BG,
+    UPDATE_DIALOG_PRIMARY,
+    UPDATE_DIALOG_PRIMARY_ACTIVE,
+    UPDATE_DIALOG_SECONDARY,
+    UPDATE_DIALOG_SECONDARY_ACTIVE,
+    UPDATE_DIALOG_TEXT,
+    UPDATE_DIALOG_TRACK,
+    WORKSPACE_COLLAPSED_WIDTH,
+    WORKSPACE_DEFAULT_WIDTH,
+    WORKSPACE_DRAWER_BREAKPOINT,
+    WORKSPACE_DUMMY_TAG,
+    WORKSPACE_HIDDEN_NAMES,
+    WORKSPACE_HIDDEN_SUFFIXES,
+    WORKSPACE_MAX_WIDTH,
+    WORKSPACE_MIN_WIDTH,
+    WORKSPACE_SCOPE_ALL,
+    WORKSPACE_SCOPE_TOOL,
+    WORKSPACE_SEARCH_LIMIT,
+    WORKSPACE_TOOL_PATHS,
+    APP_DISPLAY_NAME,
+    APP_SUBTITLE,
 )
-TOOL_NAV_LABELS = dict(TOOL_NAV_ITEMS)
-# 运行日志沿用旧的简短名称，保证历史日志可以按同一关键字检索
-TOOL_LOG_LABELS = {
-    "social_security": "社保汇总",
-    "data_statistics": "数据统计",
-    "insurance_ledger": "保险台账",
-    "salary_split": "工资拆分",
-    "salary_merge": "工资合并",
-    "personnel_change_merge": "异动汇总",
-    "archive_import": "档案入库",
-    "material_collector": "资料打包",
-    "folder_rename": "文件夹改名",
-}
-NAV_GROUPS = (
-    ("社保与保险", ("social_security", "insurance_ledger")),
-    ("考勤与统计", ("data_statistics",)),
-    ("薪酬管理", ("salary_split", "salary_merge")),
-    ("人员与档案", ("personnel_change_merge", "archive_import", "material_collector", "folder_rename")),
+from .scaling import (
+    _clamp_ui_scale,
+    _configure_tk_font_scaling,
+    _detect_ui_scale,
+    _font_size,
+    _forced_ui_scale,
+    _indeterminate_progress_segment,
+    _scale_float,
+    _scale_px,
+    _widget_ui_scale,
+    _windows_dpi_for_root,
 )
-TOOL_GROUP_LABELS = {tool_id: group for group, tools in NAV_GROUPS for tool_id in tools}
-# 支持一次选择多个文件/压缩包/文件夹作为输入的工具
-MULTI_INPUT_TOOLS = {
-    "social_security",
-    "data_statistics",
-    "insurance_ledger",
-    "salary_merge",
-    "personnel_change_merge",
-    "archive_import",
-}
-HISTORY_STATUS_LABELS = {
-    "running": "处理中",
-    "success": "已完成",
-    "failed": "处理失败",
-    "stopped": "未完成",
-}
-HISTORY_TOOL_FILTER_ALL = "全部功能"
-HISTORY_DATE_FILTER_ALL = "全部时间"
-HISTORY_DATE_FILTERS = (HISTORY_DATE_FILTER_ALL, "今天", "最近7天", "最近30天", "今年")
-HISTORY_PRIMARY_PATH_ARGUMENTS = {"input_path", "input_dir", "summary_input", "summary_path"}
-HISTORY_SUPPORTING_PATH_ARGUMENTS = {
-    "roster_path",
-    "roster_source",
-    "report_staff_path",
-    "existing_summary_path",
-    "template_path",
-    "analysis_template_path",
-    "target_path",
-    "existing_archive_path",
-}
-HISTORY_PATH_ARGUMENTS = HISTORY_PRIMARY_PATH_ARGUMENTS | HISTORY_SUPPORTING_PATH_ARGUMENTS
-
-WORKSPACE_DEFAULT_WIDTH = 320
-WORKSPACE_MIN_WIDTH = 270
-WORKSPACE_MAX_WIDTH = 430
-WORKSPACE_COLLAPSED_WIDTH = 46
-WORKSPACE_DRAWER_BREAKPOINT = 980
-WORKSPACE_SEARCH_LIMIT = 500
-WORKSPACE_DUMMY_TAG = "__workspace_dummy__"
-WORKSPACE_SCOPE_ALL = "all"
-WORKSPACE_SCOPE_TOOL = "tool"
-WORKSPACE_TOOL_PATHS = {
-    "social_security": ("社保与保险", "社保明细与汇总"),
-    "insurance_ledger": ("社保与保险", "保险台账与预警"),
-    "data_statistics": ("考勤与统计", "考勤与周月报"),
-    "salary_split": ("薪酬管理", "工资表拆分"),
-    "salary_merge": ("薪酬管理", "多月工资合并"),
-    "personnel_change_merge": ("人员与档案", "异动汇总"),
-    "archive_import": ("人员与档案", "档案入库"),
-    "material_collector": ("人员与档案", "员工资料打包"),
-    "folder_rename": ("人员与档案", "资料文件夹改名"),
-}
-WORKSPACE_HIDDEN_NAMES = {
-    ".hrtoolkit",
-    ".DS_Store",
-    "Thumbs.db",
-    "desktop.ini",
-}
-WORKSPACE_HIDDEN_SUFFIXES = (".partial", ".tmp", ".temp", ".lock")
-
-# “从容舒适 · Notion / macOS 风”暖纸色系：暖纸底色、深青主色、
-# 白色卡片分区、时间线式日志（对应设计稿方案 1b）。
-COLOR_BG = "#F7F5F1"
-COLOR_SIDEBAR = "#F7F5F1"
-COLOR_SIDEBAR_BORDER = "#EBE9E4"
-COLOR_SURFACE = "#ffffff"
-COLOR_SURFACE_ALT = "#FAF9F6"
-COLOR_SURFACE_PRESSED = "#F2F0EA"
-COLOR_BORDER = "#ECEAE4"
-COLOR_BORDER_FAINT = "#F1EFE9"
-COLOR_TEXT = "#292825"
-COLOR_MUTED = "#78766E"
-COLOR_FAINT = "#98958C"
-COLOR_DISABLED = "#B3B0A6"
-COLOR_PRIMARY = "#17715B"
-COLOR_PRIMARY_ACTIVE = "#125E4B"
-COLOR_PRIMARY_SOFT = "#E4EFEA"
-COLOR_NAV_SELECTED = "#EBE8E1"
-COLOR_NAV_HOVER = "#F0EEE8"
-COLOR_NAV_TEXT = "#55534C"
-COLOR_NAV_TEXT_SELECTED = "#17715B"
-COLOR_SUCCESS = "#1F7A52"
-COLOR_SUCCESS_DOT = "#2E9E6B"
-COLOR_WARNING = "#A05E12"
-COLOR_WARNING_DOT = "#D9A441"
-COLOR_WARNING_SOFT = "#F8EBD2"
-COLOR_DANGER = "#B0352B"
-COLOR_LOG_BG = "#ffffff"
-COLOR_LOG_TEXT = "#292825"
-COLOR_LOG_MUTED = "#98958C"
-COLOR_DROP_BORDER = "#D8D5CB"
-COLOR_DROP_BG = "#FBFAF7"
-COLOR_BADGE_ZIP_BG = "#F6E8D4"
-COLOR_BADGE_ZIP_FG = "#A05E12"
-COLOR_BADGE_XLS_BG = "#DFEFE7"
-COLOR_BADGE_XLS_FG = "#1F7A52"
-COLOR_BADGE_DIR_BG = "#EBE8E1"
-COLOR_BADGE_DIR_FG = "#78766E"
-APP_DISPLAY_NAME = "HR Workbench"
-APP_SUBTITLE = "人员运营自动化"
-UPDATE_DIALOG_BG = COLOR_SURFACE
-UPDATE_DIALOG_TEXT = COLOR_TEXT
-UPDATE_DIALOG_MUTED = COLOR_MUTED
-UPDATE_DIALOG_TRACK = "#EFEDE7"
-UPDATE_DIALOG_PRIMARY = COLOR_PRIMARY
-UPDATE_DIALOG_PRIMARY_ACTIVE = COLOR_PRIMARY_ACTIVE
-UPDATE_DIALOG_SECONDARY = "#F2F0EA"
-UPDATE_DIALOG_SECONDARY_ACTIVE = "#EBE8E1"
-UPDATE_DIALOG_ICON_BG = COLOR_PRIMARY_SOFT
-UPDATE_DIALOG_NOTES_BG = "#FAF9F6"
-BASE_WINDOWS_DPI = 96
-TK_POINTS_PER_INCH = 72
-FORCE_UI_SCALE_ENV = "HR_TOOLKIT_FORCE_UI_SCALE"
-
-
-def _scale_px(value: int | float, scale: float) -> int:
-    if value == 0:
-        return 0
-    scaled = int(round(value * scale))
-    if value > 0:
-        return max(1, scaled)
-    return min(-1, scaled)
-
-
-def _scale_float(value: int | float, scale: float) -> float:
-    return float(value) * scale
-
-
-def _clamp_ui_scale(scale: float) -> float:
-    return max(1.0, min(scale, 3.0))
-
-
-def _indeterminate_progress_segment(
-    track_width: float,
-    sweep_head: float,
-    segment_width: float,
-) -> tuple[float, float] | None:
-    """Return the visible part of a left-to-right indeterminate sweep."""
-    if track_width <= 0 or segment_width <= 0:
-        return None
-    visible_start = max(0.0, sweep_head - segment_width)
-    visible_end = min(track_width, sweep_head)
-    if visible_end <= visible_start:
-        return None
-    return visible_start, visible_end
-
-
-def _forced_ui_scale() -> float | None:
-    raw_value = os.environ.get(FORCE_UI_SCALE_ENV, "").strip()
-    if not raw_value:
-        return None
-    try:
-        return _clamp_ui_scale(float(raw_value))
-    except ValueError:
-        return None
-
-
-def _windows_dpi_for_root(root: Tk) -> float | None:
-    if not sys.platform.startswith("win"):
-        return None
-    try:
-        import ctypes
-    except Exception:
-        return None
-
-    try:
-        hwnd = int(root.winfo_id())
-        get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
-        if get_dpi_for_window is not None and hwnd:
-            dpi = int(get_dpi_for_window(hwnd))
-            if dpi > 0:
-                return float(dpi)
-    except Exception:
-        pass
-
-    try:
-        get_dpi_for_system = getattr(ctypes.windll.user32, "GetDpiForSystem", None)
-        if get_dpi_for_system is not None:
-            dpi = int(get_dpi_for_system())
-            if dpi > 0:
-                return float(dpi)
-    except Exception:
-        pass
-
-    hdc = None
-    try:
-        hdc = ctypes.windll.user32.GetDC(None)
-        if hdc:
-            dpi = int(ctypes.windll.gdi32.GetDeviceCaps(hdc, 88))
-            if dpi > 0:
-                return float(dpi)
-    except Exception:
-        pass
-    finally:
-        if hdc:
-            try:
-                ctypes.windll.user32.ReleaseDC(None, hdc)
-            except Exception:
-                pass
-    return None
-
-
-def _detect_ui_scale(root: Tk) -> float:
-    forced = _forced_ui_scale()
-    if forced is not None:
-        return forced
-    if not sys.platform.startswith("win"):
-        return 1.0
-    dpi = _windows_dpi_for_root(root)
-    if dpi is None:
-        try:
-            dpi = float(root.winfo_fpixels("1i"))
-        except Exception:
-            dpi = BASE_WINDOWS_DPI
-    return _clamp_ui_scale(dpi / BASE_WINDOWS_DPI)
-
-
-def _configure_tk_font_scaling(root: Tk, ui_scale: float) -> None:
-    try:
-        root.tk.call("tk", "scaling", (BASE_WINDOWS_DPI * ui_scale) / TK_POINTS_PER_INCH)
-    except Exception:
-        pass
-
-
-def _font_size(size: int) -> int:
-    """把设计字号（Windows 96dpi 基准）换算成当前平台的 Tk 字号。
-
-    Tk 8.6 的 macOS aqua 后端把“点”直接按像素渲染，同样的数值只有
-    Windows 96dpi 基准的 3/4 大，因此需要放大 4/3。Tk 8.7 起已修复
-    这个历史行为，继续补偿会造成二次放大；Windows/Linux 原值返回。
-    """
-    if sys.platform == "darwin" and TkVersion < 8.7:
-        return max(1, round(size * 4 / 3))
-    return size
-
-
-def _default_workspace_project_name(today_value: date | None = None) -> str:
-    current = today_value or date.today()
-    return f"{current.year}年{current.month}月人事月度工作"
-
-
-def _workspace_project_name_error(value: str) -> str | None:
-    # 创建项目时以后端校验为最终标准，避免界面显示“可以创建”，提交后却因
-    # Windows 保留名、隐藏元数据目录或长度等规则再次失败。动态加载保留了
-    # 项目后端缺失时 GUI 仍可启动的既有边界。
-    try:
-        module = importlib.import_module("hr_toolkit.project_store")
-        validator = getattr(module, "validate_project_name", None)
-        validation_error = getattr(module, "ProjectStoreError", None)
-    except Exception:
-        validator = None
-        validation_error = None
-    if callable(validator) and isinstance(validation_error, type):
-        try:
-            validator(value)
-        except validation_error as exc:
-            return str(exc)
-        return None
-
-    # 后端模块不可用时，新建入口本身会被禁用；这里仍保留同规则兜底，保证
-    # 已打开的弹窗不会因模块异常而接受不安全名称。
-    project_name = str(value).strip()
-    if not project_name:
-        return "项目名称不能为空。"
-    if len(project_name) > 120:
-        return "项目名称不能超过 120 个字。"
-    if project_name in {".", ".."}:
-        return "项目名称不能使用英文句点。"
-    if project_name.endswith("."):
-        return "项目名称末尾不能使用句点。"
-    if any(ord(character) < 32 for character in project_name):
-        return "项目名称不能包含换行或控制字符。"
-    if any(character in '<>:"/\\|?*' for character in project_name):
-        return '项目名称不能包含 \\ / : * ? " < > |。'
-    if project_name.casefold() == ".hrtoolkit":
-        return "该名称是项目保留名称，请换一个名称。"
-    portable_base = project_name.split(".", 1)[0].casefold()
-    windows_reserved = {
-        "con",
-        "prn",
-        "aux",
-        "nul",
-        *(f"com{index}" for index in range(1, 10)),
-        *(f"lpt{index}" for index in range(1, 10)),
-    }
-    if portable_base in windows_reserved:
-        return "该名称是 Windows 系统保留名称，请换一个名称。"
-    return None
-
-
-def _workspace_project_creation_target(parent_value: str, name_value: str) -> tuple[Path | None, str | None]:
-    name_error = _workspace_project_name_error(name_value)
-    parent_text = str(parent_value).strip()
-    if not parent_text:
-        return None, name_error or "请选择保存位置。"
-
-    parent_dir = Path(parent_text).expanduser().absolute()
-    project_name = str(name_value).strip()
-    project_root = parent_dir / project_name if project_name else None
-    if name_error:
-        return project_root, name_error
-    try:
-        if not parent_dir.is_dir():
-            return project_root, "保存位置已不可用，请重新选择。"
-        if project_root is not None and project_root.exists():
-            if not project_root.is_dir():
-                return project_root, "同名位置已被文件占用，请修改项目名称。"
-            if next(project_root.iterdir(), None) is not None:
-                return project_root, "这里已有同名文件夹，请修改项目名称；如需继续以前的工作，请打开已有项目。"
-    except OSError:
-        return project_root, "暂时无法读取这个保存位置，请重新选择。"
-    return project_root, None
-
-
-def _workspace_project_create_error_message(exc: Exception) -> str:
-    if isinstance(exc, PermissionError):
-        return "没有权限在这里创建项目，请选择“文档”等本机文件夹。"
-    if isinstance(exc, FileNotFoundError):
-        return "保存位置已不可用，请重新选择。"
-    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
-        return "磁盘空间不足，无法创建项目。"
-    detail = str(exc).strip()
-    return detail or "暂时无法在这里创建项目，请检查磁盘连接或写入权限。"
-
-
-def _workspace_trash_period_label(value: str) -> str:
-    text = str(value or "").strip()
-    try:
-        year_text, month_text = text.split("-", 1)
-        year = int(year_text)
-        month = int(month_text)
-    except (TypeError, ValueError):
-        return text
-    if 1 <= month <= 12 and 1900 <= year <= 9999:
-        return f"{year}年{month}月"
-    return text
-
-
-def _workspace_trash_title(detail) -> str:
-    summary = getattr(detail, "summary", None)
-    period = _workspace_trash_period_label(getattr(summary, "business_period", ""))
-    description = str(getattr(summary, "business_description", "") or "").strip()
-    directory_name = str(getattr(summary, "directory_name", "") or "").strip()
-    return description or period or directory_name or "处理记录"
-
-
-def _workspace_trash_group_tool(detail, *, separator: str = " · ") -> str:
-    summary = getattr(detail, "summary", None)
-    group_name = str(getattr(summary, "group_name", "") or "").strip()
-    tool_name = str(getattr(summary, "tool_name", "") or "").strip()
-    return separator.join(value for value in (group_name, tool_name) if value) or "功能信息待确认"
-
-
-def _workspace_trash_restore_location(detail) -> str:
-    summary = getattr(detail, "summary", None)
-    group_name = str(getattr(summary, "group_name", "") or "").strip()
-    tool_name = str(getattr(summary, "tool_name", "") or "").strip()
-    # 旧项目若缺少分组或功能名称，只取原位置前两级作为兜底；批次目录通常
-    # 含机器时间戳，不能把它暴露给人事用户。
-    original_parts = [
-        part.strip()
-        for part in str(getattr(detail, "original_relative_path", "") or "").replace("\\", "/").split("/")
-        if part.strip()
-    ]
-    if not group_name and original_parts:
-        group_name = original_parts[0]
-    if not tool_name and len(original_parts) >= 2:
-        tool_name = original_parts[1]
-    return " / ".join(value for value in (group_name, tool_name) if value) or "原业务位置"
-
-
-def _workspace_trash_dialog_height(preferred: int, required: int, maximum: int) -> int:
-    preferred_height = max(1, int(preferred))
-    required_height = max(1, int(required))
-    maximum_height = max(1, int(maximum))
-    return min(max(preferred_height, required_height), maximum_height)
-
-
-def _workspace_trash_ignore_enter(_event=None) -> str:
-    return "break"
-
-
-def _workspace_trash_matches(detail, query: str) -> bool:
-    normalized = str(query or "").strip().casefold()
-    if not normalized:
-        return True
-    summary = getattr(detail, "summary", None)
-    values = (
-        getattr(summary, "business_period", ""),
-        getattr(summary, "business_description", ""),
-        getattr(summary, "group_name", ""),
-        getattr(summary, "tool_name", ""),
-        getattr(summary, "directory_name", ""),
-        getattr(detail, "original_relative_path", ""),
-        _workspace_trash_title(detail),
-        _workspace_trash_group_tool(detail),
-    )
-    return any(normalized in str(value or "").casefold() for value in values)
-
-
-def _workspace_trash_deleted_text(value: str | None) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return "移入时间未知"
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return raw
-
-
-def _widget_ui_scale(widget) -> float:
-    try:
-        return float(getattr(widget.winfo_toplevel(), "_hr_ui_scale", 1.0))
-    except Exception:
-        return 1.0
-
-
-class CodexButton(Canvas):
-    def __init__(
-        self,
-        master,
-        *,
-        text: str = "",
-        command=None,
-        textvariable: StringVar | None = None,
-        icon: str = "",
-        variant: str = "secondary",
-        width: int | None = None,
-        height: int = 34,
-        min_width: int = 92,
-    ) -> None:
-        self._scale = _widget_ui_scale(master)
-        self._text = text
-        self._command = command
-        self._textvariable = textvariable
-        self._icon = icon
-        self._variant = variant
-        self._state = "normal"
-        self._hover = False
-        self._height = self._px(height)
-        self._min_width = self._px(min_width)
-        self._variable_trace: str | None = None
-        display_text = self._display_text()
-        initial_width = self._px(width) if width is not None else self._measure_width(display_text, icon, self._min_width)
-        self._canvas_bg = self._resolve_parent_bg(master)
-        super().__init__(
-            master,
-            width=initial_width,
-            height=self._height,
-            bg=self._canvas_bg,
-            highlightthickness=0,
-            bd=0,
-            cursor="hand2",
-        )
-        if textvariable is not None:
-            self._variable_trace = textvariable.trace_add("write", lambda *_args: self._redraw())
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", self._on_click)
-        self.bind("<Configure>", lambda _event: self._redraw())
-        self._redraw()
-
-    def configure(self, cnf=None, **kwargs):  # type: ignore[override]
-        if cnf:
-            kwargs.update(cnf)
-        if "text" in kwargs:
-            self._text = kwargs.pop("text")
-        if "command" in kwargs:
-            self._command = kwargs.pop("command")
-        if "state" in kwargs:
-            self._state = kwargs.pop("state")
-            super().configure(cursor="" if self._state == "disabled" else "hand2")
-        if "textvariable" in kwargs:
-            self._textvariable = kwargs.pop("textvariable")
-        if "icon" in kwargs:
-            self._icon = kwargs.pop("icon")
-        if "variant" in kwargs:
-            self._variant = kwargs.pop("variant")
-        if kwargs:
-            super().configure(**kwargs)
-        self._redraw()
-
-    config = configure
-
-    @staticmethod
-    def _resolve_parent_bg(master) -> str:
-        try:
-            background = master.cget("background")
-            if background:
-                return background
-        except Exception:
-            pass
-        try:
-            style_name = master.cget("style")
-            if style_name:
-                background = ttk.Style(master).lookup(style_name, "background")
-                if background:
-                    return background
-        except Exception:
-            pass
-        return COLOR_BG
-
-    def _px(self, value: int | float) -> int:
-        return _scale_px(value, self._scale)
-
-    def _pxf(self, value: int | float) -> float:
-        return _scale_float(value, self._scale)
-
-    def _display_text(self) -> str:
-        if self._textvariable is not None:
-            return self._textvariable.get()
-        return self._text
-
-    def _measure_width(self, text: str, icon: str, min_width: int) -> int:
-        text_units = sum(2 if ord(char) > 127 else 1 for char in text)
-        width = self._px(28) + text_units * self._px(7)
-        if icon:
-            width += self._px(20)
-        return max(min_width, width)
-
-    def _palette(self) -> tuple[str, str, str, str]:
-        if self._state == "disabled":
-            return COLOR_SURFACE_PRESSED, COLOR_SURFACE_PRESSED, COLOR_DISABLED, COLOR_BORDER
-        if self._variant == "primary":
-            return COLOR_PRIMARY, COLOR_PRIMARY_ACTIVE, "#ffffff", COLOR_PRIMARY
-        if self._variant == "tonal":
-            return COLOR_SURFACE_PRESSED, COLOR_NAV_SELECTED, COLOR_NAV_TEXT, COLOR_SURFACE_PRESSED
-        return COLOR_SURFACE, COLOR_SURFACE_ALT, COLOR_NAV_TEXT, COLOR_BORDER
-
-    def _on_enter(self, _event=None) -> None:
-        self._hover = True
-        self._redraw()
-
-    def _on_leave(self, _event=None) -> None:
-        self._hover = False
-        self._redraw()
-
-    def _on_click(self, _event=None) -> None:
-        if self._state == "disabled" or self._command is None:
-            return
-        self._command()
-
-    def _redraw(self) -> None:
-        self.delete("all")
-        width = max(self.winfo_width(), int(float(self.cget("width"))))
-        height = max(self.winfo_height(), self._height)
-        text = self._display_text()
-        family = self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
-        if self._variant == "link":
-            # 文字链接样式：无底色无边框，仅深青文字，悬停加深
-            if self._state == "disabled":
-                foreground = COLOR_DISABLED
-            else:
-                foreground = COLOR_PRIMARY_ACTIVE if self._hover else COLOR_PRIMARY
-            font = (family, _font_size(10))
-            content = f"{self._icon} {text}".strip() if self._icon else text
-            self.create_text(width / 2, height / 2, text=content, fill=foreground, font=font)
-            return
-        normal, active, foreground, border = self._palette()
-        fill = active if self._hover and self._state != "disabled" else normal
-        inset = self._pxf(1)
-        self._draw_round_rect(inset, inset, width - inset, height - inset, self._pxf(9), fill=fill, outline=border, width=self._pxf(1))
-        font = (family, _font_size(10), "bold") if self._variant == "primary" else (family, _font_size(10))
-        if self._icon:
-            content_width = self._measure_width(text, self._icon, 0) - self._px(28)
-            start_x = max((width - content_width) / 2, self._pxf(12))
-            self.create_text(start_x + self._pxf(7), height / 2, text=self._icon, fill=foreground, font=font, anchor="center")
-            self.create_text(start_x + self._pxf(22), height / 2, text=text, fill=foreground, font=font, anchor="w")
-        else:
-            self.create_text(width / 2, height / 2, text=text, fill=foreground, font=font)
-
-    def _draw_round_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
-        radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
-        self.create_polygon(
-            x1 + radius,
-            y1,
-            x2 - radius,
-            y1,
-            x2,
-            y1,
-            x2,
-            y1 + radius,
-            x2,
-            y2 - radius,
-            x2,
-            y2,
-            x2 - radius,
-            y2,
-            x1 + radius,
-            y2,
-            x1,
-            y2,
-            x1,
-            y2 - radius,
-            x1,
-            y1 + radius,
-            x1,
-            y1,
-            smooth=True,
-            splinesteps=16,
-            **kwargs,
-        )
-
-
-def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: float, size: float, line_width: float) -> None:
-    """在 size×size 的方框内绘制工具线性图标（坐标按设计稿 14×14 视图换算）。"""
-
-    def px(value: float) -> float:
-        return x + value * size / 14.0
-
-    def py(value: float) -> float:
-        return y + value * size / 14.0
-
-    line = {"fill": color, "width": line_width, "capstyle": "round", "joinstyle": "round"}
-    if icon_id == "social_security":
-        canvas.create_rectangle(px(2.5), py(1.5), px(11.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(5), py(5), px(9), py(5), **line)
-        canvas.create_line(px(5), py(8), px(9), py(8), **line)
-    elif icon_id == "insurance_ledger":
-        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(4.6), py(7), px(6.3), py(8.7), px(9.6), py(5.4), **line)
-    elif icon_id == "data_statistics":
-        canvas.create_line(px(2.5), py(12), px(2.5), py(7), **line)
-        canvas.create_line(px(7), py(12), px(7), py(2.5), **line)
-        canvas.create_line(px(11.5), py(12), px(11.5), py(5), **line)
-    elif icon_id == "salary_split":
-        canvas.create_line(px(7), py(2), px(7), py(6), **line)
-        canvas.create_line(px(7), py(6), px(3), py(11), **line)
-        canvas.create_line(px(7), py(6), px(11), py(11), **line)
-    elif icon_id == "salary_merge":
-        canvas.create_line(px(3), py(3), px(7), py(8), **line)
-        canvas.create_line(px(11), py(3), px(7), py(8), **line)
-        canvas.create_line(px(7), py(8), px(7), py(12), **line)
-    elif icon_id == "personnel_change_merge":
-        canvas.create_line(px(2), py(4.5), px(10), py(4.5), **line)
-        canvas.create_line(px(8), py(2), px(10.5), py(4.5), px(8), py(7), **line)
-        canvas.create_line(px(12), py(9.5), px(4), py(9.5), **line)
-        canvas.create_line(px(6), py(7), px(3.5), py(9.5), px(6), py(12), **line)
-    elif icon_id == "archive_import":
-        canvas.create_rectangle(px(2), py(4.5), px(12), py(12), outline=color, width=line_width)
-        canvas.create_line(px(2), py(7), px(12), py(7), **line)
-        canvas.create_line(px(7), py(4.5), px(7), py(2.5), **line)
-    elif icon_id == "material_collector":
-        canvas.create_rectangle(px(2.5), py(3), px(11.5), py(11.5), outline=color, width=line_width)
-        canvas.create_line(px(2.5), py(6), px(11.5), py(6), **line)
-        canvas.create_line(px(7), py(6), px(7), py(11.5), **line)
-    elif icon_id == "folder_rename":
-        canvas.create_line(
-            px(2), py(10.5), px(2), py(4), px(3.5), py(2.5), px(6), py(2.5), px(7.2), py(4),
-            px(10.5), py(4), px(12), py(5.5), px(12), py(10.5), px(10.5), py(12), px(3.5), py(12), px(2), py(10.5),
-            **line,
-        )
-    elif icon_id == "tutorial":
-        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(7), py(6.5), px(7), py(10), **line)
-        canvas.create_line(px(7), py(4), px(7), py(4.45), **line)
-    elif icon_id == "clock":
-        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(7), py(4), px(7), py(7.2), px(9), py(8.6), **line)
-    else:
-        canvas.create_oval(px(3), py(3), px(11), py(11), outline=color, width=line_width)
-
-
-class SidebarItem(Canvas):
-    """侧边栏导航条目：圆角底 + 线性图标 + 文字（对应设计稿导航行）。"""
-
-    def __init__(
-        self,
-        master,
-        *,
-        text: str,
-        icon_id: str,
-        command=None,
-        height: int = 32,
-        muted: bool = False,
-    ) -> None:
-        self._scale = _widget_ui_scale(master)
-        self._text = text
-        self._icon_id = icon_id
-        self._command = command
-        self._muted = muted
-        self._selected = False
-        self._hover = False
-        super().__init__(
-            master,
-            height=_scale_px(height, self._scale),
-            bg=COLOR_SIDEBAR,
-            highlightthickness=0,
-            bd=0,
-            cursor="hand2",
-        )
-        self.bind("<Enter>", self._on_enter)
-        self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", self._on_click)
-        self.bind("<Configure>", lambda _event: self._redraw())
-        self._redraw()
-
-    def _px(self, value: int | float) -> int:
-        return _scale_px(value, self._scale)
-
-    def _pxf(self, value: int | float) -> float:
-        return _scale_float(value, self._scale)
-
-    def set_selected(self, selected: bool) -> None:
-        if self._selected != selected:
-            self._selected = selected
-            self._redraw()
-
-    def _on_enter(self, _event=None) -> None:
-        self._hover = True
-        self._redraw()
-
-    def _on_leave(self, _event=None) -> None:
-        self._hover = False
-        self._redraw()
-
-    def _on_click(self, _event=None) -> None:
-        if self._command is not None:
-            self._command()
-
-    def _redraw(self) -> None:
-        self.delete("all")
-        width = max(self.winfo_width(), 1)
-        height = max(self.winfo_height(), 1)
-        if self._selected:
-            fill = COLOR_NAV_SELECTED
-        elif self._hover:
-            fill = COLOR_NAV_HOVER
-        else:
-            fill = COLOR_SIDEBAR
-        if fill != COLOR_SIDEBAR:
-            radius = self._pxf(7)
-            CodexButton._draw_round_rect(self, 0, 0, width, height, radius, fill=fill, outline="")
-        if self._selected:
-            foreground = COLOR_NAV_TEXT_SELECTED
-        elif self._muted:
-            foreground = COLOR_MUTED
-        else:
-            foreground = COLOR_NAV_TEXT
-        icon_size = self._pxf(15)
-        icon_x = self._pxf(9)
-        icon_y = (height - icon_size) / 2
-        _paint_tool_icon(self, self._icon_id, foreground, icon_x, icon_y, icon_size, max(1.0, self._pxf(1.4)))
-        family = self.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
-        font = (family, _font_size(10), "bold") if self._selected else (family, _font_size(10))
-        self.create_text(icon_x + icon_size + self._pxf(9), height / 2, text=self._text, fill=foreground, font=font, anchor="w")
-
-
-class RoundedCard(Canvas):
-    """白色圆角卡片容器（设计稿 border-radius:14px 的卡片分区）。
-
-    Canvas 负责画圆角底和淡投影，内容放进 ``inner``（ttk.Frame）；
-    fill_height=False 时卡片高度跟随内容，True 时内容撑满分配到的高度。
-    """
-
-    def __init__(
-        self,
-        master,
-        *,
-        padding: tuple[int, int, int, int] = (20, 16, 20, 18),
-        radius: int = 14,
-        fill_height: bool = False,
-        min_height: int = 0,
-    ) -> None:
-        self._scale = _widget_ui_scale(master)
-        self._radius = _scale_float(radius, self._scale)
-        self._fill_height = fill_height
-        page_bg = CodexButton._resolve_parent_bg(master)
-        super().__init__(
-            master,
-            bg=page_bg,
-            highlightthickness=0,
-            bd=0,
-            height=_scale_px(min_height, self._scale) if min_height else 1,
-        )
-        self.inner = ttk.Frame(self, style="InputWrap.TFrame")
-        self._pads = (0, 0, 0, 0)
-        self._window = self.create_window(0, 0, window=self.inner, anchor="nw")
-        self._last_bg_size = (0, 0)
-        self.set_padding(padding, sync=False)
-        self.inner.bind("<Configure>", self._sync)
-        self.bind("<Configure>", self._sync)
-
-    def set_padding(self, padding: tuple[int, int, int, int], *, sync: bool = True) -> None:
-        # 内容窗口向内缩进，让方角的内容框始终落在圆角轮廓之内
-        self._pads = tuple(_scale_px(value, self._scale) for value in padding)
-        self.coords(self._window, self._pads[0], self._pads[1])
-        if sync:
-            self._sync()
-
-    def _sync(self, _event=None) -> None:
-        left, top, right, bottom = self._pads
-        width = max(self.winfo_width(), 1)
-        inner_width = max(width - left - right, 1)
-        if self._fill_height:
-            height = max(self.winfo_height(), 1)
-            self.itemconfigure(self._window, width=inner_width, height=max(height - top - bottom, 1))
-        else:
-            self.itemconfigure(self._window, width=inner_width)
-            height = self.inner.winfo_reqheight() + top + bottom
-            if int(float(self.cget("height"))) != height:
-                self.configure(height=height)
-        if (width, height) != self._last_bg_size:
-            self._last_bg_size = (width, height)
-            self._redraw_bg(width, height)
-
-    def _redraw_bg(self, width: int, height: int) -> None:
-        self.delete("card_bg")
-        offset = max(1.0, _scale_float(1.5, self._scale))
-        # 无边框卡片：底下垫一层淡色圆角模拟设计稿的轻投影
-        CodexButton._draw_round_rect(
-            self, offset, offset * 1.6, width - offset * 0.4, height, self._radius, fill="#ECE9E2", outline="", tags="card_bg"
-        )
-        CodexButton._draw_round_rect(
-            self, 0, 0, width - offset, height - offset, self._radius, fill=COLOR_SURFACE, outline="", tags="card_bg"
-        )
-        self.tag_lower("card_bg")
-
+from .widgets import (
+    CodexButton,
+    RoundedCard,
+    SidebarItem,
+    _paint_tool_icon,
+)
+from .helpers import (
+    _default_result_dir_name,
+    _default_workspace_project_name,
+    _enable_high_dpi_rendering,
+    _install_crash_logging,
+    _set_windows_app_identity,
+    _workspace_project_create_error_message,
+    _workspace_project_creation_target,
+    _workspace_project_name_error,
+    _workspace_trash_deleted_text,
+    _workspace_trash_dialog_height,
+    _workspace_trash_group_tool,
+    _workspace_trash_ignore_enter,
+    _workspace_trash_matches,
+    _workspace_trash_period_label,
+    _workspace_trash_restore_location,
+    _workspace_trash_title,
+    default_output_parent_dir,
+    desktop_dir,
+    make_result_output_dir,
+    open_path,
+)
+from .task_runner import TaskRunner, TaskToken
+
+
+class _DynamicProxy:
+    def __init__(self, name: str):
+        self._name = name
+
+    def __call__(self, *args, **kwargs):
+        target = getattr(sys.modules.get('hr_toolkit.gui') or sys.modules[__name__], self._name)
+        return target(*args, **kwargs)
+
+    def __getattr__(self, attr: str):
+        target = getattr(sys.modules.get('hr_toolkit.gui') or sys.modules[__name__], self._name)
+        return getattr(target, attr)
+
+Frame = _DynamicProxy('Frame')
+Label = _DynamicProxy('Label')
+PhotoImage = _DynamicProxy('PhotoImage')
+Toplevel = _DynamicProxy('Toplevel')
+filedialog = _DynamicProxy('filedialog')
+messagebox = _DynamicProxy('messagebox')
+simpledialog = _DynamicProxy('simpledialog')
+make_result_output_dir = _DynamicProxy('make_result_output_dir')
+runlog = _DynamicProxy('runlog')
+_default_result_dir_name = _DynamicProxy('_default_result_dir_name')
 
 class HRToolkitApp:
     def __init__(self, root: Tk) -> None:
@@ -10147,84 +9422,6 @@ class HRToolkitApp:
         self.log_text.delete("1.0", END)
 
 
-def _default_result_dir_name() -> str:
-    return "结果_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-
-
-def default_output_parent_dir(tool: str) -> Path:
-    if tool == "social_security":
-        folder_name = "社保汇总结果"
-    elif tool == "data_statistics":
-        folder_name = "数据统计结果"
-    elif tool == "insurance_ledger":
-        folder_name = "保险台账结果"
-    elif tool == "salary_merge":
-        folder_name = "工资合并结果"
-    elif tool == "personnel_change_merge":
-        folder_name = "异动表汇总结果"
-    elif tool == "archive_import":
-        folder_name = "档案处理结果"
-    else:
-        folder_name = "工资表拆分结果"
-    return desktop_dir() / folder_name
-
-
-def make_result_output_dir(parent_dir: Path) -> Path:
-    parent_dir = parent_dir.expanduser()
-    parent_dir.mkdir(parents=True, exist_ok=True)
-    base_name = _default_result_dir_name()
-    for index in range(1, 10_000):
-        name = base_name if index == 1 else f"{base_name}_{index}"
-        candidate = parent_dir / name
-        try:
-            candidate.mkdir(exist_ok=False)
-        except FileExistsError:
-            continue
-        return candidate
-    raise RuntimeError("同一保存位置的结果文件夹过多，请更换保存位置。")
-
-
-def desktop_dir() -> Path:
-    home = Path.home()
-    desktop = home / "Desktop"
-    if desktop.exists():
-        return desktop
-    return home / "桌面"
-
-
-def open_path(path: Path | str) -> None:
-    if sys.platform.startswith("win"):
-        os.startfile(str(path))  # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
-    else:
-        subprocess.Popen(["xdg-open", str(path)])
-
-
-def _enable_high_dpi_rendering() -> None:
-    if not sys.platform.startswith("win"):
-        return
-    try:
-        import ctypes
-    except Exception:
-        return
-
-    # Tk widgets are scaled once at startup; System-aware avoids runtime DPI
-    # changes that can leave fixed Canvas geometry out of sync.
-    try:
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-2)):
-            return
-    except Exception:
-        pass
-    try:
-        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:
-            return
-    except Exception:
-        pass
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
 
 
 def main() -> None:
@@ -10235,42 +9432,9 @@ def main() -> None:
     HRToolkitApp(root)
     root.mainloop()
 
-
-def _set_windows_app_identity() -> None:
-    """给进程声明独立的应用身份（AppUserModelID）。
-
-    Windows 任务栏按 AppUserModelID 归组图标：用 python.exe 直接运行时，
-    窗口会被归到“Python”名下，任务栏显示 python 的图标而不是 iconphoto
-    设置的应用图标。显式声明后，任务栏改用窗口自己的图标；对打包 exe
-    也顺带让固定到任务栏的身份保持稳定。"""
-    if not sys.platform.startswith("win"):
-        return
+def __getattr__(name: str):
+    import hr_toolkit.gui as _pkg
     try:
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HRWorkbench.HRToolkit")
-    except Exception:
-        pass
-
-
-def _install_crash_logging() -> None:
-    """把没被捕获的异常写进运行日志。
-
-    打包后的 --windowed 程序没有控制台，未捕获异常会无声消失，
-    这是 HR 电脑上"程序突然不见了"却查无线索的根源。"""
-    default_excepthook = sys.excepthook
-
-    def log_and_delegate(exc_type, exc_value, exc_tb):
-        runlog.log_exception("程序异常退出", exc_value, exc_tb)
-        default_excepthook(exc_type, exc_value, exc_tb)
-
-    sys.excepthook = log_and_delegate
-
-    default_thread_hook = threading.excepthook
-
-    def log_thread_exception(args) -> None:
-        if args.exc_value is not None:
-            runlog.log_exception(f"后台线程异常（{args.thread.name if args.thread else '未知'}）", args.exc_value, args.exc_traceback)
-        default_thread_hook(args)
-
-    threading.excepthook = log_thread_exception
+        return getattr(_pkg, name)
+    except AttributeError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
