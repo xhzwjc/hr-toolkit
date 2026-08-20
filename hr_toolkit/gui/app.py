@@ -224,6 +224,27 @@ class HRToolkitApp:
         self.root.geometry(f"{initial_width}x{initial_height}")
         self.root.minsize(min_width, min_height)
         self.root.configure(bg=COLOR_BG)
+        # Window starts hidden and fully transparent so the synchronous widget-creation
+        # storm (~70 Canvas widgets on Windows GDI) happens completely off-screen. The
+        # user only sees the final, fully-laid-out state when we deiconify and fade back in
+        # at the end of __init__.
+        self._was_withdrawn = False
+        try:
+            if self.root.state() == "withdrawn":
+                self._was_withdrawn = True
+            else:
+                self.root.withdraw()
+                self._was_withdrawn = True
+        except Exception:
+            pass
+
+        self._window_faded_out = False
+        if sys.platform.startswith("win") or sys.platform == "darwin":
+            try:
+                self.root.attributes("-alpha", 0.0)
+                self._window_faded_out = True
+            except Exception:
+                self._window_faded_out = False
 
         self.current_tool = "social_security"
         self.current_view = "tool"
@@ -445,6 +466,22 @@ class HRToolkitApp:
         self._poll_update_queue()
         self._poll_history_queue()
         self._poll_workspace_queue()
+        # Force one synchronous layout pass while the window is still
+        # invisible — every Canvas subclass needs at least one ``update``
+        # cycle to realize its backing GDI surface on Windows.
+        self.root.update_idletasks()
+        if self._window_faded_out:
+            try:
+                self.root.attributes("-alpha", 1.0)
+            except Exception:
+                pass
+            self._window_faded_out = False
+        if self._was_withdrawn:
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
+            self._was_withdrawn = False
         self.root.after_idle(self._restore_workspace_project)
         self.root.after(600, self._check_updates_on_startup)
         # 清理历史更新遗留的临时文件（下载包、解压目录），后台低优先执行
@@ -9496,6 +9533,7 @@ def main() -> None:
     _set_windows_app_identity()
     _enable_high_dpi_rendering()
     root = Tk()
+    root.withdraw()
     HRToolkitApp(root)
     root.mainloop()
 
