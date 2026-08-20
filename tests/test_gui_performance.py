@@ -12,12 +12,31 @@ from hr_toolkit.gui.widgets import CodexButton, RoundedCard, SidebarItem
 class GuiPerformanceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.root = tk.Tk()
-        cls.root.withdraw()
+        try:
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except Exception as exc:
+            raise unittest.SkipTest(f"GUI display not available: {exc}")
 
     @classmethod
     def tearDownClass(cls) -> None:
-        cls.root.destroy()
+        if hasattr(cls, "root") and cls.root:
+            try:
+                cls.root.destroy()
+            except Exception:
+                pass
+
+    def test_tessellate_round_rect_geometry(self) -> None:
+        from hr_toolkit.gui.widgets import _tessellate_round_rect
+
+        # Standard rounded rect points
+        pts = _tessellate_round_rect(0, 0, 100, 50, 10, segments_per_corner=4)
+        self.assertGreater(len(pts), 16)
+        self.assertEqual(len(pts) % 2, 0)
+
+        # Zero radius fallback
+        rect_pts = _tessellate_round_rect(0, 0, 100, 50, 0)
+        self.assertEqual(rect_pts, [0, 0, 100, 0, 100, 50, 0, 50])
 
     def test_codex_button_idempotent_redraw_and_item_reuse(self) -> None:
         btn = CodexButton(self.root, text="测试按钮", variant="primary")
