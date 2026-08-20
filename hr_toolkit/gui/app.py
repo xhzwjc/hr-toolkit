@@ -1304,28 +1304,33 @@ class HRToolkitApp:
                 height += _pack_vertical_padding_sum(pack_info.get("pady", 0))
             return height
 
+        self._last_canvas_window_size = (0, 0)
+        self._last_scroll_region = (0, 0, 0, 0)
+
         def _sync_right_canvas_window(_event=None):
             canvas_width = max(self._right_canvas.winfo_width(), 1)
             canvas_height = max(self._right_canvas.winfo_height(), 1)
             content_height = _right_frame_natural_height()
             window_height = max(content_height, canvas_height)
-            self._right_canvas.itemconfig(
-                self._right_canvas_window,
-                width=canvas_width,
-                height=window_height,
-            )
-            self._right_canvas.configure(
-                scrollregion=(0, 0, canvas_width, window_height)
-            )
+            if (canvas_width, window_height) != self._last_canvas_window_size:
+                self._last_canvas_window_size = (canvas_width, window_height)
+                self._right_canvas.itemconfig(
+                    self._right_canvas_window,
+                    width=canvas_width,
+                    height=window_height,
+                )
+            region = (0, 0, canvas_width, window_height)
+            if region != self._last_scroll_region:
+                self._last_scroll_region = region
+                self._right_canvas.configure(
+                    scrollregion=region
+                )
             if window_height <= canvas_height:
                 self._right_canvas.yview_moveto(0)
 
         def _run_right_canvas_sync():
             self._right_canvas_sync_pending = False
             _sync_right_canvas_window()
-            if self._right_canvas_sync_repeat > 0:
-                self._right_canvas_sync_repeat -= 1
-                _queue_right_canvas_sync()
 
         def _queue_right_canvas_sync() -> None:
             if self._right_canvas_sync_pending:
@@ -1334,7 +1339,6 @@ class HRToolkitApp:
             self.root.after_idle(_run_right_canvas_sync)
 
         def _schedule_right_canvas_sync(_event=None):
-            self._right_canvas_sync_repeat = max(self._right_canvas_sync_repeat, 2)
             _queue_right_canvas_sync()
 
         self._sync_right_canvas_window = _schedule_right_canvas_sync
@@ -1474,6 +1478,8 @@ class HRToolkitApp:
         )
         self.subtitle_label.pack(anchor="w", fill="x", pady=self._pad(8, 22))
 
+        self._last_text_wraps = None
+
         def _update_text_wraps(_event=None) -> None:
             title_row_width = title_row.winfo_width()
             if title_row_width <= 1:
@@ -1481,14 +1487,22 @@ class HRToolkitApp:
             actions_width = self._px(118)
             tight_header = title_row_width < self._px(480)
             if tight_header:
-                title_actions.grid_configure(row=2, column=0, columnspan=2, rowspan=1, sticky="w", pady=self._pad(12, 0))
                 title_wrap = title_row_width
             else:
-                title_actions.grid_configure(row=0, column=1, columnspan=1, rowspan=2, sticky="ne", pady=0)
                 title_wrap = title_row_width - actions_width - self._px(24)
 
             title_wrap = max(1, title_wrap)
             subtitle_wrap = max(1, title_row_width - self._px(8))
+            wraps_key = (tight_header, title_wrap, subtitle_wrap)
+            if wraps_key == self._last_text_wraps:
+                return
+            self._last_text_wraps = wraps_key
+
+            if tight_header:
+                title_actions.grid_configure(row=2, column=0, columnspan=2, rowspan=1, sticky="w", pady=self._pad(12, 0))
+            else:
+                title_actions.grid_configure(row=0, column=1, columnspan=1, rowspan=2, sticky="ne", pady=0)
+
             self.title_label.configure(wraplength=title_wrap)
             self.subtitle_label.configure(wraplength=subtitle_wrap)
 
@@ -1922,6 +1936,10 @@ class HRToolkitApp:
 
         def _refresh_picker_button_bar(button_bar) -> None:
             visible_buttons = [child for child in button_bar.winfo_children() if getattr(child, "_hr_picker_visible", False)]
+            state_key = (self._form_compact_layout, tuple(id(b) for b in visible_buttons))
+            if getattr(button_bar, "_last_button_bar_state", None) == state_key:
+                return
+            setattr(button_bar, "_last_button_bar_state", state_key)
             for child in button_bar.winfo_children():
                 child.pack_forget()
             if self._form_compact_layout:
@@ -1939,10 +1957,16 @@ class HRToolkitApp:
                 _refresh_picker_button_bar(parent)
                 return
             button.pack_forget()
+            _refresh_picker_button_bar(parent)
 
         def _layout_input_frame(row_data) -> None:
             entry = row_data["entry"]
             button_bar = row_data["button_bar"]
+            last_compact = row_data.get("_last_compact")
+            if last_compact == self._form_compact_layout:
+                _refresh_picker_button_bar(button_bar)
+                return
+            row_data["_last_compact"] = self._form_compact_layout
             entry.pack_forget()
             button_bar.pack_forget()
             if self._form_compact_layout:
@@ -1954,18 +1978,33 @@ class HRToolkitApp:
             button_bar.pack(side=RIGHT)
             _refresh_picker_button_bar(button_bar)
 
+        self._last_applied_form_layout_key = None
+
         def _apply_form_layout() -> None:
+            visible_keys = []
+            if self._summary_row_visible:
+                visible_keys.append("summary")
+            if self._output_row_visible:
+                visible_keys.append("output")
+
+            material_vis = getattr(self, "_material_row_visible", False)
+            layout_key = (
+                self._form_compact_layout,
+                tuple(visible_keys),
+                self._rename_row_visible,
+                material_vis,
+                self._stats_range_row_visible,
+            )
+            if self._last_applied_form_layout_key == layout_key:
+                return
+            self._last_applied_form_layout_key = layout_key
+
             form.columnconfigure(
                 0,
                 weight=1 if self._form_compact_layout else 0,
                 minsize=0 if self._form_compact_layout else self._px(116),
             )
             form.columnconfigure(1, weight=0 if self._form_compact_layout else 1)
-            visible_keys = []
-            if self._summary_row_visible:
-                visible_keys.append("summary")
-            if self._output_row_visible:
-                visible_keys.append("output")
 
             for key, row_data in self._form_rows.items():
                 label = row_data["label"]
@@ -2004,7 +2043,7 @@ class HRToolkitApp:
             else:
                 self.rename_options_frame.grid_remove()
 
-            if getattr(self, "_material_row_visible", False):
+            if material_vis:
                 material_row = len(visible_keys) * 2 if self._form_compact_layout else 3
                 self.material_options_frame.grid(row=material_row, column=0, columnspan=2, sticky="ew", pady=self._pad(10, 0))
             else:
@@ -2064,17 +2103,22 @@ class HRToolkitApp:
                 base_left, pad_top, base_right, pad_bottom = content_padding
                 extra = max(0, (canvas_width - base_left - base_right - self._px(820)) // 2)
                 content_padding = (base_left + extra, pad_top, base_right + extra, pad_bottom)
+            layout_changed = False
             if getattr(self, "_right_content_padding", None) != content_padding:
                 self._right_content_padding = content_padding
                 right_frame.configure(padding=content_padding)
+                layout_changed = True
             if getattr(self, "_form_padding", None) != form_padding:
                 self._form_padding = form_padding
                 self.form_card.set_padding(form_padding)
+                layout_changed = True
             canvas_width = self._right_canvas.winfo_width()
             compact = canvas_width > 1 and (canvas_width / max(self.ui_scale, 1.0)) < 700
             if compact != self._form_compact_layout:
                 self._form_compact_layout = compact
-            _apply_form_layout()
+                layout_changed = True
+            if layout_changed:
+                _apply_form_layout()
 
         self._apply_form_layout = _apply_form_layout
         self._update_form_responsive_layout = _update_form_responsive_layout
@@ -2086,11 +2130,12 @@ class HRToolkitApp:
         self.root.after_idle(_update_form_responsive_layout)
         self._update_change_tabs_visibility()
         self._update_change_picker_buttons()
-        self._update_summary_controls()
-        self._update_output_controls()
-        self._update_rename_controls()
-        self._update_material_controls()
-        self._update_stats_range_controls()
+        self._update_summary_controls(apply_layout=False)
+        self._update_output_controls(apply_layout=False)
+        self._update_rename_controls(apply_layout=False)
+        self._update_material_controls(apply_layout=False)
+        self._update_stats_range_controls(apply_layout=False)
+        _apply_form_layout()
 
         actions = ttk.Frame(right_frame, style="Content.TFrame")
         actions.pack(fill="x", pady=self._pad(16, 16))
@@ -6760,11 +6805,13 @@ class HRToolkitApp:
         if hasattr(self, "summary_label_widget"):
             self._update_change_tabs_visibility()
             self._update_change_picker_buttons()
-            self._update_summary_controls()
-            self._update_output_controls()
-            self._update_rename_controls()
-            self._update_material_controls()
-            self._update_stats_range_controls()
+            self._update_summary_controls(apply_layout=False)
+            self._update_output_controls(apply_layout=False)
+            self._update_rename_controls(apply_layout=False)
+            self._update_material_controls(apply_layout=False)
+            self._update_stats_range_controls(apply_layout=False)
+            if hasattr(self, "_apply_form_layout"):
+                self._apply_form_layout()
         self._refresh_last_run_status()
         if hasattr(self, "_sync_right_canvas_window"):
             self.root.after_idle(self._sync_right_canvas_window)
@@ -7016,11 +7063,16 @@ class HRToolkitApp:
         chip = Canvas(self.upload_body, height=self._px(44), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
         chip.pack(fill="x", pady=0 if last else self._pad(0, 8))
         name_font = (self.base_font[0], _font_size(10), "bold")
+        last_chip_size = (0, 0)
 
         def redraw(_event=None) -> None:
-            chip.delete("all")
+            nonlocal last_chip_size
             width = max(chip.winfo_width(), 1)
             height = max(chip.winfo_height(), 1)
+            if (width, height) == last_chip_size:
+                return
+            last_chip_size = (width, height)
+            chip.delete("all")
             CodexButton._draw_round_rect(
                 chip,
                 self._pxf(0.5),
@@ -7070,11 +7122,16 @@ class HRToolkitApp:
     def _render_upload_drop_zone(self) -> None:
         zone = Canvas(self.upload_body, height=self._px(118), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
         zone.pack(fill="x")
+        last_zone_size = (0, 0)
 
         def redraw(_event=None) -> None:
-            zone.delete("all")
+            nonlocal last_zone_size
             width = max(zone.winfo_width(), 1)
             height = max(zone.winfo_height(), 1)
+            if (width, height) == last_zone_size:
+                return
+            last_zone_size = (width, height)
+            zone.delete("all")
             x1, y1 = self._pxf(1), self._pxf(1)
             x2, y2 = width - self._pxf(1), height - self._pxf(1)
             radius = self._pxf(12)
@@ -7149,10 +7206,7 @@ class HRToolkitApp:
             measured = []
             for text, color, command in segments:
                 font = font_link if command else font_plain
-                item = zone.create_text(0, -100, text=text, font=font, anchor="w")
-                bbox = zone.bbox(item)
-                segment_width = (bbox[2] - bbox[0]) if bbox else 0
-                zone.delete(item)
+                segment_width = tkfont.Font(root=self.root, font=font).measure(text)
                 measured.append((text, color, command, font, segment_width))
                 total_width += segment_width
             cursor_x = center_x - total_width / 2
@@ -7418,14 +7472,14 @@ class HRToolkitApp:
             return
         self.change_tabs.pack_forget()
 
-    def _update_summary_controls(self) -> None:
+    def _update_summary_controls(self, apply_layout: bool = True) -> None:
         self._summary_row_visible = self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import", "material_collector"}
-        if hasattr(self, "_apply_form_layout"):
+        if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
-    def _update_material_controls(self) -> None:
+    def _update_material_controls(self, apply_layout: bool = True) -> None:
         self._material_row_visible = self.current_tool == "material_collector"
-        if hasattr(self, "_apply_form_layout"):
+        if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
     def _select_all_material_types(self) -> None:
@@ -7552,21 +7606,21 @@ class HRToolkitApp:
 
         self._refresh_upload_card()
 
-    def _update_output_controls(self) -> None:
+    def _update_output_controls(self, apply_layout: bool = True) -> None:
         self._output_row_visible = self.current_tool != "folder_rename"
-        if hasattr(self, "_apply_form_layout"):
+        if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
-    def _update_rename_controls(self) -> None:
+    def _update_rename_controls(self, apply_layout: bool = True) -> None:
         self._rename_row_visible = self.current_tool == "folder_rename"
-        if hasattr(self, "_apply_form_layout"):
+        if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
         if self._rename_row_visible:
             self._update_rename_mode_controls()
 
-    def _update_stats_range_controls(self) -> None:
+    def _update_stats_range_controls(self, apply_layout: bool = True) -> None:
         self._stats_range_row_visible = self.current_tool == "data_statistics"
-        if hasattr(self, "_apply_form_layout"):
+        if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
     def _fill_stats_week_range(self, preset: str) -> None:

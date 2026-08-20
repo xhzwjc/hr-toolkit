@@ -22,6 +22,36 @@ from .constants import (
 )
 from .scaling import _font_size, _scale_float, _scale_px, _widget_ui_scale
 
+_DEFAULT_FONT_FAMILY: str | None = None
+
+
+def _get_default_font_family(master) -> str:
+    global _DEFAULT_FONT_FAMILY
+    if _DEFAULT_FONT_FAMILY is None:
+        try:
+            _DEFAULT_FONT_FAMILY = master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
+        except Exception:
+            _DEFAULT_FONT_FAMILY = "Helvetica"
+    return _DEFAULT_FONT_FAMILY
+
+
+def _round_rect_points(x1: float, y1: float, x2: float, y2: float, radius: float) -> list[float]:
+    radius = max(0.0, min(radius, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+    return [
+        x1 + radius, y1,
+        x2 - radius, y1,
+        x2, y1,
+        x2, y1 + radius,
+        x2, y2 - radius,
+        x2, y2,
+        x2 - radius, y2,
+        x1 + radius, y2,
+        x1, y2,
+        x1, y2 - radius,
+        x1, y1 + radius,
+        x1, y1,
+    ]
+
 
 class CodexButton(Canvas):
     def __init__(
@@ -48,6 +78,10 @@ class CodexButton(Canvas):
         self._height = self._px(height)
         self._min_width = self._px(min_width)
         self._variable_trace: str | None = None
+        self._last_draw_key: tuple | None = None
+        self._poly_id: int | None = None
+        self._icon_item_id: int | None = None
+        self._text_id: int | None = None
         display_text = self._display_text()
         initial_width = self._px(width) if width is not None else self._measure_width(display_text, icon, self._min_width)
         self._canvas_bg = self._resolve_parent_bg(master)
@@ -65,8 +99,14 @@ class CodexButton(Canvas):
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_click)
-        self.bind("<Configure>", lambda _event: self._redraw())
+        self.bind("<Configure>", self._on_configure)
         self._redraw()
+
+    def _on_configure(self, _event=None) -> None:
+        w = max(self.winfo_width(), int(float(self.cget("width"))))
+        h = max(self.winfo_height(), self._height)
+        if self._last_draw_key is None or (w, h) != (self._last_draw_key[0], self._last_draw_key[1]):
+            self._redraw()
 
     def configure(self, cnf=None, **kwargs):  # type: ignore[override]
         if cnf:
@@ -149,11 +189,15 @@ class CodexButton(Canvas):
         self._command()
 
     def _redraw(self) -> None:
-        self.delete("all")
         width = max(self.winfo_width(), int(float(self.cget("width"))))
         height = max(self.winfo_height(), self._height)
         text = self._display_text()
-        family = self.master.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
+        key = (width, height, text, self._state, self._hover, self._variant, self._icon, self._canvas_bg)
+        if key == self._last_draw_key:
+            return
+        self._last_draw_key = key
+
+        family = _get_default_font_family(self)
         if self._variant == "link":
             if self._state == "disabled":
                 foreground = COLOR_DISABLED
@@ -161,52 +205,62 @@ class CodexButton(Canvas):
                 foreground = COLOR_PRIMARY_ACTIVE if self._hover else COLOR_PRIMARY
             font = (family, _font_size(10))
             content = f"{self._icon} {text}".strip() if self._icon else text
-            self.create_text(width / 2, height / 2, text=content, fill=foreground, font=font)
+            if self._poly_id is not None:
+                self.delete(self._poly_id)
+                self._poly_id = None
+            if self._icon_item_id is not None:
+                self.delete(self._icon_item_id)
+                self._icon_item_id = None
+            if self._text_id is None or not self.find_withtag(self._text_id):
+                self._text_id = self.create_text(width / 2, height / 2, text=content, fill=foreground, font=font, anchor="center")
+            else:
+                self.coords(self._text_id, width / 2, height / 2)
+                self.itemconfigure(self._text_id, text=content, fill=foreground, font=font, anchor="center")
             return
+
         normal, active, foreground, border = self._palette()
         fill = active if self._hover and self._state != "disabled" else normal
         inset = self._pxf(1)
-        self._draw_round_rect(inset, inset, width - inset, height - inset, self._pxf(9), fill=fill, outline=border, width=self._pxf(1))
+        poly_pts = _round_rect_points(inset, inset, width - inset, height - inset, self._pxf(9))
+
+        if self._poly_id is None or not self.find_withtag(self._poly_id):
+            self._poly_id = self.create_polygon(*poly_pts, smooth=True, splinesteps=16, fill=fill, outline=border, width=self._pxf(1))
+            self.tag_lower(self._poly_id)
+        else:
+            self.coords(self._poly_id, *poly_pts)
+            self.itemconfigure(self._poly_id, fill=fill, outline=border, width=self._pxf(1))
+
         font = (family, _font_size(10), "bold") if self._variant == "primary" else (family, _font_size(10))
         if self._icon:
             content_width = self._measure_width(text, self._icon, 0) - self._px(28)
             start_x = max((width - content_width) / 2, self._pxf(12))
-            self.create_text(start_x + self._pxf(7), height / 2, text=self._icon, fill=foreground, font=font, anchor="center")
-            self.create_text(start_x + self._pxf(22), height / 2, text=text, fill=foreground, font=font, anchor="w")
+            icon_x = start_x + self._pxf(7)
+            text_x = start_x + self._pxf(22)
+
+            if self._icon_item_id is None or not self.find_withtag(self._icon_item_id):
+                self._icon_item_id = self.create_text(icon_x, height / 2, text=self._icon, fill=foreground, font=font, anchor="center")
+            else:
+                self.coords(self._icon_item_id, icon_x, height / 2)
+                self.itemconfigure(self._icon_item_id, text=self._icon, fill=foreground, font=font, anchor="center")
+
+            if self._text_id is None or not self.find_withtag(self._text_id):
+                self._text_id = self.create_text(text_x, height / 2, text=text, fill=foreground, font=font, anchor="w")
+            else:
+                self.coords(self._text_id, text_x, height / 2)
+                self.itemconfigure(self._text_id, text=text, fill=foreground, font=font, anchor="w")
         else:
-            self.create_text(width / 2, height / 2, text=text, fill=foreground, font=font)
+            if self._icon_item_id is not None:
+                self.delete(self._icon_item_id)
+                self._icon_item_id = None
+            if self._text_id is None or not self.find_withtag(self._text_id):
+                self._text_id = self.create_text(width / 2, height / 2, text=text, fill=foreground, font=font, anchor="center")
+            else:
+                self.coords(self._text_id, width / 2, height / 2)
+                self.itemconfigure(self._text_id, text=text, fill=foreground, font=font, anchor="center")
 
     def _draw_round_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
-        radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
-        self.create_polygon(
-            x1 + radius,
-            y1,
-            x2 - radius,
-            y1,
-            x2,
-            y1,
-            x2,
-            y1 + radius,
-            x2,
-            y2 - radius,
-            x2,
-            y2,
-            x2 - radius,
-            y2,
-            x1 + radius,
-            y2,
-            x1,
-            y2,
-            x1,
-            y2 - radius,
-            x1,
-            y1 + radius,
-            x1,
-            y1,
-            smooth=True,
-            splinesteps=16,
-            **kwargs,
-        )
+        pts = _round_rect_points(x1, y1, x2, y2, radius)
+        self.create_polygon(*pts, smooth=True, splinesteps=16, **kwargs)
 
 
 def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: float, size: float, line_width: float) -> None:
@@ -288,6 +342,9 @@ class SidebarItem(Canvas):
         self._muted = muted
         self._selected = False
         self._hover = False
+        self._last_draw_key: tuple | None = None
+        self._bg_poly_id: int | None = None
+        self._text_item_id: int | None = None
         super().__init__(
             master,
             height=_scale_px(height, self._scale),
@@ -299,8 +356,14 @@ class SidebarItem(Canvas):
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_click)
-        self.bind("<Configure>", lambda _event: self._redraw())
+        self.bind("<Configure>", self._on_configure)
         self._redraw()
+
+    def _on_configure(self, _event=None) -> None:
+        w = max(self.winfo_width(), 1)
+        h = max(self.winfo_height(), 1)
+        if self._last_draw_key is None or (w, h) != (self._last_draw_key[0], self._last_draw_key[1]):
+            self._redraw()
 
     def _px(self, value: int | float) -> int:
         return _scale_px(value, self._scale)
@@ -326,9 +389,14 @@ class SidebarItem(Canvas):
             self._command()
 
     def _redraw(self) -> None:
-        self.delete("all")
         width = max(self.winfo_width(), 1)
         height = max(self.winfo_height(), 1)
+        key = (width, height, self._selected, self._hover, self._muted, self._text, self._icon_id)
+        if key == self._last_draw_key:
+            return
+        self._last_draw_key = key
+
+        self.delete("all")
         if self._selected:
             fill = COLOR_NAV_SELECTED
         elif self._hover:
@@ -337,7 +405,8 @@ class SidebarItem(Canvas):
             fill = COLOR_SIDEBAR
         if fill != COLOR_SIDEBAR:
             radius = self._pxf(7)
-            CodexButton._draw_round_rect(self, 0, 0, width, height, radius, fill=fill, outline="")
+            pts = _round_rect_points(0, 0, width, height, radius)
+            self.create_polygon(*pts, smooth=True, splinesteps=16, fill=fill, outline="")
         if self._selected:
             foreground = COLOR_NAV_TEXT_SELECTED
         elif self._muted:
@@ -348,7 +417,7 @@ class SidebarItem(Canvas):
         icon_x = self._pxf(9)
         icon_y = (height - icon_size) / 2
         _paint_tool_icon(self, self._icon_id, foreground, icon_x, icon_y, icon_size, max(1.0, self._pxf(1.4)))
-        family = self.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
+        family = _get_default_font_family(self)
         font = (family, _font_size(10), "bold") if self._selected else (family, _font_size(10))
         self.create_text(icon_x + icon_size + self._pxf(9), height / 2, text=self._text, fill=foreground, font=font, anchor="w")
 
@@ -380,6 +449,10 @@ class RoundedCard(Canvas):
         self._pads = (0, 0, 0, 0)
         self._window = self.create_window(0, 0, window=self.inner, anchor="nw")
         self._last_bg_size = (0, 0)
+        self._last_inner_size = (0, 0)
+        self._shadow_poly: int | None = None
+        self._card_poly: int | None = None
+        self._syncing = False
         self.set_padding(padding, sync=False)
         self.inner.bind("<Configure>", self._sync)
         self.bind("<Configure>", self._sync)
@@ -391,31 +464,52 @@ class RoundedCard(Canvas):
             self._sync()
 
     def _sync(self, _event=None) -> None:
-        left, top, right, bottom = self._pads
-        width = max(self.winfo_width(), 1)
-        inner_width = max(width - left - right, 1)
-        if self._fill_height:
-            height = max(self.winfo_height(), 1)
-            self.itemconfigure(self._window, width=inner_width, height=max(height - top - bottom, 1))
-        else:
-            self.itemconfigure(self._window, width=inner_width)
-            height = self.inner.winfo_reqheight() + top + bottom
-            if int(float(self.cget("height"))) != height:
-                self.configure(height=height)
-        if (width, height) != self._last_bg_size:
-            self._last_bg_size = (width, height)
-            self._redraw_bg(width, height)
+        if self._syncing:
+            return
+        self._syncing = True
+        try:
+            left, top, right, bottom = self._pads
+            width = max(self.winfo_width(), 1)
+            inner_width = max(width - left - right, 1)
+            if self._fill_height:
+                height = max(self.winfo_height(), 1)
+                inner_height = max(height - top - bottom, 1)
+                if (inner_width, inner_height) != self._last_inner_size:
+                    self._last_inner_size = (inner_width, inner_height)
+                    self.itemconfigure(self._window, width=inner_width, height=inner_height)
+            else:
+                if inner_width != self._last_inner_size[0]:
+                    self._last_inner_size = (inner_width, 0)
+                    self.itemconfigure(self._window, width=inner_width)
+                height = max(self.inner.winfo_reqheight() + top + bottom, 1)
+                try:
+                    curr_h = int(float(self.cget("height")))
+                except Exception:
+                    curr_h = 0
+                if curr_h != height:
+                    self.configure(height=height)
+            if (width, height) != self._last_bg_size:
+                self._last_bg_size = (width, height)
+                self._redraw_bg(width, height)
+        finally:
+            self._syncing = False
 
     def _redraw_bg(self, width: int, height: int) -> None:
-        self.delete("card_bg")
         offset = max(1.0, _scale_float(1.5, self._scale))
-        CodexButton._draw_round_rect(
-            self, offset, offset * 1.6, width - offset * 0.4, height, self._radius, fill="#ECE9E2", outline="", tags="card_bg"
-        )
-        CodexButton._draw_round_rect(
-            self, 0, 0, width - offset, height - offset, self._radius, fill=COLOR_SURFACE, outline="", tags="card_bg"
-        )
-        self.tag_lower("card_bg")
+        shadow_pts = _round_rect_points(offset, offset * 1.6, width - offset * 0.4, height, self._radius)
+        card_pts = _round_rect_points(0, 0, width - offset, height - offset, self._radius)
+
+        if self._shadow_poly is None or not self.find_withtag(self._shadow_poly):
+            self._shadow_poly = self.create_polygon(
+                *shadow_pts, smooth=True, splinesteps=16, fill="#ECE9E2", outline="", tags="card_bg"
+            )
+            self._card_poly = self.create_polygon(
+                *card_pts, smooth=True, splinesteps=16, fill=COLOR_SURFACE, outline="", tags="card_bg"
+            )
+            self.tag_lower("card_bg")
+        else:
+            self.coords(self._shadow_poly, *shadow_pts)
+            self.coords(self._card_poly, *card_pts)
 
 
 __all__ = [
