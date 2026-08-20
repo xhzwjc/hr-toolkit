@@ -26,6 +26,14 @@ class GuiPerformanceTests(unittest.TestCase):
             except Exception:
                 pass
 
+    def tearDown(self) -> None:
+        if hasattr(self, "root") and self.root:
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
     def test_tessellate_round_rect_geometry(self) -> None:
         from hr_toolkit.gui.widgets import _tessellate_round_rect
 
@@ -90,45 +98,59 @@ class GuiPerformanceTests(unittest.TestCase):
         card.destroy()
 
     def test_tool_switching_layout_stability_and_redraw_counts(self) -> None:
-        app = HRToolkitApp(self.root)
-        self.root.update()
-
-        tools = [
-            "social_security",
-            "insurance_ledger",
-            "data_statistics",
-            "salary_split",
-            "salary_merge",
-            "personnel_change_merge",
-            "archive_import",
-            "material_collector",
-            "folder_rename",
-        ]
-
-        for tool in tools:
-            app._select_tool(tool)
-            self.root.update()
-            self.assertEqual(app.current_tool, tool)
-
-        # Switching to same tool is immediate no-op
-        prev_tool = app.current_tool
-        app._select_tool(prev_tool)
-        self.root.update()
-        self.assertEqual(app.current_tool, prev_tool)
-
-    def test_right_canvas_scrolling_does_not_mutate_items(self) -> None:
-        app = HRToolkitApp(self.root)
-        self.root.update()
-
-        canvas = app._right_canvas
-        initial_items = len(canvas.find_all())
-
-        # Perform multiple scrolling operations
-        for delta in [1, -1, 2, -2, 1, -1]:
-            canvas.yview_scroll(delta, "units")
+        try:
+            app = HRToolkitApp(self.root)
             self.root.update_idletasks()
 
-        self.assertEqual(len(canvas.find_all()), initial_items)
+            tools = [
+                "social_security",
+                "insurance_ledger",
+                "data_statistics",
+                "salary_split",
+                "salary_merge",
+                "personnel_change_merge",
+                "archive_import",
+                "material_collector",
+                "folder_rename",
+            ]
+
+            for tool in tools:
+                app._select_tool(tool)
+                self.root.update_idletasks()
+                self.assertEqual(app.current_tool, tool)
+
+            # Switching to same tool is immediate no-op
+            prev_tool = app.current_tool
+            app._select_tool(prev_tool)
+            self.root.update_idletasks()
+            self.assertEqual(app.current_tool, prev_tool)
+        finally:
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    def test_right_canvas_scrolling_does_not_mutate_items(self) -> None:
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.update_idletasks()
+
+            canvas = app._right_canvas
+            initial_items = len(canvas.find_all())
+
+            # Perform multiple scrolling operations
+            for delta in [1, -1, 2, -2, 1, -1]:
+                canvas.yview_scroll(delta, "units")
+                self.root.update_idletasks()
+
+            self.assertEqual(len(canvas.find_all()), initial_items)
+        finally:
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
