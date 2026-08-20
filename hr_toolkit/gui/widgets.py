@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from tkinter import Canvas, StringVar, ttk
 
 from .constants import (
@@ -35,22 +37,60 @@ def _get_default_font_family(master) -> str:
     return _DEFAULT_FONT_FAMILY
 
 
-def _round_rect_points(x1: float, y1: float, x2: float, y2: float, radius: float) -> list[float]:
+def _tessellate_round_rect(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    radius: float,
+    segments_per_corner: int = 6,
+) -> list[float]:
+    """Return a dense list of (x, y) points approximating a rounded rectangle.
+
+    Tk's ``create_polygon(smooth=True, splinesteps=16)`` is one of the slowest
+    drawing primitives in Tkinter (12 vertices × 16 splinesteps ≈ 192 anti-aliased
+    line segments per polygon) and its anti-aliasing is fragile under rapid
+    redraws — visible as TV-static / ghosting during the initial render.
+
+    Pre-tessellating the corners in Python produces a polygon of plain straight
+    segments that Tk renders cheaply with no smoothing artifacts. At the small
+    corner radii used by CodexButton (9px), RoundedCard (14px) and SidebarItem
+    (7px), 6 straight segments per quadrant is visually indistinguishable from
+    the smoothed curve.
+    """
+    if segments_per_corner < 2:
+        segments_per_corner = 2
     radius = max(0.0, min(radius, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
-    return [
-        x1 + radius, y1,
-        x2 - radius, y1,
-        x2, y1,
-        x2, y1 + radius,
-        x2, y2 - radius,
-        x2, y2,
-        x2 - radius, y2,
-        x1 + radius, y2,
-        x1, y2,
-        x1, y2 - radius,
-        x1, y1 + radius,
-        x1, y1,
-    ]
+    if radius <= 0:
+        return [x1, y1, x2, y1, x2, y2, x1, y2]
+
+    pts: list[float] = []
+
+    # 1. Top-right corner (from (x2 - radius, y1) to (x2, y1 + radius))
+    cx, cy = x2 - radius, y1 + radius
+    for i in range(segments_per_corner + 1):
+        angle = (math.pi / 2.0) * (1.0 - i / segments_per_corner)
+        pts.extend([cx + radius * math.cos(angle), cy - radius * math.sin(angle)])
+
+    # 2. Bottom-right corner (from (x2, y2 - radius) to (x2 - radius, y2))
+    cx, cy = x2 - radius, y2 - radius
+    for i in range(1, segments_per_corner + 1):
+        angle = (math.pi / 2.0) * (i / segments_per_corner)
+        pts.extend([cx + radius * math.cos(angle), cy + radius * math.sin(angle)])
+
+    # 3. Bottom-left corner (from (x1 + radius, y2) to (x1, y2 - radius))
+    cx, cy = x1 + radius, y2 - radius
+    for i in range(1, segments_per_corner + 1):
+        angle = (math.pi / 2.0) * (1.0 - i / segments_per_corner)
+        pts.extend([cx - radius * math.cos(angle), cy + radius * math.sin(angle)])
+
+    # 4. Top-left corner (from (x1, y1 + radius) to (x1 + radius, y1))
+    cx, cy = x1 + radius, y1 + radius
+    for i in range(1, segments_per_corner):
+        angle = (math.pi / 2.0) * (i / segments_per_corner)
+        pts.extend([cx - radius * math.cos(angle), cy - radius * math.sin(angle)])
+
+    return pts
 
 
 class CodexButton(Canvas):
@@ -221,10 +261,10 @@ class CodexButton(Canvas):
         normal, active, foreground, border = self._palette()
         fill = active if self._hover and self._state != "disabled" else normal
         inset = self._pxf(1)
-        poly_pts = _round_rect_points(inset, inset, width - inset, height - inset, self._pxf(9))
+        poly_pts = _tessellate_round_rect(inset, inset, width - inset, height - inset, self._pxf(9))
 
         if self._poly_id is None or not self.find_withtag(self._poly_id):
-            self._poly_id = self.create_polygon(*poly_pts, smooth=True, splinesteps=16, fill=fill, outline=border, width=self._pxf(1))
+            self._poly_id = self.create_polygon(*poly_pts, fill=fill, outline=border, width=self._pxf(1))
             self.tag_lower(self._poly_id)
         else:
             self.coords(self._poly_id, *poly_pts)
@@ -259,12 +299,18 @@ class CodexButton(Canvas):
                 self.itemconfigure(self._text_id, text=text, fill=foreground, font=font, anchor="center")
 
     def _draw_round_rect(self, x1: float, y1: float, x2: float, y2: float, radius: float, **kwargs) -> None:
-        pts = _round_rect_points(x1, y1, x2, y2, radius)
-        self.create_polygon(*pts, smooth=True, splinesteps=16, **kwargs)
+        pts = _tessellate_round_rect(x1, y1, x2, y2, radius)
+        self.create_polygon(*pts, **kwargs)
 
 
-def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: float, size: float, line_width: float) -> None:
+def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: float, size: float, line_width: float) -> list[int]:
     """在 size×size 的方框内绘制工具线性图标（坐标按设计稿 14×14 视图换算）。"""
+
+    item_ids: list[int] = []
+
+    def track(item_id: int) -> int:
+        item_ids.append(item_id)
+        return item_id
 
     def px(value: float) -> float:
         return x + value * size / 14.0
@@ -274,52 +320,53 @@ def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: floa
 
     line = {"fill": color, "width": line_width, "capstyle": "round", "joinstyle": "round"}
     if icon_id == "social_security":
-        canvas.create_rectangle(px(2.5), py(1.5), px(11.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(5), py(5), px(9), py(5), **line)
-        canvas.create_line(px(5), py(8), px(9), py(8), **line)
+        track(canvas.create_rectangle(px(2.5), py(1.5), px(11.5), py(12.5), outline=color, width=line_width))
+        track(canvas.create_line(px(5), py(5), px(9), py(5), **line))
+        track(canvas.create_line(px(5), py(8), px(9), py(8), **line))
     elif icon_id == "insurance_ledger":
-        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(4.6), py(7), px(6.3), py(8.7), px(9.6), py(5.4), **line)
+        track(canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width))
+        track(canvas.create_line(px(4.6), py(7), px(6.3), py(8.7), px(9.6), py(5.4), **line))
     elif icon_id == "data_statistics":
-        canvas.create_line(px(2.5), py(12), px(2.5), py(7), **line)
-        canvas.create_line(px(7), py(12), px(7), py(2.5), **line)
-        canvas.create_line(px(11.5), py(12), px(11.5), py(5), **line)
+        track(canvas.create_line(px(2.5), py(12), px(2.5), py(7), **line))
+        track(canvas.create_line(px(7), py(12), px(7), py(2.5), **line))
+        track(canvas.create_line(px(11.5), py(12), px(11.5), py(5), **line))
     elif icon_id == "salary_split":
-        canvas.create_line(px(7), py(2), px(7), py(6), **line)
-        canvas.create_line(px(7), py(6), px(3), py(11), **line)
-        canvas.create_line(px(7), py(6), px(11), py(11), **line)
+        track(canvas.create_line(px(7), py(2), px(7), py(6), **line))
+        track(canvas.create_line(px(7), py(6), px(3), py(11), **line))
+        track(canvas.create_line(px(7), py(6), px(11), py(11), **line))
     elif icon_id == "salary_merge":
-        canvas.create_line(px(3), py(3), px(7), py(8), **line)
-        canvas.create_line(px(11), py(3), px(7), py(8), **line)
-        canvas.create_line(px(7), py(8), px(7), py(12), **line)
+        track(canvas.create_line(px(3), py(3), px(7), py(8), **line))
+        track(canvas.create_line(px(11), py(3), px(7), py(8), **line))
+        track(canvas.create_line(px(7), py(8), px(7), py(12), **line))
     elif icon_id == "personnel_change_merge":
-        canvas.create_line(px(2), py(4.5), px(10), py(4.5), **line)
-        canvas.create_line(px(8), py(2), px(10.5), py(4.5), px(8), py(7), **line)
-        canvas.create_line(px(12), py(9.5), px(4), py(9.5), **line)
-        canvas.create_line(px(6), py(7), px(3.5), py(9.5), px(6), py(12), **line)
+        track(canvas.create_line(px(2), py(4.5), px(10), py(4.5), **line))
+        track(canvas.create_line(px(8), py(2), px(10.5), py(4.5), px(8), py(7), **line))
+        track(canvas.create_line(px(12), py(9.5), px(4), py(9.5), **line))
+        track(canvas.create_line(px(6), py(7), px(3.5), py(9.5), px(6), py(12), **line))
     elif icon_id == "archive_import":
-        canvas.create_rectangle(px(2), py(4.5), px(12), py(12), outline=color, width=line_width)
-        canvas.create_line(px(2), py(7), px(12), py(7), **line)
-        canvas.create_line(px(7), py(4.5), px(7), py(2.5), **line)
+        track(canvas.create_rectangle(px(2), py(4.5), px(12), py(12), outline=color, width=line_width))
+        track(canvas.create_line(px(2), py(7), px(12), py(7), **line))
+        track(canvas.create_line(px(7), py(4.5), px(7), py(2.5), **line))
     elif icon_id == "material_collector":
-        canvas.create_rectangle(px(2.5), py(3), px(11.5), py(11.5), outline=color, width=line_width)
-        canvas.create_line(px(2.5), py(6), px(11.5), py(6), **line)
-        canvas.create_line(px(7), py(6), px(7), py(11.5), **line)
+        track(canvas.create_rectangle(px(2.5), py(3), px(11.5), py(11.5), outline=color, width=line_width))
+        track(canvas.create_line(px(2.5), py(6), px(11.5), py(6), **line))
+        track(canvas.create_line(px(7), py(6), px(7), py(11.5), **line))
     elif icon_id == "folder_rename":
-        canvas.create_line(
+        track(canvas.create_line(
             px(2), py(10.5), px(2), py(4), px(3.5), py(2.5), px(6), py(2.5), px(7.2), py(4),
             px(10.5), py(4), px(12), py(5.5), px(12), py(10.5), px(10.5), py(12), px(3.5), py(12), px(2), py(10.5),
             **line,
-        )
+        ))
     elif icon_id == "tutorial":
-        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(7), py(6.5), px(7), py(10), **line)
-        canvas.create_line(px(7), py(4), px(7), py(4.45), **line)
+        track(canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width))
+        track(canvas.create_line(px(7), py(6.5), px(7), py(10), **line))
+        track(canvas.create_line(px(7), py(4), px(7), py(4.45), **line))
     elif icon_id == "clock":
-        canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width)
-        canvas.create_line(px(7), py(4), px(7), py(7.2), px(9), py(8.6), **line)
+        track(canvas.create_oval(px(1.5), py(1.5), px(12.5), py(12.5), outline=color, width=line_width))
+        track(canvas.create_line(px(7), py(4), px(7), py(7.2), px(9), py(8.6), **line))
     else:
-        canvas.create_oval(px(3), py(3), px(11), py(11), outline=color, width=line_width)
+        track(canvas.create_oval(px(3), py(3), px(11), py(11), outline=color, width=line_width))
+    return item_ids
 
 
 class SidebarItem(Canvas):
@@ -345,6 +392,7 @@ class SidebarItem(Canvas):
         self._last_draw_key: tuple | None = None
         self._bg_poly_id: int | None = None
         self._text_item_id: int | None = None
+        self._icon_items: list[int] = []
         super().__init__(
             master,
             height=_scale_px(height, self._scale),
@@ -396,17 +444,26 @@ class SidebarItem(Canvas):
             return
         self._last_draw_key = key
 
-        self.delete("all")
         if self._selected:
             fill = COLOR_NAV_SELECTED
         elif self._hover:
             fill = COLOR_NAV_HOVER
         else:
             fill = COLOR_SIDEBAR
-        if fill != COLOR_SIDEBAR:
+        show_bg = fill != COLOR_SIDEBAR
+        if show_bg:
             radius = self._pxf(7)
-            pts = _round_rect_points(0, 0, width, height, radius)
-            self.create_polygon(*pts, smooth=True, splinesteps=16, fill=fill, outline="")
+            pts = _tessellate_round_rect(0, 0, width, height, radius)
+            if self._bg_poly_id is None or not self.find_withtag(self._bg_poly_id):
+                self._bg_poly_id = self.create_polygon(*pts, fill=fill, outline="")
+                self.tag_lower(self._bg_poly_id)
+            else:
+                self.coords(self._bg_poly_id, *pts)
+                self.itemconfigure(self._bg_poly_id, fill=fill, state="normal")
+        else:
+            if self._bg_poly_id is not None and self.find_withtag(self._bg_poly_id):
+                self.itemconfigure(self._bg_poly_id, state="hidden")
+
         if self._selected:
             foreground = COLOR_NAV_TEXT_SELECTED
         elif self._muted:
@@ -416,10 +473,27 @@ class SidebarItem(Canvas):
         icon_size = self._pxf(15)
         icon_x = self._pxf(9)
         icon_y = (height - icon_size) / 2
-        _paint_tool_icon(self, self._icon_id, foreground, icon_x, icon_y, icon_size, max(1.0, self._pxf(1.4)))
+        if self._icon_items:
+            for item_id in self._icon_items:
+                self.delete(item_id)
+            self._icon_items = []
+        self._icon_items = _paint_tool_icon(
+            self, self._icon_id, foreground, icon_x, icon_y, icon_size, max(1.0, self._pxf(1.4))
+        )
         family = _get_default_font_family(self)
         font = (family, _font_size(10), "bold") if self._selected else (family, _font_size(10))
-        self.create_text(icon_x + icon_size + self._pxf(9), height / 2, text=self._text, fill=foreground, font=font, anchor="w")
+        if self._text_item_id is None or not self.find_withtag(self._text_item_id):
+            self._text_item_id = self.create_text(
+                icon_x + icon_size + self._pxf(9),
+                height / 2,
+                text=self._text,
+                fill=foreground,
+                font=font,
+                anchor="w",
+            )
+        else:
+            self.coords(self._text_item_id, icon_x + icon_size + self._pxf(9), height / 2)
+            self.itemconfigure(self._text_item_id, text=self._text, fill=foreground, font=font)
 
 
 class RoundedCard(Canvas):
@@ -496,15 +570,15 @@ class RoundedCard(Canvas):
 
     def _redraw_bg(self, width: int, height: int) -> None:
         offset = max(1.0, _scale_float(1.5, self._scale))
-        shadow_pts = _round_rect_points(offset, offset * 1.6, width - offset * 0.4, height, self._radius)
-        card_pts = _round_rect_points(0, 0, width - offset, height - offset, self._radius)
+        shadow_pts = _tessellate_round_rect(offset, offset * 1.6, width - offset * 0.4, height, self._radius)
+        card_pts = _tessellate_round_rect(0, 0, width - offset, height - offset, self._radius)
 
         if self._shadow_poly is None or not self.find_withtag(self._shadow_poly):
             self._shadow_poly = self.create_polygon(
-                *shadow_pts, smooth=True, splinesteps=16, fill="#ECE9E2", outline="", tags="card_bg"
+                *shadow_pts, fill="#ECE9E2", outline="", tags="card_bg"
             )
             self._card_poly = self.create_polygon(
-                *card_pts, smooth=True, splinesteps=16, fill=COLOR_SURFACE, outline="", tags="card_bg"
+                *card_pts, fill=COLOR_SURFACE, outline="", tags="card_bg"
             )
             self.tag_lower("card_bg")
         else:

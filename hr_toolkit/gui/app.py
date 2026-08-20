@@ -2277,10 +2277,8 @@ class HRToolkitApp:
         self._write_log(self._initial_log_text())
         self.root.update_idletasks()
         _sync_right_canvas_window()
-
-        self._build_history_view(self._main_view_host)
-        self.root.update_idletasks()
-        _sync_right_canvas_window()
+        # History view is built lazily on first use so its ~50+ widgets
+        # don't participate in the initial layout/render storm.
 
     def _build_workspace_panel(self, main_area) -> None:
         self._workspace_resize_handle = Canvas(
@@ -2556,18 +2554,31 @@ class HRToolkitApp:
         if small != self._workspace_small:
             self._workspace_small = small
             self._workspace_drawer_open = False
-        self._apply_workspace_panel_mode()
+            self._apply_workspace_panel_mode()
+        # Width-only changes never need a teardown/rebuild — the existing
+        # grid/place stays valid and the panel handles its own resizing.
+        elif hasattr(self, "_workspace_panel"):
+            self._update_workspace_text_wraps()
 
     def _apply_workspace_panel_mode(self) -> None:
         if not hasattr(self, "_workspace_panel"):
             return
+        # Only tear down when the mode actually changes (small vs. not, expanded
+        # vs. collapsed). Width-only resizes are handled by the existing layout.
+        small = self._workspace_small
+        expanded = self._workspace_drawer_open if small else self._workspace_preferred_expanded
+        mode_key = ("place" if small else "grid", "expanded" if expanded else "collapsed")
+        if getattr(self, "_workspace_panel_mode_key", None) == mode_key:
+            self.root.after_idle(self._update_workspace_text_wraps)
+            return
+        self._workspace_panel_mode_key = mode_key
+
         self._workspace_panel.place_forget()
         self._workspace_panel.grid_remove()
         self._workspace_resize_handle.grid_remove()
         self._workspace_expanded_body.pack_forget()
         self._workspace_collapsed_body.pack_forget()
 
-        expanded = self._workspace_drawer_open if self._workspace_small else self._workspace_preferred_expanded
         if self._workspace_small and expanded:
             self._workspace_panel.configure(width=self._px(self._workspace_width_units))
             self._workspace_panel.place(
@@ -5539,6 +5550,8 @@ class HRToolkitApp:
         self.root.after_idle(_sync_history_canvas)
 
     def _show_history_view(self) -> None:
+        if not hasattr(self, "_history_view"):
+            self._build_history_view(self._main_view_host)
         if self.current_view == "history":
             self._refresh_history()
             return
