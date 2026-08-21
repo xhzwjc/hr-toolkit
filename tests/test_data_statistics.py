@@ -159,6 +159,51 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertIn("4.9加班7小时", hour_remark)
             hour_wb.close()
 
+    def test_rest_slot_uses_punches_plan_and_full_day_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_rest_slot_file(input_dir / "考勤结果.xlsx")
+
+            day_result = generate_data_statistics_reports(input_dir, root / "out_day")
+            day_wb = load_workbook(day_result.output_file, data_only=True)
+            day_stats = day_wb["考勤统计"]
+            day_remark = day_stats.cell(3, day_stats.max_column).value or ""
+            self.assertIn("4.1调休1天", day_remark)
+            self.assertNotIn("4.1上午调休", day_remark)
+            self.assertNotIn("4.1下午调休", day_remark)
+            self.assertIn("4.2下午调休0.5天", day_remark)
+            self.assertIn("4.3上午调休0.5天", day_remark)
+            self.assertIn("4.4上午调休0.5天", day_remark)
+            self.assertIn("4.5下午调休0.5天", day_remark)
+            self.assertIn("4.6下午调休0.57天", day_remark)
+            self.assertIn("4.7上午调休0.5天", day_remark)
+            # TASK-4 只修改统计备注；异常明细保持原有事实性描述。
+            detail = day_wb["考勤异常明细"]
+            detail_remarks = [
+                detail.cell(row, 7).value for row in range(2, detail.max_row + 1)
+            ]
+            self.assertNotIn("上午调休0.5天", detail_remarks)
+            self.assertNotIn("下午调休0.5天", detail_remarks)
+            day_wb.close()
+
+            hour_result = generate_data_statistics_reports(
+                input_dir, root / "out_hour", remark_unit="hour"
+            )
+            hour_wb = load_workbook(hour_result.output_file, data_only=True)
+            hour_stats = hour_wb["考勤统计"]
+            hour_remark = hour_stats.cell(3, hour_stats.max_column).value or ""
+            self.assertIn("4.1调休7小时", hour_remark)
+            self.assertNotIn("4.1上午调休", hour_remark)
+            self.assertNotIn("4.1下午调休", hour_remark)
+            self.assertIn("4.2下午调休3.5小时", hour_remark)
+            self.assertIn("4.3上午调休3.5小时", hour_remark)
+            self.assertIn("4.5下午调休3.5小时", hour_remark)
+            self.assertIn("4.6下午调休4小时", hour_remark)
+            self.assertIn("4.7上午调休3.5小时", hour_remark)
+            hour_wb.close()
+
     def test_report_staff_list_counts_missing_people(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -800,6 +845,38 @@ def _write_overtime_slot_file(path: Path) -> None:
         ws.append([
             "王小丽", "运营部", datetime(2026, 4, day), 0, 7, 7,
             0, overtime, "08:30~12:00|14:00~17:30", punches, None,
+        ])
+    wb.save(path)
+    wb.close()
+
+
+def _write_rest_slot_file(path: Path) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "日结果"
+    ws.append([
+        "姓名", "部门名称", "日期", "漏打卡次数", "应出勤小时数", "实出勤小时数",
+        "调休", "加班计调休时长", "计划上下班时间", "当日刷卡记录", "缺卡记录",
+    ])
+    cases = (
+        # 全天调休：按勾选单位显示 1 天或 7 小时，不添加上午/下午。
+        (1, 7, 7, 0, "08:30~12:00|14:00~17:30", None),
+        # 只在上午出勤，下午调休。
+        (2, 3.5, 7, 3.5, "08:30~12:00|14:00~17:30", "08:30,12:00"),
+        # 只在下午出勤，上午调休。
+        (3, 3.5, 7, 3.5, "08:30~12:00|14:00~17:30", "14:00,17:30"),
+        # 无打卡，仅有上午/下午半天排班。
+        (4, 3.5, 3.5, 0, "08:30~12:00", None),
+        (5, 3.5, 3.5, 0, "14:00~17:30", None),
+        # 甲方补充案例：4 小时调休，09:30 上班、15:12 最后打卡，属于下午调休。
+        (6, 4, 7, 3, "09:30~00:00", "09:30,15:12"),
+        # 信息不足时按甲方口径兜底为上午。
+        (7, 3.5, 7, 3.5, None, None),
+    )
+    for day, rest, expected, actual, plan, punches in cases:
+        ws.append([
+            "王小丽", "运营部", datetime(2026, 4, day), 0, expected, actual,
+            rest, 0, plan, punches, None,
         ])
     wb.save(path)
     wb.close()

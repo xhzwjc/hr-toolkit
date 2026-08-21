@@ -960,6 +960,85 @@ def _detect_overtime_slot(row: AttendanceSourceRow) -> str:
     return ""
 
 
+def _detect_leave_slot(
+    row: AttendanceSourceRow,
+    leave_days: float | None = None,
+    leave_hours: float | None = None,
+) -> str:
+    """推导半天调休/请假的上午或下午；全天记录不添加时段。"""
+    days = row.rest_days if leave_days is None else leave_days
+    hours = row.rest_hours if leave_hours is None else leave_hours
+    is_half_day = (0 < days <= 0.5) or (hours is not None and 0 < hours <= 4.0)
+    if not is_half_day:
+        return ""
+
+    split_time = time(12, 30)
+    punches = _times_in_text(row.punch_record)
+    plan_times = _times_in_text(row.plan_time)
+    plan_start = plan_times[0] if len(plan_times) >= 2 else None
+    plan_end = plan_times[-1] if len(plan_times) >= 2 else None
+
+    if punches:
+        if all(value < split_time for value in punches):
+            return "下午"
+        if all(value >= split_time for value in punches):
+            return "上午"
+
+        # 同时存在上午、下午打卡时，比较班次头尾两侧的缺勤量。
+        # 例如计划 09:30~00:00、实际 09:30~15:12，缺勤集中在班次尾部，应判为下午。
+        if plan_start is not None and plan_end is not None and plan_start != plan_end:
+            day_seconds = 24 * 60 * 60
+            start_seconds = (
+                plan_start.hour * 3600 + plan_start.minute * 60 + plan_start.second
+            )
+            end_seconds = plan_end.hour * 3600 + plan_end.minute * 60 + plan_end.second
+            crosses_midnight = end_seconds < start_seconds
+            if crosses_midnight:
+                end_seconds += day_seconds
+
+            def _distance_to_shift(candidate: int) -> int:
+                if candidate < start_seconds:
+                    return start_seconds - candidate
+                if candidate > end_seconds:
+                    return candidate - end_seconds
+                return 0
+
+            def _on_shift_timeline(value: time) -> int:
+                seconds = value.hour * 3600 + value.minute * 60 + value.second
+                if not crosses_midnight:
+                    return seconds
+                candidates = (seconds, seconds + day_seconds)
+                return min(candidates, key=_distance_to_shift)
+
+            punch_seconds = tuple(_on_shift_timeline(value) for value in punches)
+            start_gap = max(0, min(punch_seconds) - start_seconds)
+            end_gap = max(0, end_seconds - max(punch_seconds))
+            if end_gap > start_gap:
+                return "下午"
+            if start_gap > end_gap:
+                return "上午"
+
+        # 无法形成完整班次比较时，用最后打卡是否早于下午分界辅助判断。
+        last_punch = _last_time_in_text(row.punch_record)
+        if last_punch is not None and last_punch < time(15, 30):
+            return "下午"
+        return "上午"
+
+    # 没有打卡时，仅在计划本身明确为不超过 4 小时的半天班时采用计划时段。
+    if plan_start is not None and plan_end is not None and plan_start != plan_end:
+        start_seconds = plan_start.hour * 3600 + plan_start.minute * 60 + plan_start.second
+        end_seconds = plan_end.hour * 3600 + plan_end.minute * 60 + plan_end.second
+        if end_seconds < start_seconds:
+            end_seconds += 24 * 60 * 60
+        if end_seconds - start_seconds <= 4 * 60 * 60:
+            if plan_start < split_time and plan_end <= split_time:
+                return "上午"
+            if plan_start >= split_time:
+                return "下午"
+
+    return "上午"
+
+
 def _attendance_row_remarks(
     row: AttendanceSourceRow,
     remark_unit: str = REMARK_UNIT_DAY,
@@ -976,7 +1055,7 @@ def _attendance_row_remarks(
         else:
             remarks.append(f"{prefix}加班{_format_number(row.overtime_days)}天")
     if row.rest_days:
-        prefix = "上午" if row.expected_hours and row.expected_hours <= 3.5 and row.actual_hours == 0 else ""
+        prefix = _detect_leave_slot(row)
         if by_hour:
             remarks.append(f"{prefix}调休{_format_number(row.rest_hours)}小时")
         else:
