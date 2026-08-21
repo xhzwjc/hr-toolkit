@@ -37,6 +37,7 @@ from hr_toolkit.history_store import (
     SourceSpec,
     TaskDetail,
 )
+from hr_toolkit.material_preferences import MaterialPreferences
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
     MODE_EXCEL_BATCH,
@@ -389,17 +390,21 @@ class HRToolkitApp:
         self.material_use_ocr_cache = BooleanVar(value=True)
         self.material_target_input = StringVar(value="")
         self.material_types_selected: dict[str, BooleanVar] = {
-            "身份证": BooleanVar(value=True),
-            "劳动合同": BooleanVar(value=True),
-            "学历证明": BooleanVar(value=True),
-            "资格证书": BooleanVar(value=True),
-            "安全员证": BooleanVar(value=True),
-            "特种证书": BooleanVar(value=True),
-            "证件照片": BooleanVar(value=True),
-            "银行卡": BooleanVar(value=True),
+            material: BooleanVar(value=True)
+            for material in self._material_preferences.available_materials
         }
-        self.material_custom_enabled = BooleanVar(value=False)
-        self.material_custom_types = StringVar(value="")
+        initial_material_preset = (
+            self._material_preferences.preset_names[0]
+            if self._material_preferences.preset_names
+            else ""
+        )
+        self.material_preset_name = StringVar(value=initial_material_preset)
+        initial_custom_material = (
+            self._material_preferences.custom_materials[0]
+            if self._material_preferences.custom_materials
+            else ""
+        )
+        self.material_custom_choice = StringVar(value=initial_custom_material)
         self.input_path = StringVar()
         self.summary_path = StringVar()
         self.stats_week_start = StringVar()
@@ -552,6 +557,7 @@ class HRToolkitApp:
     def _load_workspace_preferences(self) -> None:
         self._workspace_last_project_path: Path | None = None
         self._last_selected_dir: Path | None = None
+        self._material_preferences = MaterialPreferences()
         settings_path = self._workspace_settings_path()
         try:
             if settings_path.is_symlink() or not settings_path.is_file():
@@ -595,9 +601,13 @@ class HRToolkitApp:
                     self._last_selected_dir = candidate_dir
             except Exception:
                 pass
+        self._material_preferences = MaterialPreferences.from_payload(
+            state.get("material_preferences")
+        )
 
     def _save_workspace_preferences(self) -> None:
         settings_path = self._workspace_settings_path()
+        material_preferences = getattr(self, "_material_preferences", MaterialPreferences())
         payload = {
             "version": 1,
             "project_panel_width": int(self._workspace_width_units),
@@ -605,6 +615,7 @@ class HRToolkitApp:
             "current_project": str(self.current_project_path) if self.current_project_path is not None else None,
             "recent_projects": [str(path) for _name, path in self._workspace_recent_projects[:8]],
             "last_selected_dir": str(self._last_selected_dir) if getattr(self, "_last_selected_dir", None) is not None else None,
+            "material_preferences": material_preferences.to_payload(),
         }
         temp_path = settings_path.with_name(
             f".{settings_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
@@ -2001,42 +2012,102 @@ class HRToolkitApp:
         self.mat_checks_frame = ttk.Frame(self.material_types_section, style="InputWrap.TFrame")
         self.mat_checks_frame.pack(side=LEFT, fill="x", expand=True)
 
+        preset_row = ttk.Frame(self.mat_checks_frame, style="InputWrap.TFrame")
+        preset_row.pack(fill="x", padx=self._px(8), pady=(0, self._px(4)))
+        ttk.Label(preset_row, text="常用组合", style="CardHint.TLabel").pack(side=LEFT)
+        self.material_preset_combo = ttk.Combobox(
+            preset_row,
+            textvariable=self.material_preset_name,
+            values=self._material_preferences.preset_names,
+            state="readonly",
+            width=14,
+            style="App.TCombobox",
+        )
+        self.material_preset_combo.pack(side=LEFT, padx=(self._px(8), self._px(6)))
+        CodexButton(
+            preset_row,
+            text="应用",
+            command=self._apply_material_preset,
+            width=46,
+            min_width=42,
+            variant="link",
+        ).pack(side=LEFT)
+
+        preset_actions_row = ttk.Frame(self.mat_checks_frame, style="InputWrap.TFrame")
+        preset_actions_row.pack(fill="x", padx=self._px(8), pady=(0, self._px(4)))
+        ttk.Label(preset_actions_row, text="自定义预设", style="CardHint.TLabel").pack(side=LEFT)
+        CodexButton(
+            preset_actions_row,
+            text="保存当前为预设",
+            command=self._request_create_material_preset,
+            width=98,
+            min_width=90,
+            variant="link",
+        ).pack(side=LEFT, padx=(self._px(8), 0))
+        CodexButton(
+            preset_actions_row,
+            text="更新",
+            command=self._request_update_material_preset,
+            width=46,
+            min_width=42,
+            variant="link",
+        ).pack(side=LEFT, padx=(self._px(4), 0))
+        CodexButton(
+            preset_actions_row,
+            text="重命名",
+            command=self._request_rename_material_preset,
+            width=56,
+            min_width=52,
+            variant="link",
+        ).pack(side=LEFT, padx=(self._px(4), 0))
+        CodexButton(
+            preset_actions_row,
+            text="删除",
+            command=self._request_delete_material_preset,
+            width=46,
+            min_width=42,
+            variant="link",
+        ).pack(side=LEFT, padx=(self._px(4), 0))
+
+        self.material_checks_grid = ttk.Frame(self.mat_checks_frame, style="InputWrap.TFrame")
+        self.material_checks_grid.pack(fill="x")
         self._material_check_widgets: list = []
-        for idx, (mat_name, var) in enumerate(self.material_types_selected.items()):
-            r = idx // 4
-            c = idx % 4
-            cb = ttk.Checkbutton(self.mat_checks_frame, text=mat_name, variable=var, style="App.TCheckbutton")
-            cb.grid(row=r, column=c, sticky="w", padx=self._px(8), pady=self._px(4))
-            self._material_check_widgets.append(cb)
+        self._rebuild_material_checkboxes()
 
-        # ── 「其他」自定义材料行 ──
-        other_row = ttk.Frame(self.mat_checks_frame, style="InputWrap.TFrame")
-        other_row.grid(row=2, column=0, columnspan=4, sticky="ew", padx=self._px(8), pady=(self._px(4), self._px(2)))
-
-        self.material_other_check = ttk.Checkbutton(
-            other_row,
-            text="其他",
-            variable=self.material_custom_enabled,
-            command=self._on_material_custom_toggled,
-            style="App.TCheckbutton",
+        material_catalog_row = ttk.Frame(self.mat_checks_frame, style="InputWrap.TFrame")
+        material_catalog_row.pack(fill="x", padx=self._px(8), pady=(self._px(2), 0))
+        ttk.Label(material_catalog_row, text="自定义材料", style="CardHint.TLabel").pack(side=LEFT)
+        self.material_custom_combo = ttk.Combobox(
+            material_catalog_row,
+            textvariable=self.material_custom_choice,
+            values=self._material_preferences.custom_materials,
+            state="readonly",
+            width=14,
+            style="App.TCombobox",
         )
-        self.material_other_check.pack(side=LEFT)
-
-        self.material_custom_entry = ttk.Entry(
-            other_row,
-            textvariable=self.material_custom_types,
-            style="App.TEntry",
-        )
-        self.material_custom_entry.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), self._px(8)))
-
-        self.material_custom_hint = ttk.Label(
-            other_row,
-            text="（如：入职证明, 社保证明；多个用逗号隔开）",
+        self.material_custom_combo.pack(side=LEFT, padx=(self._px(8), self._px(6)))
+        CodexButton(
+            material_catalog_row,
+            text="添加材料",
+            command=self._request_add_custom_material,
+            width=62,
+            min_width=56,
+            variant="link",
+        ).pack(side=LEFT)
+        CodexButton(
+            material_catalog_row,
+            text="删除材料",
+            command=self._request_delete_custom_material,
+            width=62,
+            min_width=56,
+            variant="link",
+        ).pack(side=LEFT, padx=(self._px(4), self._px(8)))
+        self.material_catalog_hint = ttk.Label(
+            self.mat_checks_frame,
+            text="自定义材料和预设会保存在本机；应用组合后仍可继续增减勾选。",
             style="CardHint.TLabel",
         )
-        self.material_custom_hint.pack(side=LEFT)
-
-        self._on_material_custom_toggled()
+        self.material_catalog_hint.pack(fill="x", padx=self._px(8), pady=(self._px(2), 0))
 
         # 初始状态同步
         self._on_material_collect_all_changed()
@@ -7773,6 +7844,63 @@ class HRToolkitApp:
         if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
+    def _selected_material_names(self) -> list[str]:
+        return [
+            material
+            for material, variable in self.material_types_selected.items()
+            if variable.get()
+        ]
+
+    def _rebuild_material_checkboxes(self) -> None:
+        grid = getattr(self, "material_checks_grid", None)
+        if grid is None:
+            return
+        for widget in getattr(self, "_material_check_widgets", []):
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+        self._material_check_widgets = []
+        for idx, (material, variable) in enumerate(self.material_types_selected.items()):
+            row = idx // 4
+            column = idx % 4
+            checkbox = ttk.Checkbutton(
+                grid,
+                text=material,
+                variable=variable,
+                style="App.TCheckbutton",
+            )
+            checkbox.grid(
+                row=row,
+                column=column,
+                sticky="w",
+                padx=self._px(8),
+                pady=self._px(4),
+            )
+            self._material_check_widgets.append(checkbox)
+
+    def _refresh_material_preset_combo(self, preferred: str | None = None) -> None:
+        names = self._material_preferences.preset_names
+        combo = getattr(self, "material_preset_combo", None)
+        if combo is not None:
+            combo.configure(values=names)
+        current = preferred or self.material_preset_name.get().strip()
+        if current in names:
+            self.material_preset_name.set(current)
+        else:
+            self.material_preset_name.set(names[0] if names else "")
+
+    def _refresh_material_catalog_combo(self, preferred: str | None = None) -> None:
+        names = self._material_preferences.custom_materials
+        combo = getattr(self, "material_custom_combo", None)
+        if combo is not None:
+            combo.configure(values=names)
+        current = preferred or self.material_custom_choice.get().strip()
+        if current in names:
+            self.material_custom_choice.set(current)
+        else:
+            self.material_custom_choice.set(names[0] if names else "")
+
     def _select_all_material_types(self) -> None:
         for var in self.material_types_selected.values():
             var.set(True)
@@ -7780,18 +7908,202 @@ class HRToolkitApp:
     def _deselect_all_material_types(self) -> None:
         for var in self.material_types_selected.values():
             var.set(False)
-        self.material_custom_enabled.set(False)
-        self._on_material_custom_toggled()
 
-    def _on_material_custom_toggled(self) -> None:
-        """勾选/取消勾选「其他」自定义材料时，启用/禁用自定义输入框。"""
-        if not hasattr(self, "material_custom_entry"):
+    def _request_add_custom_material(self) -> None:
+        raw_name = simpledialog.askstring(
+            "添加自定义材料",
+            "输入材料名称（例如：户口本、体检报告）",
+            parent=self.root,
+        )
+        if raw_name is None:
             return
-        if self.material_custom_enabled.get():
-            self.material_custom_entry.configure(state="normal")
-            self.material_custom_entry.focus_set()
-        else:
-            self.material_custom_entry.configure(state="disabled")
+        try:
+            material = self._material_preferences.add_material(raw_name)
+        except ValueError as exc:
+            messagebox.showwarning("无法添加材料", str(exc), parent=self.root)
+            return
+        self.material_types_selected[material] = BooleanVar(value=True)
+        self._rebuild_material_checkboxes()
+        self._refresh_material_catalog_combo(material)
+        self._save_workspace_preferences()
+
+    def _request_delete_custom_material(self) -> None:
+        custom_materials = self._material_preferences.custom_materials
+        if not custom_materials:
+            messagebox.showinfo(
+                "没有自定义材料",
+                "内置材料不能删除；当前还没有可删除的自定义材料。",
+                parent=self.root,
+            )
+            return
+        chosen = self.material_custom_choice.get().strip()
+        material = next((item for item in custom_materials if item == chosen), None)
+        if material is None:
+            messagebox.showwarning(
+                "请选择材料",
+                "请先从“自定义材料”列表中选择要删除的材料。",
+                parent=self.root,
+            )
+            return
+
+        referenced_by = [
+            preset_name
+            for preset_name, materials in self._material_preferences.custom_presets.items()
+            if material in materials
+        ]
+        reference_text = ""
+        if referenced_by:
+            reference_text = (
+                "\n\n该材料还被以下预设引用："
+                + "、".join(referenced_by)
+                + "。删除后会自动清理这些引用；没有剩余材料的预设也会一并删除。"
+            )
+        if not messagebox.askyesno(
+            "确认删除材料",
+            f"确定删除自定义材料“{material}”吗？{reference_text}",
+            parent=self.root,
+        ):
+            return
+
+        result = self._material_preferences.remove_material(material)
+        self.material_types_selected.pop(material, None)
+        self._rebuild_material_checkboxes()
+        self._refresh_material_catalog_combo()
+        self._refresh_material_preset_combo()
+        self._save_workspace_preferences()
+
+        changed: list[str] = []
+        if result.updated_presets:
+            changed.append("已更新预设：" + "、".join(result.updated_presets))
+        if result.removed_presets:
+            changed.append("已删除空预设：" + "、".join(result.removed_presets))
+        message = f"已删除自定义材料“{material}”。"
+        if changed:
+            message += "\n" + "\n".join(changed)
+        messagebox.showinfo("材料已删除", message, parent=self.root)
+
+    def _apply_material_preset(self, preset_name: str | None = None) -> None:
+        name = (preset_name or self.material_preset_name.get()).strip()
+        materials = self._material_preferences.get_preset(name)
+        if materials is None:
+            messagebox.showwarning(
+                "预设不可用",
+                "这个预设不存在或已经被删除，请重新选择。",
+                parent=self.root,
+            )
+            self._refresh_material_preset_combo()
+            return
+        selected = set(materials)
+        for material, variable in self.material_types_selected.items():
+            variable.set(material in selected)
+        self.material_preset_name.set(name)
+        self.material_collect_all.set(False)
+        self._on_material_collect_all_changed()
+
+    def _save_current_material_preset(
+        self,
+        name: str,
+        *,
+        replacing: str | None = None,
+    ) -> str:
+        saved_name = self._material_preferences.save_preset(
+            name,
+            self._selected_material_names(),
+            replacing=replacing,
+        )
+        self._refresh_material_preset_combo(saved_name)
+        self._save_workspace_preferences()
+        return saved_name
+
+    def _request_create_material_preset(self) -> None:
+        if not self._selected_material_names():
+            messagebox.showwarning(
+                "没有选择材料",
+                "请先勾选至少一种材料，再保存为预设。",
+                parent=self.root,
+            )
+            return
+        raw_name = simpledialog.askstring(
+            "保存自定义预设",
+            "输入预设名称",
+            parent=self.root,
+        )
+        if raw_name is None:
+            return
+        try:
+            saved_name = self._save_current_material_preset(raw_name)
+        except ValueError as exc:
+            messagebox.showwarning("无法保存预设", str(exc), parent=self.root)
+            return
+        messagebox.showinfo(
+            "预设已保存",
+            f"已保存“{saved_name}”，以后可从常用组合中直接应用。",
+            parent=self.root,
+        )
+
+    def _request_update_material_preset(self) -> None:
+        name = self.material_preset_name.get().strip()
+        if self._material_preferences.is_builtin_preset(name):
+            messagebox.showinfo(
+                "内置预设不能修改",
+                "如需调整，请先勾选需要的材料，再保存为新的自定义预设。",
+                parent=self.root,
+            )
+            return
+        try:
+            self._save_current_material_preset(name, replacing=name)
+        except ValueError as exc:
+            messagebox.showwarning("无法更新预设", str(exc), parent=self.root)
+            return
+        messagebox.showinfo("预设已更新", f"“{name}”已按当前勾选更新。", parent=self.root)
+
+    def _request_rename_material_preset(self) -> None:
+        current_name = self.material_preset_name.get().strip()
+        if self._material_preferences.is_builtin_preset(current_name):
+            messagebox.showinfo(
+                "内置预设不能重命名",
+                "内置预设会一直保留；自定义预设可以重命名。",
+                parent=self.root,
+            )
+            return
+        raw_name = simpledialog.askstring(
+            "重命名预设",
+            "输入新的预设名称",
+            initialvalue=current_name,
+            parent=self.root,
+        )
+        if raw_name is None:
+            return
+        try:
+            saved_name = self._material_preferences.rename_preset(current_name, raw_name)
+        except ValueError as exc:
+            messagebox.showwarning("无法重命名预设", str(exc), parent=self.root)
+            return
+        self._refresh_material_preset_combo(saved_name)
+        self._save_workspace_preferences()
+
+    def _request_delete_material_preset(self) -> None:
+        name = self.material_preset_name.get().strip()
+        if self._material_preferences.is_builtin_preset(name):
+            messagebox.showinfo(
+                "内置预设不能删除",
+                "内置预设会一直保留；自定义预设可以删除。",
+                parent=self.root,
+            )
+            return
+        if not messagebox.askyesno(
+            "确认删除预设",
+            f"确定删除自定义预设“{name}”吗？\n\n材料本身不会被删除。",
+            parent=self.root,
+        ):
+            return
+        try:
+            self._material_preferences.delete_preset(name)
+        except ValueError as exc:
+            messagebox.showwarning("无法删除预设", str(exc), parent=self.root)
+            return
+        self._refresh_material_preset_combo()
+        self._save_workspace_preferences()
 
     def _on_material_collect_all_changed(self) -> None:
         """全部模式切换：勾选时隐藏材料类型选择，取消时显示。"""
@@ -8965,20 +9277,11 @@ class HRToolkitApp:
 
         selected_materials: list[str] | None = None
         if not is_collect_all:
-            selected_materials = [
-                mat for mat, var in self.material_types_selected.items() if var.get()
-            ]
-            if self.material_custom_enabled.get():
-                custom_raw = self.material_custom_types.get().strip()
-                if custom_raw:
-                    custom_items = [c.strip() for c in re.split(r"[,，、;；\s]+", custom_raw) if c.strip()]
-                    for item in custom_items:
-                        if item not in selected_materials:
-                            selected_materials.append(item)
+            selected_materials = self._selected_material_names()
             if not selected_materials:
                 messagebox.showwarning(
                     "未选择材料",
-                    "请至少勾选一种需要提取的材料类型，或者勾选「其他」输入自定义材料，或者勾选「全部」直接拷贝整个文件夹。",
+                    "请至少勾选一种需要提取的材料，或者勾选「全部」直接拷贝整个文件夹。",
                 )
                 return
 

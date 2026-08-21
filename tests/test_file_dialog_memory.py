@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from hr_toolkit.gui.app import HRToolkitApp
+from hr_toolkit.material_preferences import MaterialPreferences
 
 
 class FileDialogMemoryTestCase(unittest.TestCase):
@@ -99,17 +100,32 @@ class FileDialogMemoryTestCase(unittest.TestCase):
 
             with patch.object(self.app, "_workspace_settings_path", return_value=custom_settings):
                 self.app._last_selected_dir = chosen_dir
+                self.app._material_preferences = MaterialPreferences(
+                    custom_materials=["户口本"]
+                )
+                self.app._material_preferences.save_preset(
+                    "补充入职",
+                    ["身份证", "户口本"],
+                )
                 self.app._save_workspace_preferences()
 
                 self.assertTrue(custom_settings.is_file())
                 saved_data = json.loads(custom_settings.read_text(encoding="utf-8"))
                 self.assertEqual(saved_data.get("last_selected_dir"), str(chosen_dir))
+                self.assertEqual(
+                    saved_data["material_preferences"]["custom_materials"],
+                    ["户口本"],
+                )
 
                 # Now simulate restart / new app loading preferences
                 new_app = HRToolkitApp.__new__(HRToolkitApp)
                 with patch.object(new_app, "_workspace_settings_path", return_value=custom_settings):
                     new_app._load_workspace_preferences()
                     self.assertEqual(new_app._last_selected_dir, chosen_dir)
+                    self.assertEqual(
+                        new_app._material_preferences.get_preset("补充入职"),
+                        ("身份证", "户口本"),
+                    )
 
     def test_preferences_load_ignores_missing_dir(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -204,4 +220,3 @@ class FileDialogMemoryTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
