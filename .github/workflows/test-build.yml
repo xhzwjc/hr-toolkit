@@ -1,0 +1,165 @@
+name: Test Build (测试打包)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "选择打包平台 (Target Platform)"
+        required: true
+        default: "windows"
+        type: choice
+        options:
+          - "windows"
+          - "macos"
+          - "all"
+      run_tests:
+        description: "打包前是否运行单元测试 (Run unit tests before packaging)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Prepare build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      target_platform: ${{ github.event.inputs.platform || 'windows' }}
+      run_tests: ${{ github.event.inputs.run_tests || 'false' }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Extract metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(python -c 'from hr_toolkit import __version__; print(__version__)')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "Build version: ${VERSION} (commit: ${SHORT_SHA})"
+
+  build-windows:
+    name: Build Windows (EXE & Portable ZIP)
+    needs: prepare
+    if: needs.prepare.outputs.target_platform == 'windows' || needs.prepare.outputs.target_platform == 'all'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+
+      - name: Install Inno Setup and WiX
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run unit tests (Optional)
+        if: needs.prepare.outputs.run_tests == 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Windows Application and Installers
+        run: >-
+          python scripts/release_windows.py
+          --version "${{ env.VERSION }}"
+          --build-dir dist/windows
+          --output-dir artifacts/windows
+
+      - name: Create Portable Zip (免安装绿色包)
+        shell: pwsh
+        run: |
+          $zipPath = "artifacts/windows/HRToolkit_${env:VERSION}_test_${env:SHORT_SHA}_portable.zip"
+          Compress-Archive -Path dist/windows/HRToolkit -DestinationPath $zipPath -Force
+          Write-Host "Portable zip created at $zipPath"
+
+      - name: Upload Windows test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: HRToolkit-Windows-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
+          path: |
+            artifacts/windows/HRToolkit_${{ env.VERSION }}_x64-setup.exe
+            artifacts/windows/HRToolkit_${{ env.VERSION }}_x64.msi
+            artifacts/windows/HRToolkit_${{ env.VERSION }}_test_${{ env.SHORT_SHA }}_portable.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Build macOS DMG
+    needs: prepare
+    if: needs.prepare.outputs.target_platform == 'macos' || needs.prepare.outputs.target_platform == 'all'
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install macOS build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+
+      - name: Run unit tests (Optional)
+        if: needs.prepare.outputs.run_tests == 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -v
+
+      - name: Build macOS DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_macos.py \
+            --version "${VERSION}" \
+            --architecture arm64 \
+            --output-dir artifacts/macos
+
+      - name: Upload macOS test artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: HRToolkit-macOS-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
+          path: |
+            artifacts/macos/HRToolkit_${{ env.VERSION }}_arm64.dmg
+          if-no-files-found: error
+          retention-days: 14
