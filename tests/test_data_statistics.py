@@ -48,6 +48,9 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertEqual(attendance.cell(3, 15).value, 3)
             self.assertIn("4.10上班未打卡", attendance.cell(3, 17).value)
             self.assertIn("4.15晚上加班0.5天", attendance.cell(3, 17).value)
+            self.assertIn("4.15晚上加班0.5天、下班未打卡", attendance.cell(3, 17).value)
+            self.assertIn("4.30上班未打卡", attendance.cell(3, 17).value)
+            self.assertNotIn("4.30下班未打卡", attendance.cell(3, 17).value)
 
             report = wb["周月报统计"]
             self.assertEqual(report.max_column, 10)
@@ -66,6 +69,29 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertEqual(detail.cell(3, 5).value, "第四周")
             self.assertIsNone(detail.cell(2, 9).value)
             wb.close()
+
+    def test_morning_makeup_before_shift_is_not_misclassified_as_missing_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_morning_makeup_attendance_file(input_dir / "考勤结果.xlsx")
+
+            result = generate_data_statistics_reports(input_dir, root / "output")
+            self.assertEqual(result.attendance_exception_count, 4)
+
+            wb = load_workbook(result.output_file, data_only=True)
+            detail = wb["考勤异常明细"]
+            remarks_by_day = {
+                detail.cell(row, 4).value.day: detail.cell(row, 7).value
+                for row in range(2, detail.max_row + 1)
+            }
+            wb.close()
+
+            self.assertEqual(remarks_by_day[20], "上班未打卡")
+            self.assertEqual(remarks_by_day[25], "上班未打卡")
+            self.assertEqual(remarks_by_day[29], "上班未打卡")
+            self.assertEqual(remarks_by_day[30], "下班未打卡")
 
     def test_report_staff_list_counts_missing_people(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -604,6 +630,34 @@ def _write_attendance_file(path: Path) -> None:
     for row_index, row in enumerate(rows, start=2):
         for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index).value = value
+    wb.save(path)
+    wb.close()
+
+
+def _write_morning_makeup_attendance_file(path: Path) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "日结果"
+    headers = [
+        "姓名",
+        "部门名称",
+        "日期",
+        "漏打卡次数",
+        "应出勤小时数",
+        "实出勤小时数",
+        "计划上下班时间",
+        "当日刷卡记录",
+        "缺卡记录",
+    ]
+    ws.append(headers)
+    rows = [
+        ["王小丽", "运营部", datetime(2026, 4, 20), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:20,17:30", None],
+        ["王小丽", "运营部", datetime(2026, 4, 25), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:25,17:35", None],
+        ["王小丽", "运营部", datetime(2026, 4, 29), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:29,18:00", None],
+        ["王小丽", "运营部", datetime(2026, 4, 30), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:20", None],
+    ]
+    for row in rows:
+        ws.append(row)
     wb.save(path)
     wb.close()
 

@@ -1021,7 +1021,13 @@ def _missing_punch_remark(row: AttendanceSourceRow) -> str:
         if row.overtime_days:
             return "下班未打卡"
         plan_start = _first_time_in_text(row.plan_time)
+        plan_end = _last_time_in_text(row.plan_time)
         first_punch = _first_time_in_text(row.punch_record)
+        last_punch = _last_time_in_text(row.punch_record)
+        # 补上班卡可能早于计划上班时间；只看首条刷卡会误判成下班缺卡。
+        # 当计划下班时间已有对应刷卡时，缺失的一侧应是上班卡。
+        if plan_end is not None and last_punch is not None and last_punch >= plan_end:
+            return "上班未打卡"
         if plan_start is not None and first_punch is not None and first_punch >= plan_start:
             return "上班未打卡"
         return "下班未打卡"
@@ -1835,6 +1841,14 @@ def _first_time_in_text(text: str) -> time | None:
     if hour > 23:
         return None
     return time(hour, minute)
+
+
+def _last_time_in_text(text: str) -> time | None:
+    for match in reversed(list(_TIME_HHMM_PATTERN.finditer(text))):
+        hour, minute = (int(part) for part in match.groups())
+        if hour <= 23:
+            return time(hour, minute)
+    return None
 
 
 def _zero_blank(value: float) -> float | None:
