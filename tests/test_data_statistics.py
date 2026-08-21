@@ -440,8 +440,8 @@ class DataStatisticsTest(unittest.TestCase):
             # 勾选后总列数 = 不勾选 + 1
             self.assertEqual(on_ws.max_column, off_ws.max_column + 1)
             out_col = on_headers.index("公出（天）") + 1
-            # 2 小时 / 8 小时 = 0.25 天
-            self.assertAlmostEqual(on_ws.cell(3, out_col).value or 0, 0.25)
+            # 2 天公出
+            self.assertAlmostEqual(on_ws.cell(3, out_col).value or 0, 2.0)
             off_wb.close()
             on_wb.close()
 
@@ -460,8 +460,50 @@ class DataStatisticsTest(unittest.TestCase):
             remark_col = ws.max_column
             remark = ws.cell(3, remark_col).value or ""
             self.assertIn("公出", remark)
-            self.assertIn("公出0.25天", remark)
+            self.assertIn("公出2天", remark)
             wb.close()
+
+    def test_business_trip_fractional_day_source_kept_as_days(self) -> None:
+        """考勤源表外出列为 0.4 天时，正确统计为 0.4 天且不受 remark_unit='hour' 影响。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            # 写入含 0.4 天外出的考勤表
+            wb_src = Workbook()
+            ws_src = wb_src.active
+            ws_src.title = "日结果"
+            headers = [
+                "姓名", "部门名称", "确认状态", "日期", "是否异常处理", "漏打卡次数",
+                "应出勤小时数", "实出勤小时数", "迟到次数", "迟到分钟数", "早退次数",
+                "早退分钟数", "旷工天数", "旷工次数", "外出", "工作日出差", "休息日出差天数",
+                "事假", "病假天数", "婚假", "产假天数", "陪护假", "丧假", "探亲假",
+                "工伤", "年假天数", "调休", "加班计调休时长", "计划上下班时间",
+                "当日刷卡记录", "缺卡记录",
+            ]
+            for col, header in enumerate(headers, start=1):
+                ws_src.cell(1, col).value = header
+            ws_src.cell(2, 1).value = "王小丽"
+            ws_src.cell(2, 2).value = "运营部"
+            ws_src.cell(2, 4).value = datetime(2026, 4, 12)
+            ws_src.cell(2, 7).value = 0
+            ws_src.cell(2, 8).value = 0
+            ws_src.cell(2, 15).value = 0.4  # 0.4 天
+            wb_src.save(input_dir / "考勤结果.xlsx")
+            wb_src.close()
+
+            for unit in ("day", "hour"):
+                result = generate_data_statistics_reports(
+                    input_dir, root / f"out_{unit}", include_business_trip=True, remark_unit=unit
+                )
+                wb = load_workbook(result.output_file)
+                ws = wb["考勤统计"]
+                on_headers = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+                out_col = on_headers.index("公出（天）") + 1
+                self.assertAlmostEqual(ws.cell(3, out_col).value or 0, 0.4)
+                remark = ws.cell(3, ws.max_column).value or ""
+                self.assertIn("公出0.4天", remark)
+                wb.close()
 
     def test_summary_attendance_remark_parsing(self) -> None:
         """汇总表无日期/无分钟列时，从备注中解析「M.D迟到N分钟」并填充到行/异常明细。"""
