@@ -8,8 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from openpyxl import Workbook
+
 from hr_toolkit.gui import HRToolkitApp, make_result_output_dir
 from hr_toolkit.project_store import CATEGORY_RESULTS, CATEGORY_UPLOADS, ProjectStore
+from hr_toolkit.tools.folder_rename import FILE_TYPE_PDF, rename_files_by_excel
 
 
 class _FakeResult:
@@ -261,6 +264,146 @@ class HistoryGuiIntegrationTests(unittest.TestCase):
             self.assertTrue((result_root / "张三-合同" / "说明.txt").is_file())
             self.assertFalse((result_root / "张三").exists())
             project_store.close()
+
+    def test_excel_folder_rename_uses_archived_roster_and_result_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            source = root / "人员资料"
+            source.mkdir()
+            original_file = source / "1.pdf"
+            original_file.write_bytes(b"record")
+            roster = root / "人员名单.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["姓名"])
+            worksheet.append(["张三"])
+            workbook.save(roster)
+            workbook.close()
+            roster_bytes = roster.read_bytes()
+            confirmed_preview = rename_files_by_excel(source, roster, file_type=FILE_TYPE_PDF, dry_run=True)
+            expected_operations = [
+                (operation.source.name, operation.target.name)
+                for operation in confirmed_preview.operations
+            ]
+            project_store = ProjectStore.create(root / "工作项目", "名单改名")
+
+            app = HRToolkitApp.__new__(HRToolkitApp)
+            app._tool_run_token = 3
+            app.current_tool = "folder_rename"
+            app.rename_mode = _Value("按 Excel 人名顺序批量重命名")
+            app.project_store = project_store
+            app.current_project_path = project_store.root
+            app._run_cancel_events = {3: threading.Event()}
+            app._history_task_by_token = {}
+            app._project_batch_by_token = {}
+            app.status_queue = queue.Queue()
+
+            def checked_rename(
+                root_dir: Path,
+                excel_path: Path,
+                *,
+                file_type: str,
+                expected_operations: list[tuple[str, str]],
+                expected_warnings: list[str],
+            ):
+                self.assertNotEqual(root_dir, source)
+                self.assertNotEqual(excel_path, roster)
+                self.assertTrue(root_dir.is_relative_to(project_store.root))
+                self.assertTrue(excel_path.is_relative_to(project_store.root))
+                self.assertEqual(excel_path.read_bytes(), roster_bytes)
+                return rename_files_by_excel(
+                    root_dir,
+                    excel_path,
+                    file_type=file_type,
+                    expected_operations=expected_operations,
+                    expected_warnings=expected_warnings,
+                )
+
+            with (
+                patch("hr_toolkit.gui.runlog.log_line"),
+                patch("hr_toolkit.gui.runlog.log_exception"),
+            ):
+                app._start_tool_worker(
+                    checked_rename,
+                    root_dir=source,
+                    excel_path=roster,
+                    file_type=FILE_TYPE_PDF,
+                    expected_operations=expected_operations,
+                    expected_warnings=list(confirmed_preview.warnings),
+                )
+                status, token, payload = app.status_queue.get(timeout=5)
+
+            self.assertEqual((status, token), ("success", 3), str(payload))
+            self.assertEqual(original_file.read_bytes(), b"record")
+            self.assertEqual(roster.read_bytes(), roster_bytes)
+            detail = project_store.get_batch(app._project_batch_by_token[3])
+            assert detail is not None
+            result_root = detail.directories[CATEGORY_RESULTS] / source.name
+            self.assertEqual((result_root / "张三.pdf").read_bytes(), b"record")
+            self.assertFalse((result_root / "1.pdf").exists())
+            archived_rosters = list(detail.directories[CATEGORY_UPLOADS].rglob(roster.name))
+            self.assertTrue(archived_rosters)
+            self.assertTrue(any(path.read_bytes() == roster_bytes for path in archived_rosters))
+            project_store.close()
+
+    def test_excel_folder_rename_gui_previews_then_dispatches_excel_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            source = root / "人员资料"
+            source.mkdir()
+            (source / "1.pdf").write_bytes(b"record")
+            roster = root / "人员名单.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["姓名"])
+            worksheet.append(["张三"])
+            workbook.save(roster)
+            workbook.close()
+
+            app = HRToolkitApp.__new__(HRToolkitApp)
+            app.input_path = _Value(str(source))
+            app.summary_path = _Value(str(roster))
+            app.rename_mode = _Value("按 Excel 人名顺序批量重命名")
+            app.rename_file_type = _Value("PDF")
+            app.rename_text = _Value("")
+            app.rename_target_name = _Value("")
+            app.rename_replacement_name = _Value("")
+            app._clear_log = Mock()
+            app._write_log = Mock()
+            app._begin_tool_run = Mock()
+            app._start_tool_worker = Mock()
+
+            with (
+                patch("hr_toolkit.gui.app.messagebox.askyesno", return_value=True),
+                patch("hr_toolkit.gui.app.messagebox.showwarning") as showwarning,
+                patch("hr_toolkit.gui.app.messagebox.showerror") as showerror,
+            ):
+                app._run_folder_rename()
+
+            showwarning.assert_not_called()
+            showerror.assert_not_called()
+            app._begin_tool_run.assert_called_once_with()
+            app._start_tool_worker.assert_called_once_with(
+                rename_files_by_excel,
+                root_dir=source,
+                excel_path=roster,
+                file_type=FILE_TYPE_PDF,
+                expected_operations=[("1.pdf", "张三.pdf")],
+                expected_warnings=[],
+            )
+            self.assertTrue((source / "1.pdf").is_file())
+
+    def test_excel_folder_rename_mode_alone_shows_roster_row(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.current_tool = "folder_rename"
+        app.rename_mode = _Value("按 Excel 人名顺序批量重命名")
+
+        app._update_summary_controls(apply_layout=False)
+        self.assertTrue(app._summary_row_visible)
+
+        app.rename_mode = _Value("追加文字")
+        app._update_summary_controls(apply_layout=False)
+        self.assertFalse(app._summary_row_visible)
 
     def test_folder_rename_context_keeps_before_and_after_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:

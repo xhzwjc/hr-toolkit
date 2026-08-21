@@ -39,8 +39,10 @@ from hr_toolkit.history_store import (
 )
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
+    MODE_EXCEL_BATCH,
     MODE_REMOVE,
     MODE_REPLACE,
+    rename_files_by_excel,
     rename_person_folders,
     FILE_TYPE_FOLDER,
     FILE_TYPE_ALL,
@@ -1749,7 +1751,7 @@ class HRToolkitApp:
         self._bind_path_tooltip(self.summary_display, lambda: self.summary_path.get().strip())
         self._update_summary_display()
 
-        self.rename_options_frame = ttk.LabelFrame(form, text="文件夹改名", padding=self._px(12), style="Rename.TLabelframe")
+        self.rename_options_frame = ttk.LabelFrame(form, text="批量改名", padding=self._px(12), style="Rename.TLabelframe")
         self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
         ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=self._px(5))
         self.rename_mode_widget = ttk.Combobox(
@@ -1757,13 +1759,14 @@ class HRToolkitApp:
             textvariable=self.rename_mode,
             values=list(RENAME_MODE_LABELS.keys()),
             state="readonly",
-            width=16,
+            width=28,
             style="App.TCombobox",
         )
         self.rename_mode_widget.grid(row=0, column=1, sticky="w", padx=self._px(12), pady=self._px(5))
         self.rename_mode_widget.bind("<<ComboboxSelected>>", self._on_rename_mode_changed)
 
-        ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel").grid(row=1, column=0, sticky="w", pady=self._px(5))
+        self.rename_target_label_widget = ttk.Label(self.rename_options_frame, textvariable=self.rename_target_label, style="App.TLabel")
+        self.rename_target_label_widget.grid(row=1, column=0, sticky="w", pady=self._px(5))
         self.rename_target_widget = ttk.Entry(self.rename_options_frame, textvariable=self.rename_target_name, style="App.TEntry")
         self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
 
@@ -6925,13 +6928,17 @@ class HRToolkitApp:
                 self.run_button_text.set("开始汇总")
         elif self.current_tool == "folder_rename":
             self.tool_title.set("人员资料文件夹改名")
-            self.tool_description.set("选择人员资料目录，先预览，再确认改名。")
+            rename_mode = RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
+            if rename_mode == MODE_EXCEL_BATCH:
+                self.tool_description.set("选择人员资料目录和人员名单 Excel，按名单与目录顺序预览后确认改名。")
+            else:
+                self.tool_description.set("选择人员资料目录，先预览，再确认改名。")
             self.input_label.set("人员文件夹目录")
-            self.input_hint.set("选择人员资料所在目录")
+            self.input_hint.set("只处理所选目录第一层，原目录不会被修改")
             self._input_drop_title = "选择人员文件夹目录"
             self.choose_input_text.set("选择文件夹")
-            self.summary_label.set("")
-            self.summary_button_text.set("选择")
+            self.summary_label.set("人员名单 Excel" if rename_mode == MODE_EXCEL_BATCH else "")
+            self.summary_button_text.set("选择名单" if rename_mode == MODE_EXCEL_BATCH else "选择")
             self.run_button_text.set("预览")
         elif self.current_tool == "archive_import":
             self.tool_title.set("档案入库与档案表")
@@ -7609,8 +7616,10 @@ class HRToolkitApp:
             ]
         if tool_id == "folder_rename":
             return [
-                ("适用：批量修改所选目录下第一层人员文件夹名称。", "strong"),
-                ("追加文字：姓名不填就是全部文件夹追加；填姓名就是只处理这个人。输入“劳动合同”会追加为“-劳动合同”。", None),
+                ("适用：批量修改所选目录下第一层文件夹或文件名称。", "strong"),
+                ("按 Excel 人名顺序批量重命名：名单按姓名行顺序，项目按文件名顺序一一对应；文件保留原扩展名。", None),
+                ("数量不一致、姓名无效、目标重名或目标已存在时会在预览中明确提醒；未配对或冲突项目不会改名，也不会覆盖。", "warning"),
+                ("追加文字：姓名不填就是全部项目追加；填姓名就是只处理这个人。输入内容会原样追加，需要分隔符时请一并输入。", None),
                 ("删除结尾文字：输入“_劳动合同”，可删除“张三_劳动合同 / 张三-劳动合同 / 张三劳动合同”的结尾文字。", None),
                 ("修改单人名称：填写原姓名和新名称，例如“张三”改为“章五”。", None),
                 ("安全说明：确认后会先把所选文件夹复制进当前项目，再在“处理结果”的副本上改名；电脑上的原文件夹不会被修改。", "warning"),
@@ -7654,7 +7663,11 @@ class HRToolkitApp:
         self.change_tabs.pack_forget()
 
     def _update_summary_controls(self, apply_layout: bool = True) -> None:
-        self._summary_row_visible = self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import", "material_collector"}
+        excel_rename = (
+            self.current_tool == "folder_rename"
+            and RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND) == MODE_EXCEL_BATCH
+        )
+        self._summary_row_visible = self.current_tool in {"social_security", "data_statistics", "insurance_ledger", "salary_merge", "personnel_change_merge", "archive_import", "material_collector"} or excel_rename
         if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
@@ -7777,6 +7790,11 @@ class HRToolkitApp:
                 hide(self.change_summary_folder_button)
                 self.change_summary_file_button.configure(text="选择文件", command=self._choose_archive_summary_file)
                 show(self.change_summary_file_button)
+        elif tool == "folder_rename":
+            hide(self.summary_choose_button, self.change_summary_folder_button, self.change_summary_file_button)
+            if RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND) == MODE_EXCEL_BATCH:
+                self.change_summary_file_button.configure(text="选择名单", command=self._choose_folder_rename_excel_file)
+                show(self.change_summary_file_button)
         elif tool == "material_collector":
             hide(self.summary_choose_button, self.change_summary_folder_button)
             self.change_summary_file_button.configure(text="选择文件", command=self._choose_material_roster_file)
@@ -7879,15 +7897,26 @@ class HRToolkitApp:
             self._tooltip_window = None
 
     def _on_rename_mode_changed(self, _event=None) -> None:
-        self._update_rename_mode_controls()
-        if hasattr(self, "_sync_right_canvas_window"):
-            self.root.after_idle(self._sync_right_canvas_window)
+        self._set_tool_texts()
+        self._clear_log()
+        self._write_log(self._initial_log_text())
 
     def _update_rename_mode_controls(self) -> None:
         mode = RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
         # 文件类型选择器始终显示
         self.rename_file_type_label_widget.grid(row=4, column=0, sticky="w", pady=self._px(5))
         self.rename_file_type_widget.grid(row=4, column=1, sticky="w", padx=self._px(12), pady=self._px(5))
+        if mode == MODE_EXCEL_BATCH:
+            self.rename_target_label_widget.grid_remove()
+            self.rename_target_widget.grid_remove()
+            self.rename_text_label_widget.grid_remove()
+            self.rename_text_widget.grid_remove()
+            self.rename_replacement_label_widget.grid_remove()
+            self.rename_replacement_widget.grid_remove()
+            return
+
+        self.rename_target_label_widget.grid(row=1, column=0, sticky="w", pady=self._px(5))
+        self.rename_target_widget.grid(row=1, column=1, sticky="ew", padx=self._px(12), pady=self._px(5))
         if mode == MODE_APPEND:
             self.rename_target_label.set("姓名（可不填）")
             self.rename_text_label.set("要追加的文字")
@@ -7931,6 +7960,8 @@ class HRToolkitApp:
                 return "请选择档案汇总表、压缩包或文件夹，然后点击“生成档案表”。已有公司档案表是可选项，结果会自动留存在当前项目。"
             return "请选择移交表文件、压缩包或文件夹，然后点击“开始入库”。已有档案汇总表是可选项，结果会自动留存在当前项目。"
         if self.current_tool == "folder_rename":
+            if RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND) == MODE_EXCEL_BATCH:
+                return "请选择人员资料目录和人员名单 Excel，选择文件类型后点击“预览”。名单和原目录都不会在预览时改变。"
             return "请选择人员文件夹目录，填写改名内容，然后点击“预览”。"
         if self.current_tool == "salary_split":
             return "请选择工资表文件，然后点击“开始拆分”。资料和结果会自动留存在当前项目。"
@@ -8022,6 +8053,14 @@ class HRToolkitApp:
     def _choose_material_roster_file(self) -> None:
         filename = self._askopenfilename(
             title="选择员工名单 Excel 文件",
+            filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
+        )
+        if filename:
+            self.summary_path.set(filename)
+
+    def _choose_folder_rename_excel_file(self) -> None:
+        filename = self._askopenfilename(
+            title="选择人员名单 Excel",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
         if filename:
@@ -8696,20 +8735,41 @@ class HRToolkitApp:
             return
 
         mode = RENAME_MODE_LABELS.get(self.rename_mode.get(), MODE_APPEND)
-        # 获取文件类型
         file_type_label = self.rename_file_type.get()
         file_type = RENAME_FILE_TYPE_LABELS.get(file_type_label, FILE_TYPE_FOLDER)
+        excel_path: Path | None = None
+        if mode == MODE_EXCEL_BATCH:
+            excel_text = self.summary_path.get().strip()
+            if not excel_text:
+                messagebox.showwarning("缺少人员名单", "请先选择包含姓名列的 Excel 名单。")
+                return
+            excel_path = Path(excel_text)
+            if not excel_path.exists() or not excel_path.is_file():
+                messagebox.showwarning("名单不存在", "选择的人员名单不存在，请重新选择。")
+                return
+            if excel_path.suffix.lower() not in {".xlsx", ".xls"}:
+                messagebox.showwarning("格式不支持", "人员名单只支持 .xlsx 或 .xls 文件。")
+                return
 
         try:
-            preview = rename_person_folders(
-                root_dir=root_dir,
-                mode=mode,
-                text=self.rename_text.get(),
-                target_name=self.rename_target_name.get(),
-                replacement_name=self.rename_replacement_name.get(),
-                file_type=file_type,
-                dry_run=True,
-            )
+            if mode == MODE_EXCEL_BATCH:
+                assert excel_path is not None
+                preview = rename_files_by_excel(
+                    root_dir=root_dir,
+                    excel_path=excel_path,
+                    file_type=file_type,
+                    dry_run=True,
+                )
+            else:
+                preview = rename_person_folders(
+                    root_dir=root_dir,
+                    mode=mode,
+                    text=self.rename_text.get(),
+                    target_name=self.rename_target_name.get(),
+                    replacement_name=self.rename_replacement_name.get(),
+                    file_type=file_type,
+                    dry_run=True,
+                )
         except Exception as exc:
             messagebox.showerror("预览失败", str(exc))
             return
@@ -8718,7 +8778,11 @@ class HRToolkitApp:
         self._write_log("预览结果：")
         self._write_folder_rename_preview(preview)
         if preview.operation_count == 0:
-            messagebox.showinfo("没有可改名项目", "没有找到需要改名的项目，请检查输入内容。")
+            warning_text = "\n".join(preview.warnings[:8])
+            message = "没有找到可以安全改名的项目，请检查目录、名单、文件类型和预览提醒。"
+            if warning_text:
+                message += f"\n\n提醒：\n{warning_text}"
+            messagebox.showinfo("没有可改名项目", message)
             return
 
         message = self._folder_rename_confirm_message(preview)
@@ -8728,15 +8792,29 @@ class HRToolkitApp:
 
         self._begin_tool_run()
         self._write_log("开始执行改名...")
-        self._start_tool_worker(
-            rename_person_folders,
-            root_dir=root_dir,
-            mode=mode,
-            text=self.rename_text.get(),
-            target_name=self.rename_target_name.get(),
-            replacement_name=self.rename_replacement_name.get(),
-            file_type=file_type,
-        )
+        if mode == MODE_EXCEL_BATCH:
+            assert excel_path is not None
+            self._start_tool_worker(
+                rename_files_by_excel,
+                root_dir=root_dir,
+                excel_path=excel_path,
+                file_type=file_type,
+                expected_operations=[
+                    (operation.source.name, operation.target.name)
+                    for operation in preview.operations
+                ],
+                expected_warnings=list(preview.warnings),
+            )
+        else:
+            self._start_tool_worker(
+                rename_person_folders,
+                root_dir=root_dir,
+                mode=mode,
+                text=self.rename_text.get(),
+                target_name=self.rename_target_name.get(),
+                replacement_name=self.rename_replacement_name.get(),
+                file_type=file_type,
+            )
 
     def _run_material_collector(self) -> None:
         input_text = self.input_path.get().strip()
@@ -9364,7 +9442,7 @@ class HRToolkitApp:
             self.last_output_dir = Path(payload["root_dir"])
             self._write_log("改名完成。")
             self._write_folder_rename_preview(result)
-            message = f"已完成 {payload['operation_count']} 个文件夹改名。"
+            message = f"已完成 {payload['operation_count']} 个项目改名。"
         else:
             self.last_output_dir = Path(payload["output_dir"])
             if self.current_tool == "social_security":
@@ -9592,9 +9670,10 @@ class HRToolkitApp:
         payload = result.to_dict()
         self._write_log(f"目录：{payload['root_dir']}")
         self._write_log(f"数量：{payload['operation_count']}")
-        for operation in payload["operations"][:30]:
+        preview_limit = payload["operation_count"] if payload["mode"] == MODE_EXCEL_BATCH else 30
+        for operation in payload["operations"][:preview_limit]:
             self._write_log(f"- {operation['source_name']} -> {operation['target_name']}")
-        remaining = payload["operation_count"] - 30
+        remaining = payload["operation_count"] - preview_limit
         if remaining > 0:
             self._write_log(f"... 还有 {remaining} 条")
         for warning in payload["warnings"]:
@@ -9602,12 +9681,20 @@ class HRToolkitApp:
 
     def _folder_rename_confirm_message(self, result) -> str:
         payload = result.to_dict()
-        lines = [f"确认改名 {payload['operation_count']} 个文件夹："]
+        lines = [f"确认改名 {payload['operation_count']} 个项目："]
         for operation in payload["operations"][:8]:
             lines.append(f"{operation['source_name']} -> {operation['target_name']}")
         remaining = payload["operation_count"] - 8
         if remaining > 0:
             lines.append(f"... 还有 {remaining} 条")
+        if payload["warnings"]:
+            lines.append("")
+            lines.append("预览提醒：")
+            for warning in payload["warnings"][:6]:
+                lines.append(f"- {warning}")
+            warning_remaining = len(payload["warnings"]) - 6
+            if warning_remaining > 0:
+                lines.append(f"- ... 还有 {warning_remaining} 条提醒，请查看运行记录")
         lines.append("")
         lines.append("确认后会复制到当前项目，并在处理结果副本上改名；原文件夹不会改变。是否继续？")
         return "\n".join(lines)

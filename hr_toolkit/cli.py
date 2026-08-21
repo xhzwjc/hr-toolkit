@@ -16,7 +16,12 @@ from hr_toolkit.tools.registry import (
     get_tool_by_cli_command,
 )
 
-from .tools.folder_rename import rename_person_folders, FILE_TYPE_FOLDER
+from .tools.folder_rename import (
+    FILE_TYPE_FOLDER,
+    MODE_EXCEL_BATCH,
+    rename_files_by_excel,
+    rename_person_folders,
+)
 from .tools.material_collector import collect_employee_materials, MODE_BY_EMPLOYEE
 from .tools.archive_import import export_company_archive_tables, import_archive_transfers
 from .tools.data_statistics import generate_data_statistics_reports
@@ -103,9 +108,10 @@ def _build_roster_update_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _build_folder_rename_parser(subparsers: argparse._SubParsersAction) -> None:
-    p = subparsers.add_parser("folder-rename", help="需求8：人员资料文件夹批量改名")
+    p = subparsers.add_parser("folder-rename", help="人员资料批量改名（支持 Excel 人名顺序）")
     p.add_argument("-r", "--root", required=True, type=Path, help="需要处理的人员文件夹所在目录")
-    p.add_argument("--mode", required=True, choices=["append", "remove", "replace"], help="append=追加文字，remove=删除结尾文字，replace=修改名称")
+    p.add_argument("--mode", required=True, choices=["append", "remove", "replace", MODE_EXCEL_BATCH], help="append=追加文字，remove=删除结尾文字，replace=修改名称，excel=按名单顺序改名")
+    p.add_argument("--excel", type=Path, help="excel 模式必填：包含姓名列的 .xlsx/.xls 名单")
     p.add_argument("--text", default="", help="追加文字或要删除的结尾文字，例如：劳动合同、-劳动合同、_身份证")
     p.add_argument("--target", default="", help="指定单个项目/原名称；不填时 append/remove 处理全部匹配项")
     p.add_argument("--replacement", default="", help="replace 模式下的新名称")
@@ -316,15 +322,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "folder-rename":
-        result = rename_person_folders(
-            root_dir=args.root,
-            mode=args.mode,
-            text=args.text,
-            target_name=args.target,
-            replacement_name=args.replacement,
-            file_type=args.file_type,
-            dry_run=not args.apply,
-        )
+        if args.mode == MODE_EXCEL_BATCH:
+            if args.excel is None:
+                parser.error("folder-rename --mode excel 必须同时提供 --excel 名单文件")
+            result = rename_files_by_excel(
+                root_dir=args.root,
+                excel_path=args.excel,
+                file_type=args.file_type,
+                dry_run=not args.apply,
+            )
+        else:
+            result = rename_person_folders(
+                root_dir=args.root,
+                mode=args.mode,
+                text=args.text,
+                target_name=args.target,
+                replacement_name=args.replacement,
+                file_type=args.file_type,
+                dry_run=not args.apply,
+            )
         payload = result.to_dict()
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))

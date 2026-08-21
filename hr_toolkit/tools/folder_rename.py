@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import filecmp
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,8 +16,18 @@ TOOL_NAME = "需求8-人员资料文件夹改名"
 MODE_APPEND = "append"
 MODE_REMOVE = "remove"
 MODE_REPLACE = "replace"
+MODE_EXCEL_BATCH = "excel"
 MODES = {MODE_APPEND, MODE_REMOVE, MODE_REPLACE}
 WINDOWS_INVALID_CHARS = set('<>:"/\\|?*')
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CLOCK$",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 # 文件类型分组
 FILE_TYPE_FOLDER = "folder"
@@ -125,18 +136,24 @@ def rename_files_by_excel(
     *,
     name_column: str = "姓名",
     header_row: int = 1,
+    file_type: str = FILE_TYPE_ALL,
     file_extensions: list[str] | None = None,
+    expected_operations: list[tuple[str, str]] | None = None,
+    expected_warnings: list[str] | None = None,
     dry_run: bool = False,
 ) -> FolderRenameResult:
-    """按照Excel名字列批量改名文件（支持PDF、图片等任意格式）
+    """按照 Excel 姓名行顺序批量改名目录中的第一层项目。
 
     Args:
-        root_dir: 包含待改名文件的文件夹路径
-        excel_path: Excel文件路径，包含名字列
-        name_column: 名字列的表头名称，默认"姓名"
-        header_row: 表头行号，默认1
-        file_extensions: 要改名的文件扩展名列表，如 [".pdf", ".jpg"]，None表示所有文件
-        dry_run: 是否只预览不执行
+        root_dir: 包含待改名项目的目录。
+        excel_path: 包含姓名列的 Excel 文件。
+        name_column: 姓名列的表头名称，默认“姓名”。
+        header_row: 表头行号，默认 1。
+        file_type: 待改名项目类型，支持文件夹、PDF、图片、文档和全部。
+        file_extensions: 兼容旧调用的扩展名过滤；传入后仅筛选这些扩展名的文件。
+        expected_operations: 已确认预览中的“原名称、目标名称”列表；不一致时拒绝执行。
+        expected_warnings: 已确认预览中的提醒列表；不一致时拒绝执行。
+        dry_run: 是否只生成预览而不执行。
     """
     root_dir = Path(root_dir).expanduser().resolve()
     excel_path = Path(excel_path).expanduser().resolve()
@@ -146,19 +163,28 @@ def rename_files_by_excel(
         raise FileNotFoundError(f"Excel文件不存在：{excel_path}")
     if not is_supported_excel_file(excel_path):
         raise ValueError("仅支持 .xlsx 或 .xls 文件。")
+    if header_row < 1:
+        raise ValueError("表头行号必须大于等于 1。")
+    if file_type not in FILE_TYPE_EXTENSIONS:
+        raise ValueError(f"不支持的文件类型：{file_type}")
 
-    # 读取Excel名字列
     names = _read_names_from_excel(excel_path, name_column, header_row)
     if not names:
         raise ValueError(f"Excel文件中未找到“{name_column}”列或该列无数据。")
 
-    # 获取待改名的文件列表
-    files = _list_files_for_rename(root_dir, file_extensions)
-    if not files:
-        raise ValueError(f"文件夹中未找到可改名的文件。")
-
-    # 生成改名操作
-    operations, warnings = _plan_excel_batch_operations(root_dir, files, names)
+    items = _list_items_for_excel_rename(
+        root_dir,
+        file_type=file_type,
+        file_extensions=file_extensions,
+        excel_path=excel_path,
+    )
+    operations, warnings = _plan_excel_batch_operations(items, names)
+    _validate_confirmed_excel_preview(
+        operations,
+        warnings,
+        expected_operations=expected_operations,
+        expected_warnings=expected_warnings,
+    )
 
     result = FolderRenameResult(
         root_dir=root_dir,
@@ -173,6 +199,12 @@ def rename_files_by_excel(
     completed: list[FolderRenameOperation] = []
     runtime_warnings = list(warnings)
     for operation in operations:
+        if not operation.source.exists():
+            runtime_warnings.append(f"{operation.source.name} 已不存在，已跳过")
+            continue
+        if operation.target.exists():
+            runtime_warnings.append(f"{operation.target.name} 执行前已存在，{operation.source.name} 已跳过，未覆盖原项目")
+            continue
         try:
             operation.source.rename(operation.target)
         except OSError as exc:
@@ -185,34 +217,44 @@ def rename_files_by_excel(
 
 
 def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) -> list[str]:
-    """从Excel文件中读取名字列"""
+    """从 Excel 文件中读取姓名列，保留非空数据行的原始顺序。"""
     import tempfile
+
     with tempfile.TemporaryDirectory() as temp_dir:
         working_path = ensure_xlsx_workbook(excel_path, Path(temp_dir))
         wb = load_workbook(working_path, data_only=True, read_only=True)
         try:
             # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
             ws = SheetGrid(wb.active)
-            # 查找名字列
             name_col = None
+            matched_header_row = header_row
             max_col = min(ws.max_column or 0, 50)
-            for col in range(1, max_col + 1):
-                header = _normalize_text(ws.cell(header_row, col).value)
-                if header == name_column:
-                    name_col = col
+            normalized_name_column = _normalize_text(name_column)
+            max_header_row = min(ws.max_row or 0, 20)
+            candidate_rows = [header_row, *(row for row in range(1, max_header_row + 1) if row != header_row)]
+            for candidate_row in candidate_rows:
+                for col in range(1, max_col + 1):
+                    header = _normalize_text(ws.cell(candidate_row, col).value)
+                    if header == normalized_name_column:
+                        name_col = col
+                        matched_header_row = candidate_row
+                        break
+                if name_col is not None:
                     break
             if name_col is None:
-                # 尝试模糊匹配
-                for col in range(1, max_col + 1):
-                    header = _normalize_text(ws.cell(header_row, col).value)
-                    if name_column in header or header in ("姓名", "名字", "名称"):
-                        name_col = col
+                for candidate_row in candidate_rows:
+                    for col in range(1, max_col + 1):
+                        header = _normalize_text(ws.cell(candidate_row, col).value)
+                        if normalized_name_column in header or header in ("姓名", "名字", "名称"):
+                            name_col = col
+                            matched_header_row = candidate_row
+                            break
+                    if name_col is not None:
                         break
             if name_col is None:
                 return []
-            # 读取名字列
             names: list[str] = []
-            for row in range(header_row + 1, (ws.max_row or 0) + 1):
+            for row in range(matched_header_row + 1, (ws.max_row or 0) + 1):
                 value = ws.cell(row, name_col).value
                 if value is not None:
                     name = str(value).strip()
@@ -223,54 +265,127 @@ def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) 
             wb.close()
 
 
-def _list_files_for_rename(root_dir: Path, file_extensions: list[str] | None) -> list[Path]:
-    """列出待改名的文件"""
-    files: list[Path] = []
-    for path in sorted(root_dir.iterdir()):
-        if not path.is_file():
-            continue
-        # 跳过隐藏文件和临时文件
+def _list_items_for_excel_rename(
+    root_dir: Path,
+    *,
+    file_type: str,
+    file_extensions: list[str] | None,
+    excel_path: Path,
+) -> list[Path]:
+    """按人类可读的文件名顺序列出目录第一层的待改名项目。"""
+    legacy_extensions = None
+    if file_extensions is not None:
+        legacy_extensions = {
+            extension.lower() if extension.startswith(".") else f".{extension.lower()}"
+            for extension in file_extensions
+        }
+    allowed_extensions = set(FILE_TYPE_EXTENSIONS[file_type])
+
+    def matches(path: Path) -> bool:
         if path.name.startswith((".", "~$")):
+            return False
+        if legacy_extensions is not None:
+            return path.is_file() and path.suffix.lower() in legacy_extensions
+        if file_type == FILE_TYPE_FOLDER:
+            return path.is_dir()
+        if file_type == FILE_TYPE_ALL:
+            return path.is_dir() or path.is_file()
+        return path.is_file() and path.suffix.lower() in allowed_extensions
+
+    items = []
+    for path in root_dir.iterdir():
+        if not matches(path):
             continue
-        if file_extensions is not None:
-            if path.suffix.lower() not in file_extensions:
-                continue
-        files.append(path)
-    return files
+        if path.is_file() and _is_excel_source_item(path, excel_path):
+            continue
+        items.append(path)
+    return sorted(items, key=_natural_name_sort_key)
+
+
+def _is_excel_source_item(path: Path, excel_path: Path) -> bool:
+    """避免把放在待处理目录中的名单工作簿本身纳入改名。"""
+    try:
+        if path.samefile(excel_path):
+            return True
+    except OSError:
+        pass
+
+    # 项目执行时，目录副本和名单留存副本位于不同位置；相同文件名和内容
+    # 可以确认它仍是名单副本，避免预览与正式执行的候选数量发生变化。
+    if path.name != excel_path.name:
+        return False
+    try:
+        if path.stat().st_size != excel_path.stat().st_size:
+            return False
+        return filecmp.cmp(path, excel_path, shallow=False)
+    except OSError:
+        return False
+
+
+def _natural_name_sort_key(path: Path) -> tuple[tuple[int, int | str], ...]:
+    parts = re.split(r"(\d+)", path.name.casefold())
+    return tuple((1, int(part)) if part.isdigit() else (0, part) for part in parts)
 
 
 def _plan_excel_batch_operations(
-    root_dir: Path,
-    files: list[Path],
+    items: list[Path],
     names: list[str],
 ) -> tuple[list[FolderRenameOperation], list[str]]:
-    """生成Excel批量改名操作"""
-    operations: list[FolderRenameOperation] = []
+    """按位置一一配对，冲突只跳过当前配对，不改变后续对应关系。"""
     warnings: list[str] = []
 
-    # 文件数量和名字数量不匹配时警告
-    if len(files) != len(names):
-        warnings.append(f"文件数量（{len(files)}）与名字数量（{len(names)}）不匹配，将按顺序改名到数量较少的一方。")
+    if len(items) > len(names):
+        unmatched_items = [path.name for path in items[len(names) :]]
+        warnings.append(
+            f"名单比筛选后的项目少 {len(unmatched_items)} 个；以下项目保持原名："
+            f"{_warning_item_list(unmatched_items)}"
+        )
+    elif len(names) > len(items):
+        unmatched_names = names[len(items) :]
+        warnings.append(
+            f"名单比筛选后的项目多 {len(unmatched_names)} 人；以下姓名没有对应项目："
+            f"{_warning_item_list(unmatched_names)}"
+        )
 
-    count = min(len(files), len(names))
-    for i in range(count):
-        source = files[i]
-        new_name = names[i]
-        # 保留原文件扩展名
-        suffix = source.suffix
+    planned: list[FolderRenameOperation] = []
+    for source, new_name in zip(items, names):
+        suffix = source.suffix if source.is_file() else ""
         target_name = f"{new_name}{suffix}"
-        target = source.parent / target_name
-
-        if source == target:
-            warnings.append(f"{source.name} 改名前后相同，已跳过")
-            continue
-        if target.exists():
-            warnings.append(f"{target.name} 已存在，{source.name} 已跳过")
+        try:
+            _validate_excel_target_name(target_name)
+            planned.append(FolderRenameOperation(source=source, target=source.with_name(target_name)))
+        except ValueError as exc:
+            warnings.append(f"{source.name} 对应姓名“{new_name}”不能用于改名，已跳过：{exc}")
             continue
 
-        operations.append(FolderRenameOperation(source=source, target=target))
+    return _filter_invalid_operations(planned, warnings, case_insensitive_targets=True), warnings
 
-    return operations, warnings
+
+def _warning_item_list(values: list[str], *, limit: int = 8) -> str:
+    shown = values[:limit]
+    text = "、".join(shown)
+    if len(values) > limit:
+        text += f" 等共 {len(values)} 个"
+    return text
+
+
+def _validate_confirmed_excel_preview(
+    operations: list[FolderRenameOperation],
+    warnings: list[str],
+    *,
+    expected_operations: list[tuple[str, str]] | None,
+    expected_warnings: list[str] | None,
+) -> None:
+    if expected_operations is None and expected_warnings is None:
+        return
+    actual_operations = [(operation.source.name, operation.target.name) for operation in operations]
+    operations_changed = (
+        expected_operations is not None
+        and actual_operations != [tuple(pair) for pair in expected_operations]
+    )
+    warnings_changed = expected_warnings is not None and warnings != expected_warnings
+    if operations_changed or warnings_changed:
+        raise RuntimeError("待改名目录或人员名单在预览确认后发生了变化，本次未执行。请重新预览并确认。")
 
 
 def _normalize_text(value: Any) -> str:
@@ -411,22 +526,37 @@ def _validate_folder_name(name: str) -> None:
         raise ValueError(f"文件夹名称包含 Windows 不支持的字符：{name}")
 
 
+def _validate_excel_target_name(name: str) -> None:
+    _validate_folder_name(name)
+    if any(ord(char) < 32 for char in name):
+        raise ValueError(f"文件夹名称包含 Windows 不支持的控制字符：{name}")
+    if name.endswith((" ", ".")):
+        raise ValueError(f"文件夹名称不能以空格或句点结尾：{name}")
+    if name.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"文件夹名称是 Windows 保留名称：{name}")
+
+
 def _filter_invalid_operations(
     operations: list[FolderRenameOperation],
     warnings: list[str],
+    *,
+    case_insensitive_targets: bool = False,
 ) -> list[FolderRenameOperation]:
     valid: list[FolderRenameOperation] = []
-    seen_targets: set[Path] = set()
+    seen_targets: set[object] = set()
     for operation in operations:
         if operation.source == operation.target:
             warnings.append(f"{operation.source.name} 改名前后相同，已跳过")
             continue
-        if operation.target in seen_targets:
-            warnings.append(f"{operation.target.name} 目标名称重复，已跳过")
+        target_key: object = operation.target
+        if case_insensitive_targets:
+            target_key = (str(operation.target.parent.resolve()).casefold(), operation.target.name.casefold())
+        if target_key in seen_targets:
+            warnings.append(f"{operation.target.name} 目标名称重复，{operation.source.name} 已跳过")
             continue
         if operation.target.exists():
             warnings.append(f"{operation.target.name} 已存在，{operation.source.name} 已跳过")
             continue
-        seen_targets.add(operation.target)
+        seen_targets.add(target_key)
         valid.append(operation)
     return valid

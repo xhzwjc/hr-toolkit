@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
+    MODE_EXCEL_BATCH,
     MODE_REMOVE,
     MODE_REPLACE,
     FILE_TYPE_FOLDER,
@@ -17,6 +18,7 @@ RENAME_MODE_LABELS = {
     "追加文字": MODE_APPEND,
     "删除结尾文字": MODE_REMOVE,
     "修改单人名称": MODE_REPLACE,
+    "按 Excel 人名顺序批量重命名": MODE_EXCEL_BATCH,
 }
 
 RENAME_FILE_TYPE_LABELS = {
@@ -89,6 +91,7 @@ HISTORY_SUPPORTING_PATH_ARGUMENTS = {
     "existing_summary_path",
     "template_path",
     "analysis_template_path",
+    "excel_path",
     "target_path",
     "existing_archive_path",
 }
