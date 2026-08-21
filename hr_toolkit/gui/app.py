@@ -9086,7 +9086,14 @@ class HRToolkitApp:
                 root_dir = Path(value).expanduser()
                 parameters[name] = root_dir.name
                 if root_dir.exists():
-                    sources.append(SourceSpec(path=root_dir, role="input_path", suffixes=None))
+                    sources.append(
+                        SourceSpec(
+                            path=root_dir,
+                            role="input_path",
+                            suffixes=None,
+                            preserve_directories=True,
+                        )
+                    )
                     output_dir = root_dir
                 continue
             if name == "library_dir" and value is not None:
@@ -9267,26 +9274,47 @@ class HRToolkitApp:
                 is_project_source = True
             except ValueError:
                 is_project_source = False
-            if is_project_source:
-                copier = getattr(store, "copy_project_sources", None)
-                if not callable(copier):
-                    raise RuntimeError("当前版本暂时不能复用项目内资料，请从原文件位置重新选择。")
+            if source.preserve_directories:
+                if source_was_file:
+                    raise RuntimeError(f"需要文件夹资料：{source.path.name}")
+                method_name = (
+                    "copy_project_directory_snapshot"
+                    if is_project_source
+                    else "import_directory_snapshot"
+                )
+                snapshotter = getattr(store, method_name, None)
+                if not callable(snapshotter):
+                    raise RuntimeError("当前版本无法安全留存文件夹结构。")
+                replacement = snapshotter(
+                    batch_id,
+                    source_path,
+                    category="uploads",
+                    role=source.role,
+                    cancelled=cancel_event.is_set,
+                )
             else:
-                copier = store.import_sources
-            records = copier(
-                batch_id,
-                [source_path],
-                category="uploads",
-                role=source.role,
-                cancelled=cancel_event.is_set,
-            )
-            replacement = self._project_source_replacement(
-                store,
-                batch_id,
-                source,
-                records,
-                source_was_file=source_was_file,
-            )
+                if is_project_source:
+                    copier = getattr(store, "copy_project_sources", None)
+                    if not callable(copier):
+                        raise RuntimeError(
+                            "当前版本暂时不能复用项目内资料，请从原文件位置重新选择。"
+                        )
+                else:
+                    copier = store.import_sources
+                records = copier(
+                    batch_id,
+                    [source_path],
+                    category="uploads",
+                    role=source.role,
+                    cancelled=cancel_event.is_set,
+                )
+                replacement = self._project_source_replacement(
+                    store,
+                    batch_id,
+                    source,
+                    records,
+                    source_was_file=source_was_file,
+                )
             replacements.setdefault(source.role, []).append(replacement)
         return replacements
 

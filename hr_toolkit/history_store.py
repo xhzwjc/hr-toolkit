@@ -107,6 +107,7 @@ class SourceSpec:
     path: Path
     role: str = "main"
     suffixes: frozenset[str] | None = DEFAULT_ARCHIVE_SUFFIXES
+    preserve_directories: bool = False
 
 
 @dataclass(frozen=True)

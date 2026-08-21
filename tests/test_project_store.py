@@ -299,6 +299,93 @@ class ProjectStoreTests(unittest.TestCase):
         copied = self.store.create_result_working_copy(running.summary.id, upload_source)
         self.assertEqual((copied / "张三" / "说明.txt").read_bytes(), b"record")
 
+    def test_directory_snapshot_preserves_empty_folders_and_locks_topology(self) -> None:
+        source_dir = self.sources / "testname"
+        (source_dir / "54").mkdir(parents=True)
+        (source_dir / "4343" / "空子目录").mkdir(parents=True)
+        (source_dir / "2331221").mkdir(parents=True)
+        metadata = source_dir / ".DS_Store"
+        metadata.write_bytes(b"finder metadata")
+        source_before = sorted(
+            path.relative_to(source_dir).as_posix()
+            for path in source_dir.rglob("*")
+        )
+        metadata_before = hashlib.sha256(metadata.read_bytes()).hexdigest()
+
+        draft = self._draft(tool_name="人员资料文件夹改名")
+        draft_snapshot = self.store.import_directory_snapshot(
+            draft.summary.id,
+            source_dir,
+            role="input_path",
+        )
+        relative_snapshot = draft_snapshot.relative_to(
+            draft.directories[CATEGORY_UPLOADS]
+        )
+        running = self.store.start_batch(draft.summary.id)
+        upload_snapshot = running.directories[CATEGORY_UPLOADS] / relative_snapshot
+
+        self.assertEqual(
+            sorted(path.name for path in upload_snapshot.iterdir()),
+            ["2331221", "4343", "54"],
+        )
+        self.assertTrue((upload_snapshot / "4343" / "空子目录").is_dir())
+        self.assertFalse((upload_snapshot / ".DS_Store").exists())
+
+        injected = upload_snapshot / "预览后新增"
+        injected.mkdir()
+        with self.assertRaisesRegex(ProjectStoreError, "文件夹结构|清单"):
+            self.store.create_result_working_copy(running.summary.id, upload_snapshot)
+        injected.rmdir()
+
+        copied = self.store.create_result_working_copy(
+            running.summary.id,
+            upload_snapshot,
+        )
+        self.assertEqual(
+            sorted(
+                path.relative_to(copied).as_posix()
+                for path in copied.rglob("*")
+            ),
+            ["2331221", "4343", "4343/空子目录", "54"],
+        )
+        self.assertEqual(
+            sorted(path.relative_to(source_dir).as_posix() for path in source_dir.rglob("*")),
+            source_before,
+        )
+        self.assertEqual(
+            hashlib.sha256(metadata.read_bytes()).hexdigest(),
+            metadata_before,
+        )
+
+    def test_empty_directory_snapshot_survives_batch_move_restore_and_reuse(self) -> None:
+        source_dir = self.sources / "空人员资料"
+        (source_dir / "001" / "空子目录").mkdir(parents=True)
+        draft = self._draft(tool_name="人员资料文件夹改名")
+        draft_snapshot = self.store.import_directory_snapshot(
+            draft.summary.id,
+            source_dir,
+            role="input_path",
+        )
+        relative_snapshot = draft_snapshot.relative_to(
+            draft.directories[CATEGORY_UPLOADS]
+        )
+        running = self.store.start_batch(draft.summary.id)
+        self.store.mark_success(running.summary.id)
+        self.store.move_to_trash(running.summary.id)
+        restored = self.store.restore_from_trash(running.summary.id)
+        restored_snapshot = (
+            restored.directories[CATEGORY_UPLOADS] / relative_snapshot
+        )
+        self.assertTrue((restored_snapshot / "001" / "空子目录").is_dir())
+
+        reused_draft = self._draft(tool_name="人员资料文件夹改名")
+        reused_snapshot = self.store.copy_project_directory_snapshot(
+            reused_draft.summary.id,
+            restored_snapshot,
+            role="input_path",
+        )
+        self.assertTrue((reused_snapshot / "001" / "空子目录").is_dir())
+
     def test_import_ignores_office_temporary_files_and_rejects_scripts_before_copy(self) -> None:
         folder = self.sources / "批量"
         folder.mkdir()
@@ -827,6 +914,38 @@ class ProjectStoreTests(unittest.TestCase):
         recovered = self.store.get_batch(draft.summary.id)
         self.assertEqual(len(recovered.files), 1)
         self.assertEqual(recovered.files[0].path(self.store.workspace).read_bytes(), b"recover")
+
+    def test_pending_empty_directory_snapshot_is_completed_after_reopen(self) -> None:
+        source = self.sources / "待恢复空目录"
+        (source / "001" / "空子目录").mkdir(parents=True)
+        draft = self._draft(tool_name="人员资料文件夹改名")
+        real_write = self.store._write_active_manifest
+        saw_pending = False
+
+        def fail_final(batch_id, manifest):
+            nonlocal saw_pending
+            if manifest.get("pending_import"):
+                saw_pending = True
+                return real_write(batch_id, manifest)
+            if saw_pending:
+                raise OSError("模拟文件夹发布后断电")
+            return real_write(batch_id, manifest)
+
+        with patch.object(self.store, "_write_active_manifest", side_effect=fail_final):
+            with self.assertRaises(OSError):
+                self.store.import_directory_snapshot(
+                    draft.summary.id,
+                    source,
+                    role="input_path",
+                )
+        self.store.close()
+        self.store = ProjectStore.open(self.project_root)
+
+        recovered = self.store.get_batch(draft.summary.id)
+        assert recovered is not None
+        recovered_source = recovered.directories[CATEGORY_UPLOADS] / source.name
+        self.assertTrue((recovered_source / "001" / "空子目录").is_dir())
+        self.assertTrue(self.store.verify_batch_files(draft.summary.id))
 
     def test_visible_directory_import_journal_completes_after_reopen(self) -> None:
         source = self.sources / "待恢复资料"

@@ -12,7 +12,11 @@ from openpyxl import Workbook
 
 from hr_toolkit.gui import HRToolkitApp, make_result_output_dir
 from hr_toolkit.project_store import CATEGORY_RESULTS, CATEGORY_UPLOADS, ProjectStore
-from hr_toolkit.tools.folder_rename import FILE_TYPE_PDF, rename_files_by_excel
+from hr_toolkit.tools.folder_rename import (
+    FILE_TYPE_FOLDER,
+    FILE_TYPE_PDF,
+    rename_files_by_excel,
+)
 
 
 class _FakeResult:
@@ -346,6 +350,89 @@ class HistoryGuiIntegrationTests(unittest.TestCase):
             self.assertTrue(any(path.read_bytes() == roster_bytes for path in archived_rosters))
             project_store.close()
 
+    def test_excel_folder_rename_handles_only_empty_person_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            source = root / "testname"
+            source.mkdir()
+            for name in ("54", "4343", "2331221"):
+                (source / name).mkdir()
+            finder_metadata = source / ".DS_Store"
+            finder_metadata.write_bytes(b"finder metadata")
+            source_before = sorted(
+                path.relative_to(source).as_posix() for path in source.rglob("*")
+            )
+            metadata_before = finder_metadata.read_bytes()
+
+            roster = root / "人员名单.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append(["姓名"])
+            for name in ("王京川", "张三", "王五"):
+                worksheet.append([name])
+            workbook.save(roster)
+            workbook.close()
+            roster_before = roster.read_bytes()
+            confirmed_preview = rename_files_by_excel(
+                source,
+                roster,
+                file_type=FILE_TYPE_FOLDER,
+                dry_run=True,
+            )
+            expected_operations = [
+                (operation.source.name, operation.target.name)
+                for operation in confirmed_preview.operations
+            ]
+            project_store = ProjectStore.create(root / "工作项目", "名单改名")
+
+            app = HRToolkitApp.__new__(HRToolkitApp)
+            app._tool_run_token = 4
+            app.current_tool = "folder_rename"
+            app.rename_mode = _Value("按 Excel 人名顺序批量重命名")
+            app.project_store = project_store
+            app.current_project_path = project_store.root
+            app._run_cancel_events = {4: threading.Event()}
+            app._history_task_by_token = {}
+            app._project_batch_by_token = {}
+            app.status_queue = queue.Queue()
+
+            with (
+                patch("hr_toolkit.gui.runlog.log_line"),
+                patch("hr_toolkit.gui.runlog.log_exception"),
+            ):
+                app._start_tool_worker(
+                    rename_files_by_excel,
+                    root_dir=source,
+                    excel_path=roster,
+                    file_type=FILE_TYPE_FOLDER,
+                    expected_operations=expected_operations,
+                    expected_warnings=list(confirmed_preview.warnings),
+                )
+                status, token, payload = app.status_queue.get(timeout=5)
+
+            self.assertEqual((status, token), ("success", 4), str(payload))
+            self.assertEqual(
+                sorted(path.relative_to(source).as_posix() for path in source.rglob("*")),
+                source_before,
+            )
+            self.assertEqual(finder_metadata.read_bytes(), metadata_before)
+            self.assertEqual(roster.read_bytes(), roster_before)
+
+            detail = project_store.get_batch(app._project_batch_by_token[4])
+            assert detail is not None
+            result_root = detail.directories[CATEGORY_RESULTS] / source.name
+            self.assertEqual(
+                {path.name for path in result_root.iterdir()},
+                {"王京川", "张三", "王五"},
+            )
+            self.assertTrue(all(path.is_dir() for path in result_root.iterdir()))
+            upload_root = detail.directories[CATEGORY_UPLOADS] / source.name
+            self.assertEqual(
+                sorted(path.name for path in upload_root.iterdir()),
+                ["2331221", "4343", "54"],
+            )
+            project_store.close()
+
     def test_excel_folder_rename_gui_previews_then_dispatches_excel_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_root:
             root = Path(temp_root)
@@ -425,6 +512,7 @@ class HistoryGuiIntegrationTests(unittest.TestCase):
             self.assertEqual(parameters["root_dir"], root.name)
             self.assertEqual(len(sources), 1)
             self.assertIsNone(sources[0].suffixes)
+            self.assertTrue(sources[0].preserve_directories)
 
     def test_stored_result_removes_absolute_paths_but_keeps_counts(self) -> None:
         payload = HRToolkitApp._history_result_for_storage(

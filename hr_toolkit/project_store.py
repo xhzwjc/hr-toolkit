@@ -244,6 +244,19 @@ class _ExternalSourceItem:
     expected_sha256: str | None = None
 
 
+@dataclass(frozen=True)
+class _ExternalSourceDirectory:
+    source_index: int
+    top_name: str
+    relative_parts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _BatchCopyResult:
+    files: tuple[ProjectFile, ...]
+    directory_roots: tuple[Path, ...] = ()
+
+
 class ProjectStore:
     """One opened project workspace.
 
@@ -479,6 +492,7 @@ class ProjectStore:
             },
             "directories": directories,
             "files": [],
+            "source_directories": [],
             "pending_import": None,
             "pending_rename": None,
             "pending_trash": None,
@@ -643,10 +657,11 @@ class ProjectStore:
             category=category,
             role=role,
             project_sources=False,
+            preserve_directories=False,
             cancelled=cancelled,
             progress=progress,
             on_progress=on_progress,
-        )
+        ).files
 
     def copy_project_sources(
         self,
@@ -672,10 +687,67 @@ class ProjectStore:
             category=category,
             role=role,
             project_sources=True,
+            preserve_directories=False,
+            cancelled=cancelled,
+            progress=progress,
+            on_progress=on_progress,
+        ).files
+
+    def import_directory_snapshot(
+        self,
+        batch_id: str,
+        source: str | Path,
+        *,
+        category: str = CATEGORY_UPLOADS,
+        role: str = "main",
+        cancelled: Callable[[], bool] | None = None,
+        progress: Callable[[int, int, str], None] | None = None,
+        on_progress: Callable[[ImportProgress], None] | None = None,
+    ) -> Path:
+        """Snapshot one external directory, including its empty directories."""
+
+        result = self._copy_sources_to_batch(
+            batch_id,
+            (source,),
+            category=category,
+            role=role,
+            project_sources=False,
+            preserve_directories=True,
             cancelled=cancelled,
             progress=progress,
             on_progress=on_progress,
         )
+        if len(result.directory_roots) != 1:
+            raise ProjectStoreError("文件夹资料快照不完整。")
+        return result.directory_roots[0]
+
+    def copy_project_directory_snapshot(
+        self,
+        batch_id: str,
+        source: str | Path,
+        *,
+        category: str = CATEGORY_UPLOADS,
+        role: str = "main",
+        cancelled: Callable[[], bool] | None = None,
+        progress: Callable[[int, int, str], None] | None = None,
+        on_progress: Callable[[ImportProgress], None] | None = None,
+    ) -> Path:
+        """Snapshot one project directory, including its empty directories."""
+
+        result = self._copy_sources_to_batch(
+            batch_id,
+            (source,),
+            category=category,
+            role=role,
+            project_sources=True,
+            preserve_directories=True,
+            cancelled=cancelled,
+            progress=progress,
+            on_progress=on_progress,
+        )
+        if len(result.directory_roots) != 1:
+            raise ProjectStoreError("文件夹资料快照不完整。")
+        return result.directory_roots[0]
 
     def _copy_sources_to_batch(
         self,
@@ -685,10 +757,11 @@ class ProjectStore:
         category: str,
         role: str,
         project_sources: bool,
+        preserve_directories: bool,
         cancelled: Callable[[], bool] | None,
         progress: Callable[[int, int, str], None] | None,
         on_progress: Callable[[ImportProgress], None] | None,
-    ) -> tuple[ProjectFile, ...]:
+    ) -> _BatchCopyResult:
         """Stage, hash, declare and publish files into a batch."""
 
         self._require_writable()
@@ -709,16 +782,27 @@ class ProjectStore:
             destination_relative = Path(_directory_map(manifest)[category])
             _assert_no_link_components(self.root, destination_relative)
             destination_root = _project_join(self.root, destination_relative)
+            raw_sources = tuple(sources)
+            source_directories: list[_ExternalSourceDirectory] = []
+            if preserve_directories:
+                source_directories = self._collect_source_directories(
+                    raw_sources,
+                    project_sources=project_sources,
+                    target_batch_root=destination_root.parent,
+                    cancelled=cancelled,
+                )
             if project_sources:
                 source_items = self._collect_project_sources(
-                    sources,
+                    raw_sources,
                     target_batch_root=destination_root.parent,
+                    allow_empty=bool(source_directories),
                     cancelled=cancelled,
                     on_progress=on_progress,
                 )
             else:
                 source_items = self._collect_external_sources(
-                    sources,
+                    raw_sources,
+                    allow_empty=bool(source_directories),
                     cancelled=cancelled,
                     on_progress=on_progress,
                 )
@@ -738,7 +822,45 @@ class ProjectStore:
             _raise_if_cancelled(cancelled)
             reserved_keys = _existing_name_keys(destination_root, cancelled=cancelled)
             planned: list[tuple[_ExternalSourceItem, Path, str]] = []
+            planned_directories: list[tuple[_ExternalSourceDirectory, Path]] = []
             assigned_top_paths: dict[int, Path] = {}
+            directory_destinations: dict[tuple[int, tuple[str, ...]], Path] = {}
+            for item in sorted(
+                source_directories,
+                key=lambda entry: (entry.source_index, len(entry.relative_parts), entry.relative_parts),
+            ):
+                _raise_if_cancelled(cancelled)
+                if not item.relative_parts:
+                    desired = _project_join(
+                        destination_root,
+                        _visible_component(item.top_name),
+                    )
+                    destination = _unique_destination(
+                        desired,
+                        reserved_keys,
+                        destination_root,
+                        is_directory=True,
+                        cancelled=cancelled,
+                    )
+                    assigned_top_paths[item.source_index] = destination
+                else:
+                    parent_key = (item.source_index, item.relative_parts[:-1])
+                    parent = directory_destinations.get(parent_key)
+                    if parent is None:
+                        raise ProjectStoreError("文件夹资料层级不完整，已停止导入。")
+                    destination = _unique_destination(
+                        _project_join(parent, _visible_component(item.relative_parts[-1])),
+                        reserved_keys,
+                        destination_root,
+                        is_directory=True,
+                        cancelled=cancelled,
+                    )
+                directory_destinations[(item.source_index, item.relative_parts)] = destination
+                reserved_keys.add(
+                    _portable_relative_key(destination.relative_to(destination_root))
+                )
+                planned_directories.append((item, destination))
+
             for item in source_items:
                 _raise_if_cancelled(cancelled)
                 top_path = assigned_top_paths.get(item.source_index)
@@ -754,8 +876,18 @@ class ProjectStore:
                     assigned_top_paths[item.source_index] = top_path
                     reserved_keys.add(_portable_relative_key(top_path.relative_to(destination_root)))
                 if item.top_is_directory:
-                    safe_parts = tuple(_visible_component(part) for part in item.relative_parts)
-                    desired = _project_join(top_path, Path(*safe_parts))
+                    if preserve_directories:
+                        parent = directory_destinations.get(
+                            (item.source_index, item.relative_parts[:-1])
+                        )
+                        if parent is None:
+                            raise ProjectStoreError("文件夹资料层级不完整，已停止导入。")
+                        desired = _project_join(parent, _visible_component(item.relative_parts[-1]))
+                    else:
+                        safe_parts = tuple(
+                            _visible_component(part) for part in item.relative_parts
+                        )
+                        desired = _project_join(top_path, Path(*safe_parts))
                     destination = _unique_destination(
                         desired,
                         reserved_keys,
@@ -772,6 +904,16 @@ class ProjectStore:
             staging_root.mkdir(mode=0o700, exist_ok=False)
             _make_private(staging_root, directory=True)
             pending_items: list[dict[str, Any]] = []
+            pending_directories = [
+                {
+                    "id": uuid.uuid4().hex,
+                    "batch_id": batch_id,
+                    "category": category,
+                    "role": str(role)[:100],
+                    "relative_path": destination.relative_to(self.root).as_posix(),
+                }
+                for _item, destination in planned_directories
+            ]
             copied_bytes = 0
             try:
                 for index, (source_item, destination, display_name) in enumerate(planned):
@@ -829,6 +971,17 @@ class ProjectStore:
                             "modified_ns": int(metadata["modified_ns"]),
                         }
                     )
+                if preserve_directories:
+                    current_directories = self._collect_source_directories(
+                        raw_sources,
+                        project_sources=project_sources,
+                        target_batch_root=destination_root.parent,
+                        cancelled=cancelled,
+                    )
+                    if current_directories != source_directories:
+                        raise ProjectStoreError(
+                            "文件夹结构在保存期间发生变化，请重新预览后再执行。"
+                        )
                 _raise_if_cancelled(cancelled)
                 _report_import_progress(
                     on_progress,
@@ -845,6 +998,7 @@ class ProjectStore:
                     "operation_id": operation_id,
                     "created_at": _utc_now(),
                     "items": pending_items,
+                    "directories": pending_directories,
                 }
                 self._write_active_manifest(batch_id, manifest)
                 self._recover_pending_import(batch_id, manifest)
@@ -856,7 +1010,15 @@ class ProjectStore:
         detail = self.get_batch(batch_id)
         assert detail is not None
         ids = {str(item["id"]) for item in pending_items}
-        return tuple(item for item in detail.files if item.id in ids)
+        roots = tuple(
+            assigned_top_paths[index]
+            for index in sorted(assigned_top_paths)
+            if (index, ()) in directory_destinations
+        )
+        return _BatchCopyResult(
+            files=tuple(item for item in detail.files if item.id in ids),
+            directory_roots=roots,
+        )
 
     def result_directory(self, batch_id: str) -> Path:
         self._require_writable()
@@ -910,6 +1072,16 @@ class ProjectStore:
             if actual_paths != set(registered):
                 raise ProjectStoreError("上传资料与本次清单不一致，已停止建立处理副本。")
 
+            registered_directories = {
+                _project_join(self.root, str(item["relative_path"]))
+                for item in _source_directory_objects(manifest)
+                if str(item.get("category")) == CATEGORY_UPLOADS
+                and _is_inside(
+                    _project_join(self.root, str(item["relative_path"])),
+                    source_path,
+                )
+            }
+
             destination = _project_join(result_root, _visible_component(source_path.name))
             if destination.exists() or _is_link_like(destination):
                 raise ProjectStoreError(f"处理结果目录中已存在同名文件夹：{destination.name}")
@@ -924,6 +1096,17 @@ class ProjectStore:
                 directory_parts.add(current_parts)
                 for name in child_directories:
                     directory_parts.add((*current_parts, name))
+            actual_directories = {
+                source_path if not parts else _project_join(source_path, Path(*parts))
+                for parts in directory_parts
+            }
+            if (
+                source_path in registered_directories
+                and actual_directories != registered_directories
+            ):
+                raise ProjectStoreError(
+                    "上传文件夹结构与本次清单不一致，已停止建立处理副本。"
+                )
 
             destination.mkdir(mode=0o700, exist_ok=False)
             _make_private(destination, directory=True)
@@ -1500,10 +1683,134 @@ class ProjectStore:
                 return name, directories
         raise ProjectStoreError("同名恢复记录过多，请先整理该功能下的项目文件。")
 
+    def _collect_source_directories(
+        self,
+        sources: Iterable[str | Path],
+        *,
+        project_sources: bool,
+        target_batch_root: Path,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[_ExternalSourceDirectory]:
+        """Collect a safe directory topology for a folder-modifying tool."""
+
+        raw_sources = [Path(item).expanduser() for item in sources]
+        if not raw_sources:
+            raise ProjectStoreError("请选择要导入的文件夹。")
+
+        source_roots: list[tuple[Path, str, dict[str, Any] | None]] = []
+        if project_sources:
+            source_roots.append((self.workspace.common_root, "common", None))
+            for manifest_path in sorted(self.manifest_dir.glob("*.json")):
+                _raise_if_cancelled(cancelled)
+                if _is_link_like(manifest_path) or not manifest_path.is_file():
+                    raise ProjectStoreError("批次清单目录包含不安全项目。")
+                source_manifest = _read_json(manifest_path)
+                source_summary = _summary_from_manifest(source_manifest)
+                _validate_manifest_identity(source_manifest, source_summary.id)
+                directories = _directory_map(source_manifest)
+                source_roots.extend(
+                    (
+                        (
+                            _project_join(self.root, directories[CATEGORY_UPLOADS]),
+                            CATEGORY_UPLOADS,
+                            source_manifest,
+                        ),
+                        (
+                            _project_join(self.root, directories[CATEGORY_SUPPLEMENTS]),
+                            CATEGORY_SUPPLEMENTS,
+                            source_manifest,
+                        ),
+                        (
+                            _project_join(self.root, directories[CATEGORY_RESULTS]),
+                            CATEGORY_RESULTS,
+                            source_manifest,
+                        ),
+                    )
+                )
+
+        items: list[_ExternalSourceDirectory] = []
+        for source_index, source in enumerate(raw_sources):
+            _raise_if_cancelled(cancelled)
+            _assert_existing_ancestors_are_real(
+                source.absolute(),
+                allow_macos_root_aliases=not project_sources,
+            )
+            if _is_link_like(source) or not source.exists():
+                raise ProjectStoreError(f"来源不存在或是链接：{source.name or source}")
+            resolved = source.resolve()
+            if not resolved.is_dir():
+                raise ProjectStoreError(f"请选择文件夹作为处理资料：{resolved.name}")
+
+            source_manifest: dict[str, Any] | None = None
+            source_kind = ""
+            if project_sources:
+                if not _is_inside(resolved, self.root):
+                    raise ProjectStoreError("此入口只能复用当前项目中的资料。")
+                relative = resolved.relative_to(self.root)
+                if any(
+                    part.casefold() == PROJECT_METADATA_DIR.casefold()
+                    for part in relative.parts
+                ):
+                    raise ProjectStoreError("项目隐藏管理目录不能作为处理资料。")
+                _assert_no_link_components(self.root, relative)
+                if _paths_overlap(resolved, target_batch_root):
+                    raise ProjectStoreError("不能把当前目标批次自身作为输入资料。")
+                matches = [rule for rule in source_roots if _is_inside(resolved, rule[0])]
+                if not matches:
+                    raise ProjectStoreError(
+                        "只能复用共用资料或批次中的上传、补充、已完成结果。"
+                    )
+                _source_root, source_kind, source_manifest = max(
+                    matches,
+                    key=lambda rule: len(rule[0].parts),
+                )
+                if source_kind == CATEGORY_RESULTS:
+                    assert source_manifest is not None
+                    if _summary_from_manifest(source_manifest).status != "success":
+                        raise ProjectStoreError("只有已成功完成批次的处理结果可以复用。")
+            elif _paths_overlap(resolved, self.root):
+                raise ProjectStoreError("不能把项目自身或包含项目的文件夹再次导入。")
+
+            relative_parts = _directory_parts_strict(
+                resolved,
+                ignore_temporary=not project_sources,
+                cancelled=cancelled,
+            )
+            if source_manifest is not None:
+                declared = {
+                    _project_join(self.root, str(item["relative_path"]))
+                    for item in _source_directory_objects(source_manifest)
+                    if str(item.get("category")) == source_kind
+                    and _is_inside(
+                        _project_join(self.root, str(item["relative_path"])),
+                        resolved,
+                    )
+                }
+                if resolved in declared:
+                    actual = {
+                        resolved if not parts else _project_join(resolved, Path(*parts))
+                        for parts in relative_parts
+                    }
+                    if actual != declared:
+                        raise ProjectStoreError(
+                            "项目文件夹结构与原清单不一致，不能作为新批次输入。"
+                        )
+
+            items.extend(
+                _ExternalSourceDirectory(
+                    source_index=source_index,
+                    top_name=resolved.name,
+                    relative_parts=parts,
+                )
+                for parts in relative_parts
+            )
+        return items
+
     def _collect_external_sources(
         self,
         sources: Iterable[str | Path],
         *,
+        allow_empty: bool = False,
         cancelled: Callable[[], bool] | None = None,
         on_progress: Callable[[ImportProgress], None] | None = None,
     ) -> list[_ExternalSourceItem]:
@@ -1560,7 +1867,7 @@ class ProjectStore:
                     _raise_if_cancelled(cancelled)
             else:
                 raise ProjectStoreError(f"来源不是普通文件或文件夹：{resolved.name}")
-        if not items:
+        if not items and not allow_empty:
             raise ProjectStoreError("所选文件夹内没有可导入的资料。")
         return items
 
@@ -1569,6 +1876,7 @@ class ProjectStore:
         sources: Iterable[str | Path],
         *,
         target_batch_root: Path,
+        allow_empty: bool = False,
         cancelled: Callable[[], bool] | None = None,
         on_progress: Callable[[ImportProgress], None] | None = None,
     ) -> list[_ExternalSourceItem]:
@@ -1722,7 +2030,7 @@ class ProjectStore:
                     _raise_if_cancelled(cancelled)
             else:
                 raise ProjectStoreError(f"项目来源不是普通文件或文件夹：{resolved.name}")
-        if not items:
+        if not items and not allow_empty:
             raise ProjectStoreError("所选项目资料中没有可复用的文件。")
         return items
 
@@ -1776,6 +2084,16 @@ class ProjectStore:
                 raise ProjectStoreError(f"批次文件已移动或不安全：{item.get('display_name', path.name)}")
             if path.stat().st_size != int(item["size_bytes"]) or _sha256_file(path) != str(item["sha256"]):
                 raise ProjectStoreError(f"批次文件已发生变化：{item.get('display_name', path.name)}")
+        for item in _source_directory_objects(manifest):
+            category = str(item["category"])
+            path = _project_join(self.root, str(item["relative_path"]))
+            expected_root = _project_join(self.root, directories[category])
+            if (
+                not _is_inside(path, expected_root)
+                or _is_link_like(path)
+                or not path.is_dir()
+            ):
+                raise ProjectStoreError(f"批次文件夹已移动或不安全：{path.name}")
 
     def _verify_manifest_files_at_directories(
         self,
@@ -1809,6 +2127,18 @@ class ProjectStore:
                 raise ProjectStoreError(f"批次文件已移动或不安全：{item.display_name}")
             if path.stat().st_size != item.size_bytes or _sha256_file(path) != item.sha256:
                 raise ProjectStoreError(f"批次文件已发生变化：{item.display_name}")
+
+        for raw_item in _source_directory_objects(manifest):
+            category = str(raw_item["category"])
+            declared_root = Path(declared_directories[category])
+            try:
+                inside = Path(str(raw_item["relative_path"])).relative_to(declared_root)
+            except ValueError as exc:
+                raise ProjectStoreError("项目文件夹路径不属于批次目录。") from exc
+            destination_root = _project_join(self.root, checked_directories[category])
+            path = _project_join(destination_root, inside)
+            if _is_link_like(path) or not path.is_dir():
+                raise ProjectStoreError(f"批次文件夹已移动或不安全：{path.name}")
 
         batch_root = _project_join(self.root, checked_directories[CATEGORY_UPLOADS]).parent
         _require_regular_directory(batch_root, "回收站批次资料")
@@ -1940,8 +2270,40 @@ class ProjectStore:
         raw_items = pending.get("items")
         if not isinstance(raw_items, list):
             raise ProjectStoreError("导入恢复文件列表无效。")
+        raw_directories = pending.get("directories", [])
+        if not isinstance(raw_directories, list):
+            raise ProjectStoreError("导入恢复文件夹列表无效。")
         published: list[Path] = []
         try:
+            for item in sorted(
+                raw_directories,
+                key=lambda entry: len(Path(str(entry.get("relative_path") or "")).parts)
+                if isinstance(entry, dict)
+                else 0,
+            ):
+                if not isinstance(item, dict):
+                    raise ProjectStoreError("导入恢复文件夹信息无效。")
+                if _required_uuid(item, "batch_id") != batch_id or not _is_uuid_hex(
+                    str(item.get("id") or "")
+                ):
+                    raise ProjectStoreError("导入恢复文件夹与批次不一致。")
+                category = str(item.get("category") or "")
+                if category not in {CATEGORY_UPLOADS, CATEGORY_SUPPLEMENTS}:
+                    raise ProjectStoreError("导入恢复文件夹分类无效。")
+                destination = _project_join(self.root, str(item["relative_path"]))
+                expected_root = _project_join(self.root, _directory_map(manifest)[category])
+                if not _is_inside(destination, expected_root) or destination == expected_root:
+                    raise ProjectStoreError("导入恢复文件夹不属于当前批次。")
+                if destination.exists():
+                    if _is_link_like(destination) or not destination.is_dir():
+                        raise ProjectStoreError(f"导入文件夹目标发生冲突：{destination.name}")
+                else:
+                    _assert_no_link_components(
+                        self.root,
+                        destination.parent.relative_to(self.root),
+                    )
+                    destination.mkdir(parents=True, exist_ok=False)
+                    _make_private(destination, directory=True)
             for item in raw_items:
                 if not isinstance(item, dict):
                     raise ProjectStoreError("导入恢复文件信息无效。")
@@ -1987,6 +2349,17 @@ class ProjectStore:
                     {key: value for key, value in item.items() if key != "staging_path"}
                     for item in raw_items
                     if str(item["id"]) not in known
+                ),
+            ]
+            known_directories = {
+                str(item["id"]) for item in _source_directory_objects(manifest)
+            }
+            manifest["source_directories"] = [
+                *_source_directory_objects(manifest),
+                *(
+                    dict(item)
+                    for item in raw_directories
+                    if str(item["id"]) not in known_directories
                 ),
             ]
             manifest["pending_import"] = None
@@ -2118,6 +2491,15 @@ class ProjectStore:
                 item["relative_path"] = new_prefix + relative[len(old_prefix) :]
             elif not (relative == new_prefix or relative.startswith(new_prefix + "/")):
                 raise ProjectStoreError("批次文件路径与待恢复改名不一致。")
+        for item in _source_directory_objects(manifest):
+            category = str(item["category"])
+            old_prefix = old_directories[category]
+            new_prefix = new_directories[category]
+            relative = str(item["relative_path"])
+            if relative == old_prefix or relative.startswith(old_prefix + "/"):
+                item["relative_path"] = new_prefix + relative[len(old_prefix) :]
+            elif not (relative == new_prefix or relative.startswith(new_prefix + "/")):
+                raise ProjectStoreError("批次文件夹路径与待恢复改名不一致。")
         batch = _batch_object(manifest)
         batch["status"] = "running"
         batch["directory_name"] = str(pending["directory_name"])
@@ -2154,6 +2536,13 @@ class ProjectStore:
             for category in CATEGORIES
         }
         for item in _file_objects(manifest):
+            category = str(item["category"])
+            old_prefix = directories[category]
+            new_prefix = trash_directories[category]
+            relative = str(item["relative_path"])
+            if relative == old_prefix or relative.startswith(old_prefix + "/"):
+                item["relative_path"] = new_prefix + relative[len(old_prefix) :]
+        for item in _source_directory_objects(manifest):
             category = str(item["category"])
             old_prefix = directories[category]
             new_prefix = trash_directories[category]
@@ -2206,6 +2595,13 @@ class ProjectStore:
             target_batch_root.parent.mkdir(parents=True, exist_ok=True)
             source_batch_root.rename(target_batch_root)
         for item in _file_objects(manifest):
+            category = str(item["category"])
+            old_prefix = source_directories[category]
+            new_prefix = target_directories[category]
+            relative = str(item["relative_path"])
+            if relative == old_prefix or relative.startswith(old_prefix + "/"):
+                item["relative_path"] = new_prefix + relative[len(old_prefix) :]
+        for item in _source_directory_objects(manifest):
             category = str(item["category"])
             old_prefix = source_directories[category]
             new_prefix = target_directories[category]
@@ -2310,6 +2706,15 @@ def _file_objects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return files
 
 
+def _source_directory_objects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    directories = manifest.get("source_directories", [])
+    if not isinstance(directories, list) or any(
+        not isinstance(item, dict) for item in directories
+    ):
+        raise ProjectStoreError("批次文件夹清单无效。")
+    return directories
+
+
 def _directory_map(manifest: dict[str, Any]) -> dict[str, str]:
     batch = _batch_object(manifest)
     return _validated_directory_map(
@@ -2384,6 +2789,29 @@ def _validate_manifest_identity(manifest: dict[str, Any], batch_id: str) -> None
             raise ProjectStoreError("项目文件路径不属于批次目录。") from exc
         if not inside.parts:
             raise ProjectStoreError("项目文件路径不能指向批次目录本身。")
+    directory_ids: set[str] = set()
+    directory_keys: set[tuple[str, str]] = set()
+    for raw_item in _source_directory_objects(manifest):
+        item_id = _required_uuid(raw_item, "id")
+        if item_id in directory_ids:
+            raise ProjectStoreError("批次文件夹清单包含重复编号。")
+        directory_ids.add(item_id)
+        if _required_uuid(raw_item, "batch_id") != batch_id.lower():
+            raise ProjectStoreError("项目文件夹与批次不一致。")
+        category = str(raw_item.get("category") or "")
+        if category not in {CATEGORY_UPLOADS, CATEGORY_SUPPLEMENTS}:
+            raise ProjectStoreError("批次文件夹分类无效。")
+        relative = Path(_validated_relative_path(str(raw_item.get("relative_path") or "")))
+        try:
+            inside = relative.relative_to(Path(directories[category]))
+        except ValueError as exc:
+            raise ProjectStoreError("项目文件夹路径不属于批次目录。") from exc
+        if not inside.parts:
+            raise ProjectStoreError("项目文件夹路径不能指向批次目录本身。")
+        key = (category, _portable_relative_key(inside))
+        if key in directory_keys:
+            raise ProjectStoreError("批次文件夹清单包含重复路径。")
+        directory_keys.add(key)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -2550,6 +2978,40 @@ def _walk_external_directory(
         ignore_temporary=True,
         cancelled=cancelled,
     )
+
+
+def _directory_parts_strict(
+    root: Path,
+    *,
+    ignore_temporary: bool,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[tuple[str, ...], ...]:
+    """Return every directory in a tree while applying the import safety checks."""
+
+    _raise_if_cancelled(cancelled)
+    _require_regular_directory(root, "导入文件夹")
+    parts: set[tuple[str, ...]] = {()}
+    for current, directories, files in os.walk(root, followlinks=False):
+        _raise_if_cancelled(cancelled)
+        current_path = Path(current)
+        current_parts = current_path.relative_to(root).parts
+        parts.add(current_parts)
+        for name in sorted((*directories, *files), key=str.casefold):
+            _raise_if_cancelled(cancelled)
+            candidate = current_path / name
+            if _is_link_like(candidate):
+                raise ProjectStoreError(f"所选文件夹包含链接，未导入：{candidate.name}")
+        directories[:] = sorted(directories, key=str.casefold)
+        for name in directories:
+            directory = current_path / name
+            _require_regular_directory(directory, "导入文件夹")
+            parts.add((*current_parts, name))
+        for name in sorted(files, key=str.casefold):
+            path = current_path / name
+            _require_regular_file(path, "导入文件")
+            if ignore_temporary and not _is_ignored_import_file(path):
+                _reject_forbidden_import_file(path)
+    return tuple(sorted(parts, key=lambda value: (len(value), value)))
 
 
 def _walk_directory_strict(
