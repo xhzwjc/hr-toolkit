@@ -1022,15 +1022,18 @@ def _missing_punch_remark(row: AttendanceSourceRow) -> str:
             return "下班未打卡"
         plan_start = _first_time_in_text(row.plan_time)
         plan_end = _last_time_in_text(row.plan_time)
-        first_punch = _first_time_in_text(row.punch_record)
-        last_punch = _last_time_in_text(row.punch_record)
-        # 补上班卡可能早于计划上班时间；只看首条刷卡会误判成下班缺卡。
-        # 当计划下班时间已有对应刷卡时，缺失的一侧应是上班卡。
-        if plan_end is not None and last_punch is not None and last_punch >= plan_end:
-            return "上班未打卡"
-        if plan_start is not None and first_punch is not None and first_punch >= plan_start:
-            return "上班未打卡"
-        return "下班未打卡"
+        punches = _times_in_text(row.punch_record)
+        if len(punches) == 1:
+            # 单卡且平台已明确迟到/早退时，优先使用该信号，避免半天班等场景被中点误导。
+            has_late = bool(row.late_count or row.late_minutes)
+            has_early = bool(row.early_count or row.early_minutes)
+            if has_late != has_early:
+                return "下班未打卡" if has_late else "上班未打卡"
+        # 其余场景按完整班次的前后半段判断；计划不完整时不强猜缺卡方向。
+        end_side = _punch_record_is_shift_end_side(plan_start, plan_end, row.punch_record)
+        if end_side is not None:
+            return "上班未打卡" if end_side else "下班未打卡"
+        return "漏打卡1次"
     return f"漏打卡{row.missing_punch_count}次"
 
 
@@ -1833,22 +1836,61 @@ def _datetime_from_value(value: Any) -> datetime | None:
     return None
 
 
+def _times_in_text(text: str) -> tuple[time, ...]:
+    values: list[time] = []
+    for match in _TIME_HHMM_PATTERN.finditer(text):
+        hour, minute = (int(part) for part in match.groups())
+        if hour <= 23:
+            values.append(time(hour, minute))
+    return tuple(values)
+
+
 def _first_time_in_text(text: str) -> time | None:
-    match = _TIME_HHMM_PATTERN.search(text)
-    if not match:
-        return None
-    hour, minute = (int(part) for part in match.groups())
-    if hour > 23:
-        return None
-    return time(hour, minute)
+    values = _times_in_text(text)
+    return values[0] if values else None
 
 
 def _last_time_in_text(text: str) -> time | None:
-    for match in reversed(list(_TIME_HHMM_PATTERN.finditer(text))):
-        hour, minute = (int(part) for part in match.groups())
-        if hour <= 23:
-            return time(hour, minute)
-    return None
+    values = _times_in_text(text)
+    return values[-1] if values else None
+
+
+def _punch_record_is_shift_end_side(
+    plan_start: time | None,
+    plan_end: time | None,
+    punch_record: str,
+) -> bool | None:
+    """判断最晚一条有效刷卡是否落在班次后半段；信息不足时返回 None。"""
+    if plan_start is None or plan_end is None or plan_start == plan_end:
+        return None
+    punches = _times_in_text(punch_record)
+    if not punches:
+        return None
+
+    day_minutes = 24 * 60
+    start_minutes = plan_start.hour * 60 + plan_start.minute
+    end_minutes = plan_end.hour * 60 + plan_end.minute
+    crosses_midnight = end_minutes < start_minutes
+    if crosses_midnight:
+        end_minutes += day_minutes
+
+    def _distance_to_shift(candidate: int) -> int:
+        if candidate < start_minutes:
+            return start_minutes - candidate
+        if candidate > end_minutes:
+            return candidate - end_minutes
+        return 0
+
+    def _on_shift_timeline(value: time) -> int:
+        minutes = value.hour * 60 + value.minute
+        if not crosses_midnight:
+            return minutes
+        candidates = (minutes, minutes + day_minutes)
+        return min(candidates, key=_distance_to_shift)
+
+    latest_punch = max(_on_shift_timeline(value) for value in punches)
+    shift_midpoint = start_minutes + (end_minutes - start_minutes) / 2
+    return latest_punch >= shift_midpoint
 
 
 def _zero_blank(value: float) -> float | None:

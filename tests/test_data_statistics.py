@@ -70,24 +70,36 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertIsNone(detail.cell(2, 9).value)
             wb.close()
 
-    def test_morning_makeup_before_shift_is_not_misclassified_as_missing_checkout(self) -> None:
+    def test_missing_punch_classification_uses_shift_side(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "input"
             input_dir.mkdir()
-            _write_morning_makeup_attendance_file(input_dir / "考勤结果.xlsx")
+            _write_missing_punch_boundary_file(input_dir / "考勤结果.xlsx")
 
             result = generate_data_statistics_reports(input_dir, root / "output")
-            self.assertEqual(result.attendance_exception_count, 4)
+            self.assertEqual(result.attendance_exception_count, 18)
 
             wb = load_workbook(result.output_file, data_only=True)
             detail = wb["考勤异常明细"]
             remarks_by_day = {
                 detail.cell(row, 4).value.day: detail.cell(row, 7).value
                 for row in range(2, detail.max_row + 1)
+                if detail.cell(row, 5).value == "漏打卡"
             }
             wb.close()
 
+            self.assertEqual(remarks_by_day[1], "下班未打卡")
+            self.assertEqual(remarks_by_day[2], "上班未打卡")
+            self.assertEqual(remarks_by_day[3], "下班未打卡")
+            self.assertEqual(remarks_by_day[4], "上班未打卡")
+            self.assertEqual(remarks_by_day[5], "下班未打卡")
+            self.assertEqual(remarks_by_day[6], "上班未打卡")
+            self.assertEqual(remarks_by_day[7], "上班未打卡")
+            self.assertEqual(remarks_by_day[8], "下班未打卡")
+            self.assertEqual(remarks_by_day[9], "上班未打卡")
+            self.assertEqual(remarks_by_day[10], "漏打卡1次")
+            self.assertEqual(remarks_by_day[11], "漏打卡1次")
             self.assertEqual(remarks_by_day[20], "上班未打卡")
             self.assertEqual(remarks_by_day[25], "上班未打卡")
             self.assertEqual(remarks_by_day[29], "上班未打卡")
@@ -634,7 +646,7 @@ def _write_attendance_file(path: Path) -> None:
     wb.close()
 
 
-def _write_morning_makeup_attendance_file(path: Path) -> None:
+def _write_missing_punch_boundary_file(path: Path) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "日结果"
@@ -645,16 +657,42 @@ def _write_morning_makeup_attendance_file(path: Path) -> None:
         "漏打卡次数",
         "应出勤小时数",
         "实出勤小时数",
+        "迟到次数",
+        "迟到分钟数",
+        "早退次数",
+        "早退分钟数",
         "计划上下班时间",
         "当日刷卡记录",
         "缺卡记录",
     ]
     ws.append(headers)
+    day_plan = "08:30,12:00|14:00,17:30"
+    night_plan = "20:00~00:00|01:00~08:00"
     rows = [
-        ["王小丽", "运营部", datetime(2026, 4, 20), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:20,17:30", None],
-        ["王小丽", "运营部", datetime(2026, 4, 25), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:25,17:35", None],
-        ["王小丽", "运营部", datetime(2026, 4, 29), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:29,18:00", None],
-        ["王小丽", "运营部", datetime(2026, 4, 30), 1, 7, 7, "08:30,12:00|14:00,17:30", "08:20", None],
+        # 上午迟到卡存在、下班卡缺失：不能误报为上班缺卡。
+        ["王小丽", "运营部", datetime(2026, 4, 1), 1, 7, 7, 1, 10, 0, 0, day_plan, "08:40", None],
+        # 只有下班侧刷卡：缺失的是上班卡。
+        ["王小丽", "运营部", datetime(2026, 4, 2), 1, 7, 7, 0, 0, 0, 0, day_plan, "17:10", None],
+        # 多条记录都在上午侧：缺失的仍是下班卡。
+        ["王小丽", "运营部", datetime(2026, 4, 3), 1, 7, 7, 0, 0, 0, 0, day_plan, "08:20,08:40", None],
+        # 刷卡文本乱序时仍按班次时间判断。
+        ["王小丽", "运营部", datetime(2026, 4, 4), 1, 7, 7, 0, 0, 0, 0, day_plan, "17:30,08:20", None],
+        # 跨午夜班次的上班侧、下班侧与乱序记录。
+        ["王小丽", "运营部", datetime(2026, 4, 5), 1, 7, 7, 0, 0, 0, 0, night_plan, "20:10", None],
+        ["王小丽", "运营部", datetime(2026, 4, 6), 1, 7, 7, 0, 0, 0, 0, night_plan, "07:50", None],
+        ["王小丽", "运营部", datetime(2026, 4, 7), 1, 7, 7, 0, 0, 0, 0, night_plan, "08:05,19:55", None],
+        # 半天班的极端迟到/早退由明确异常信号判定，不受中点启发式影响。
+        ["王小丽", "运营部", datetime(2026, 4, 8), 1, 3.5, 3.5, 1, 180, 0, 0, "08:30~12:00", "11:30", None],
+        ["王小丽", "运营部", datetime(2026, 4, 9), 1, 3.5, 3.5, 0, 0, 1, 120, "08:30~12:00", "10:00", None],
+        # 计划或刷卡信息不足时不强猜方向，只保留事实性次数。
+        ["王小丽", "运营部", datetime(2026, 4, 10), 1, 7, 7, 0, 0, 0, 0, "08:30", "17:30", None],
+        ["王小丽", "运营部", datetime(2026, 4, 11), 1, 7, 7, 0, 0, 0, 0, None, None, None],
+        # 补上班卡早于 08:30，但已有下班侧刷卡。
+        ["王小丽", "运营部", datetime(2026, 4, 20), 1, 7, 7, 0, 0, 0, 0, day_plan, "08:20,17:30", None],
+        ["王小丽", "运营部", datetime(2026, 4, 25), 1, 7, 7, 0, 0, 0, 0, day_plan, "08:25,17:35", None],
+        ["王小丽", "运营部", datetime(2026, 4, 29), 1, 7, 7, 0, 0, 0, 0, day_plan, "08:29,18:00", None],
+        # 只有上午侧刷卡时，确实是下班缺卡。
+        ["王小丽", "运营部", datetime(2026, 4, 30), 1, 7, 7, 0, 0, 0, 0, day_plan, "08:20", None],
     ]
     for row in rows:
         ws.append(row)
