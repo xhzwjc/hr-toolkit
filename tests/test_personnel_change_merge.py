@@ -348,6 +348,89 @@ class PersonnelChangeMergeTest(unittest.TestCase):
             self.assertEqual(roster.cell(4, 1).fill.fgColor.rgb, "00FFF2CC")
             roster_book.close()
 
+    def test_roster_addition_appends_to_department_and_project_without_splitting_other_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            roster_path = root / "人力资源花名册.xlsx"
+            out_roster = root / "更新后花名册.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "花名册"
+            headers = ["序号", "部门", "部门/项目", "姓名", "身份证号码", "出生日期", "年龄", "性别", "岗位", "人员分类", "所属专业", "联系方式", "入职公司", "学历", "毕业院校", "专业", "入职时间"]
+            for col, header in enumerate(headers, start=1):
+                ws.cell(3, col).value = header
+
+            # 初始花名册：运营事业部有两个昌吉人员，另外有工程事业部人员
+            initial_rows = [
+                [1, "运营事业部", "昌吉", "昌吉员工A", "110101199001011111", None, None, "男", "维护员", "生产人员", "基站", "13800000001", "春苗", "本科", "x", "x", "2026-01-01"],
+                [2, "运营事业部", "昌吉", "昌吉员工B", "110101199001011112", None, None, "男", "维护员", "生产人员", "基站", "13800000002", "春苗", "本科", "x", "x", "2026-01-01"],
+                [3, "工程事业部", "南昌", "南昌员工A", "110101199001012222", None, None, "女", "工程师", "管理人员", "通信", "13800000003", "春苗", "本科", "x", "x", "2026-01-01"],
+            ]
+            for row_index, row in enumerate(initial_rows, start=4):
+                for col_index, value in enumerate(row, start=1):
+                    ws.cell(row_index, col_index).value = value
+            ws.cell(7, 1).value = "对应异动汇总表中的字段"
+            wb.save(roster_path)
+            wb.close()
+
+            # 增员异动：新增两个“乌鲁木齐”人员（属于运营事业部），和一个“昌吉”人员
+            change_file = root / "增员.xlsx"
+            wb_ch = Workbook()
+            ws_ch = wb_ch.active
+            ws_ch.title = "增补表"
+            ch_headers = ["序号", "公司", "部门", "地市", "姓名", "身份证号码", "入职日期"]
+            for col, header in enumerate(ch_headers, start=1):
+                ws_ch.cell(2, col).value = header
+            ch_rows = [
+                [1, "春苗", "运营事业部", "乌鲁木齐", "乌鲁木齐员工1", "110101199001013331", "2026-04-01"],
+                [2, "春苗", "运营事业部", "昌吉", "昌吉员工C", "110101199001011113", "2026-04-01"],
+                [3, "春苗", "运营事业部", "乌鲁木齐", "乌鲁木齐员工2", "110101199001013332", "2026-04-01"],
+            ]
+            for r_idx, r in enumerate(ch_rows, start=3):
+                for c_idx, val in enumerate(r, start=1):
+                    ws_ch.cell(r_idx, c_idx).value = val
+            wb_ch.save(change_file)
+            wb_ch.close()
+
+            summary_template = root / "异动汇总表模板.xlsx"
+            _write_real_summary_template(summary_template)
+            wb_sum = load_workbook(summary_template)
+            ws_sum = wb_sum["增员"]
+            # 插入“部门”列在第3列 (序号, 公司, 部门, 地市, 姓名, 身份证号码, ...)
+            ws_sum.insert_cols(3)
+            ws_sum.cell(2, 3).value = "部门"
+            wb_sum.save(summary_template)
+            wb_sum.close()
+
+            summary_dir = root / "summaries"
+            merge_result = merge_personnel_changes(change_file, summary_dir, template_path=summary_template)
+            roster_result = update_roster_from_change_summaries(merge_result.output_files, roster_path, root / "roster_out")
+
+            self.assertEqual(roster_result.roster_added_count, 3)
+            wb_res = load_workbook(roster_result.output_file, data_only=True)
+            ws_res = wb_res["花名册"]
+
+            # 读取结果中所有数据行
+            rows_data = []
+            for r in range(4, 10):
+                dept = ws_res.cell(r, 2).value
+                proj = ws_res.cell(r, 3).value
+                name = ws_res.cell(r, 4).value
+                if name:
+                    rows_data.append((dept, proj, name))
+
+            # 验证：昌吉员工A, B, C 紧密聚在昌吉项目下，乌鲁木齐员工1, 2 紧密聚在乌鲁木齐项目下，均在运营事业部内部，绝不穿插
+            expected_data = [
+                ("运营事业部", "昌吉", "昌吉员工A"),
+                ("运营事业部", "昌吉", "昌吉员工B"),
+                ("运营事业部", "昌吉", "昌吉员工C"),
+                ("运营事业部", "乌鲁木齐", "乌鲁木齐员工1"),
+                ("运营事业部", "乌鲁木齐", "乌鲁木齐员工2"),
+                ("工程事业部", "南昌", "南昌员工A"),
+            ]
+            self.assertEqual(rows_data, expected_data)
+            wb_res.close()
+
 
 def _write_change_file(path: Path, rows_by_sheet: dict[str, list[list]], omit_sheets: set[str] | None = None) -> None:
     workbook = Workbook()

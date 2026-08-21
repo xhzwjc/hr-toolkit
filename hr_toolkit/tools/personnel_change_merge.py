@@ -60,6 +60,7 @@ SOURCE_SHEET_ALIASES = {
 }
 
 FIELD_ALIASES = {
+    "部门": ("部门", "所属部门", "一级部门", "部门名称", "二级部门"),
     "入职公司": ("入职公司", "公司"),
     "公司": ("公司", "入职公司"),
     "地市": ("地市", "部门（片区）"),
@@ -1146,7 +1147,8 @@ def _write_updated_roster(
                 warnings.append(f"花名册已存在增员身份证 {id_card}，未重复写入。")
                 continue
             inserted_row = _insert_roster_addition(ws, layout, row)
-            existing[id_card] = inserted_row
+            layout = _detect_roster_layout(ws)
+            existing = _roster_existing_records(ws, layout)
             added_count += 1
         layout = _detect_roster_layout(ws)
         existing = _roster_existing_records(ws, layout)
@@ -1211,14 +1213,15 @@ def _roster_existing_records(ws: Worksheet, layout: RosterLayout) -> dict[str, i
 
 def _insert_roster_addition(ws: Worksheet, layout: RosterLayout, row: ChangeRow) -> int:
     project = _cell_text(_mapped_change_value(row.values, "地市", "增员"))
-    insert_at = _roster_insert_row(ws, layout, project)
+    department = _resolve_addition_department(ws, layout, row, project)
+    insert_at = _roster_insert_row(ws, layout, department, project)
     template_row = max(layout.data_start_row, insert_at - 1)
     if template_row >= layout.footer_start_row:
         template_row = layout.data_start_row
     template_snapshot = snapshot_row(ws, template_row, layout.max_column)
     insert_rows(ws, insert_at, 1)
     apply_row_snapshot(ws, insert_at, template_snapshot, translate_formulas=True)
-    values = _roster_values_for_addition(ws, layout, row, project, template_row)
+    values = _roster_values_for_addition(ws, layout, row, department, project, template_row)
     for header, value in values.items():
         col_index = layout.headers.get(header)
         if col_index is not None:
@@ -1229,31 +1232,88 @@ def _insert_roster_addition(ws: Worksheet, layout: RosterLayout, row: ChangeRow)
     return insert_at
 
 
-def _roster_insert_row(ws: Worksheet, layout: RosterLayout, project: str) -> int:
-    project_col = layout.headers.get("部门/项目")
-    if project and project_col is not None:
-        last_match = None
-        for row_index in range(layout.data_start_row, layout.footer_start_row):
-            if _cell_text(ws.cell(row_index, project_col).value) == project:
-                last_match = row_index
-        if last_match is not None:
-            return last_match + 1
-    return layout.footer_start_row
+def _resolve_addition_department(ws: Worksheet, layout: RosterLayout, row: ChangeRow, project: str) -> str:
+    dept_val = _cell_text(_mapped_change_value(row.values, "部门", "增员"))
+    if dept_val:
+        return dept_val
 
-
-def _roster_values_for_addition(ws: Worksheet, layout: RosterLayout, row: ChangeRow, project: str, template_row: int) -> dict[str, Any]:
-    department = None
     department_col = layout.headers.get("部门")
     project_col = layout.headers.get("部门/项目")
+    name_col = layout.headers.get("姓名")
+
     if department_col is not None and project_col is not None and project:
         for row_index in range(layout.data_start_row, layout.footer_start_row):
             if _cell_text(ws.cell(row_index, project_col).value) == project:
-                department = ws.cell(row_index, department_col).value
-                break
-    if department is None and department_col is not None:
-        department = ws.cell(template_row, department_col).value
+                if name_col is None or _has_value(ws.cell(row_index, name_col).value):
+                    dept = _cell_text(ws.cell(row_index, department_col).value)
+                    if dept:
+                        return dept
+        for row_index in range(layout.data_start_row, layout.footer_start_row):
+            if _cell_text(ws.cell(row_index, project_col).value) == project:
+                dept = _cell_text(ws.cell(row_index, department_col).value)
+                if dept:
+                    return dept
+
+    if department_col is not None:
+        last_row = max(layout.data_start_row, layout.footer_start_row - 1)
+        return _cell_text(ws.cell(last_row, department_col).value)
+    return ""
+
+
+def _roster_insert_row(ws: Worksheet, layout: RosterLayout, department: str, project: str) -> int:
+    department_col = layout.headers.get("部门")
+    project_col = layout.headers.get("部门/项目")
+
+    if department and project and department_col is not None and project_col is not None:
+        last_dept_project_match = None
+        last_dept_match = None
+        for row_index in range(layout.data_start_row, layout.footer_start_row):
+            row_dept = _cell_text(ws.cell(row_index, department_col).value)
+            row_proj = _cell_text(ws.cell(row_index, project_col).value)
+            if row_dept == department:
+                last_dept_match = row_index
+                if row_proj == project:
+                    last_dept_project_match = row_index
+
+        if last_dept_project_match is not None:
+            return last_dept_project_match + 1
+
+        if last_dept_match is not None:
+            return last_dept_match + 1
+
+    if department and department_col is not None:
+        last_dept_match = None
+        for row_index in range(layout.data_start_row, layout.footer_start_row):
+            if _cell_text(ws.cell(row_index, department_col).value) == department:
+                last_dept_match = row_index
+        if last_dept_match is not None:
+            return last_dept_match + 1
+
+    if project and project_col is not None:
+        last_project_match = None
+        for row_index in range(layout.data_start_row, layout.footer_start_row):
+            if _cell_text(ws.cell(row_index, project_col).value) == project:
+                last_project_match = row_index
+        if last_project_match is not None:
+            return last_project_match + 1
+
+    return layout.footer_start_row
+
+
+def _roster_values_for_addition(
+    ws: Worksheet,
+    layout: RosterLayout,
+    row: ChangeRow,
+    department: str,
+    project: str,
+    template_row: int,
+) -> dict[str, Any]:
+    department_col = layout.headers.get("部门")
+    final_dept = department
+    if not final_dept and department_col is not None:
+        final_dept = _cell_text(ws.cell(template_row, department_col).value)
     return {
-        "部门": department,
+        "部门": final_dept,
         "部门/项目": project,
         "姓名": _mapped_change_value(row.values, "姓名", "增员"),
         "身份证号码": _mapped_change_value(row.values, "身份证号码", "增员"),
