@@ -56,6 +56,9 @@ from hr_toolkit.tools.data_statistics import generate_data_statistics_reports, r
 from hr_toolkit.tools.personnel_change_merge import merge_personnel_changes, update_roster_from_change_summaries
 from hr_toolkit.tools.insurance_ledger import generate_insurance_ledger
 from hr_toolkit.tools.material_collector import (
+    LIBRARY_MODE_FLAT_OCR,
+    LIBRARY_MODE_LABELS,
+    LIBRARY_MODE_PERSON_FOLDER,
     MODE_BY_EMPLOYEE,
     MODE_BY_MATERIAL,
     MODE_FLAT,
@@ -384,6 +387,7 @@ class HRToolkitApp:
         self.rename_replacement_name = StringVar()
         self.rename_file_type = StringVar(value="文件夹")
         self.material_mode = StringVar(value="按员工归类（每人一个文件夹）")
+        self.material_library_mode = StringVar(value="按人员文件夹查找（原模式）")
         self.material_create_zip = BooleanVar(value=False)
         self.material_collect_all = BooleanVar(value=True)
         # OCR 智能索引缓存：默认开启，二次扫描可秒级命中
@@ -1901,7 +1905,28 @@ class HRToolkitApp:
         self.material_options_frame = ttk.LabelFrame(form, text="资料检索与打包设置", padding=self._px(12), style="Rename.TLabelframe")
         self.material_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
 
-        # ── 1. 目标人员输入行（全宽拉伸） ──
+        # ── 1. 资料库组织形式（与输出归类模式相互独立） ──
+        library_mode_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        library_mode_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(7)))
+        ttk.Label(library_mode_row, text="资料库形式", style="App.TLabel", width=8).pack(side=LEFT, anchor="center")
+        self.material_library_mode_combo = ttk.Combobox(
+            library_mode_row,
+            textvariable=self.material_library_mode,
+            values=list(LIBRARY_MODE_LABELS.keys()),
+            state="readonly",
+            width=28,
+            style="App.TCombobox",
+        )
+        self.material_library_mode_combo.pack(side=LEFT, padx=(self._px(8), self._px(12)))
+        self.material_library_mode_combo.bind("<<ComboboxSelected>>", self._on_material_library_mode_changed)
+        self.material_library_mode_hint = ttk.Label(
+            library_mode_row,
+            text="原模式按姓名文件夹查找",
+            style="CardHint.TLabel",
+        )
+        self.material_library_mode_hint.pack(side=LEFT, fill="x", expand=True)
+
+        # ── 2. 目标人员输入行（全宽拉伸） ──
         target_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
         target_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(4)))
 
@@ -1935,7 +1960,7 @@ class HRToolkitApp:
         )
         self.material_input_hint.pack(fill="x", padx=(self._px(76), 0), pady=(0, self._px(8)))
 
-        # ── 2. 打包与检索设置行 ──
+        # ── 3. 打包与检索设置行 ──
         opts_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
         opts_row.pack(fill="x", pady=(self._px(4), self._px(4)))
 
@@ -1978,7 +2003,7 @@ class HRToolkitApp:
         )
         self.material_types_hint.pack(fill="x", padx=(self._px(76), 0), pady=(0, self._px(6)))
 
-        # ── 3. 指定材料选择区（全部模式下折叠隐藏） ──
+        # ── 4. 指定材料选择区（全部模式下折叠隐藏） ──
         self.material_types_section = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
         self.material_types_section.pack(fill="x", pady=(self._px(6), self._px(2)))
 
@@ -2110,6 +2135,7 @@ class HRToolkitApp:
         self.material_catalog_hint.pack(fill="x", padx=self._px(8), pady=(self._px(2), 0))
 
         # 初始状态同步
+        self._on_material_library_mode_changed()
         self._on_material_collect_all_changed()
 
         # ──────── 区块 1：统计日期范围 ────────
@@ -7140,7 +7166,7 @@ class HRToolkitApp:
             self.run_button_text.set("开始拆分")
         elif self.current_tool == "material_collector":
             self.tool_title.set("员工资料智能检索与打包")
-            self.tool_description.set("选择员工资料库根目录和员工名单，勾选所需材料类型，一键打包导出并生成缺失清单。")
+            self.tool_description.set("支持按人员文件夹查找，也支持从无序平铺资料库建立 OCR 索引后按人员检索。")
             self.input_label.set("员工资料库路径（只读检索）")
             self.input_hint.set("仅做本地只读扫描，不复制原资料库，支持上万人超大资料库")
             self._input_drop_title = "选择员工资料库路径（只读扫描）"
@@ -7804,9 +7830,10 @@ class HRToolkitApp:
             return [
                 ("适用：根据员工名单从资料库批量提取特定材料（身份证、合同、学历等）并自动打包。", "strong"),
                 ("步骤：选择员工资料库根目录，在第二行选择员工名单表格（Excel），勾选需要的材料类型后点击“开始打包”。", None),
+                ("资料库形式：已有姓名文件夹选“原模式”；文件无序混放时选“OCR 索引”，首次建立索引后会复用未变化文件。", None),
                 ("归类方式：支持“按员工归类”（每人建一个文件夹）、“按材料归类”或“平铺输出”，可选自动生成 ZIP 压缩包。", None),
                 ("结果：按指定结构导出文件，并自动生成《员工资料提取汇总与缺失清单.xlsx》。", None),
-                ("安全说明：纯本地读取与复制，原始资料库不会被修改，不上传外网。", "warning"),
+                ("安全说明：纯本地处理、不上传外网；源文件不会修改，OCR 索引模式只会新增隐藏缓存文件。", "warning"),
             ]
         return [
             ("该工具暂未实现。", "strong"),
@@ -8104,6 +8131,61 @@ class HRToolkitApp:
             return
         self._refresh_material_preset_combo()
         self._save_workspace_preferences()
+
+    def _on_material_library_mode_changed(self, _event=None) -> None:
+        """切换资料库组织形式，不改变现有输出归类模式。"""
+        if not hasattr(self, "material_library_mode"):
+            return
+        selected = LIBRARY_MODE_LABELS.get(
+            self.material_library_mode.get(),
+            LIBRARY_MODE_PERSON_FOLDER,
+        )
+        is_flat_ocr = selected == LIBRARY_MODE_FLAT_OCR
+        previous_mode = getattr(
+            self,
+            "_last_material_library_mode",
+            LIBRARY_MODE_PERSON_FOLDER,
+        )
+        if is_flat_ocr:
+            if previous_mode != LIBRARY_MODE_FLAT_OCR:
+                self._material_person_mode_cache_preference = bool(
+                    self.material_use_ocr_cache.get()
+                )
+            self.material_use_ocr_cache.set(True)
+            if hasattr(self, "material_use_ocr_cache_check"):
+                self.material_use_ocr_cache_check.configure(state="disabled")
+            if hasattr(self, "material_collect_all_check"):
+                self.material_collect_all_check.configure(
+                    text="全部（提取 OCR 识别到的该人员全部材料）"
+                )
+            if hasattr(self, "material_library_mode_hint"):
+                self.material_library_mode_hint.configure(
+                    text="源文件不改；首次建立隐藏索引，未变化文件直接复用"
+                )
+            if hasattr(self, "material_types_hint"):
+                self.material_types_hint.configure(
+                    text="取消勾选「全部」后，可只提取指定材料；索引仍会覆盖整个资料库"
+                )
+        else:
+            if previous_mode == LIBRARY_MODE_FLAT_OCR and hasattr(
+                self, "_material_person_mode_cache_preference"
+            ):
+                self.material_use_ocr_cache.set(
+                    self._material_person_mode_cache_preference
+                )
+            if hasattr(self, "material_use_ocr_cache_check"):
+                self.material_use_ocr_cache_check.configure(state="normal")
+            if hasattr(self, "material_collect_all_check"):
+                self.material_collect_all_check.configure(
+                    text="全部（直接拷贝匹配到的人员整个文件夹）"
+                )
+            if hasattr(self, "material_library_mode_hint"):
+                self.material_library_mode_hint.configure(text="原模式按姓名文件夹查找")
+            if hasattr(self, "material_types_hint"):
+                self.material_types_hint.configure(
+                    text="取消勾选「全部」后可按需勾选材料类型（如身份证、劳动合同等）"
+                )
+        self._last_material_library_mode = selected
 
     def _on_material_collect_all_changed(self) -> None:
         """全部模式切换：勾选时隐藏材料类型选择，取消时显示。"""
@@ -9286,19 +9368,52 @@ class HRToolkitApp:
                 return
 
         create_zip_val = self.material_create_zip.get()
-        use_ocr_cache_val = self.material_use_ocr_cache.get()
+        library_mode_label = (
+            self.material_library_mode.get()
+            if hasattr(self, "material_library_mode")
+            else "按人员文件夹查找（原模式）"
+        )
+        library_mode_val = LIBRARY_MODE_LABELS.get(
+            library_mode_label,
+            LIBRARY_MODE_PERSON_FOLDER,
+        )
+        use_ocr_cache_val = (
+            True
+            if library_mode_val == LIBRARY_MODE_FLAT_OCR
+            else self.material_use_ocr_cache.get()
+        )
 
         output_dir = self._prepare_result_output_dir(Path(output_text))
         if output_dir is None:
             return
         self._begin_tool_run()
         self._clear_log()
-        if is_collect_all:
+        if library_mode_val == LIBRARY_MODE_FLAT_OCR:
+            self._write_log("开始扫描无序资料库并建立/复用人员材料索引，请稍候...")
+        elif is_collect_all:
             self._write_log("开始检索并拷贝员工整个资料文件夹，请稍候...")
         else:
             self._write_log("开始检索并打包指定材料，请稍候...")
         if use_ocr_cache_val:
             self._write_log("OCR 智能索引缓存已启用：首次扫描会建立资料库缓存；二次扫描将秒级命中。")
+
+        run_token = getattr(self, "_tool_run_token", 0)
+        cancel_event = getattr(self, "_run_cancel_events", {}).get(run_token)
+        progress_queue = getattr(self, "status_queue", None)
+        last_progress: dict[str, tuple[int, int]] = {}
+
+        def material_progress(current: int, total: int, message: str) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("本次处理已停止。")
+            phase = "index" if "索引" in message else "employee"
+            interval = max(1, total // 20) if phase == "index" else max(1, total // 10)
+            marker = (current, total)
+            previous = last_progress.get(phase)
+            should_report = current in {0, 1, total} or current % interval == 0
+            if should_report and marker != previous:
+                last_progress[phase] = marker
+                if progress_queue is not None:
+                    progress_queue.put(("progress", run_token, message))
 
         self._start_tool_worker(
             collect_employee_materials,
@@ -9307,10 +9422,12 @@ class HRToolkitApp:
             roster_source=roster_source,
             material_types=selected_materials,
             mode=MODE_BY_EMPLOYEE,
+            library_mode=library_mode_val,
             create_zip=create_zip_val,
             generate_report=True,
             collect_all=is_collect_all,
             use_ocr_cache=use_ocr_cache_val,
+            progress_callback=material_progress,
         )
 
     def _begin_tool_run(self) -> None:
@@ -9381,6 +9498,8 @@ class HRToolkitApp:
         sources: list[SourceSpec] = []
         output_dir: Path | None = None
         for name, value in bound.arguments.items():
+            if name == "progress_callback":
+                continue
             if name == "output_dir" and value is not None:
                 output_dir = Path(value).expanduser()
                 parameters[name] = output_dir.name
@@ -9811,6 +9930,10 @@ class HRToolkitApp:
         try:
             while True:
                 status, token, payload = self.status_queue.get_nowait()
+                if status == "progress":
+                    if token == self._tool_run_token and payload:
+                        self._write_log(str(payload))
+                    continue
                 keep_project_guard = status == "project_finalize_error"
                 if not keep_project_guard:
                     self._history_task_by_token.pop(token, None)

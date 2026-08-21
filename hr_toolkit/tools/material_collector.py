@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -53,14 +54,13 @@ def _get_ocr_engine():
 
 # OCR 智能索引缓存：写入资料库根目录的隐藏 JSON 文件
 _OCR_CACHE_FILE_NAME = ".hr_material_index_cache.json"
-_OCR_CACHE_VERSION = 1
-_OCR_CACHE_TEXT_SNIPPET_MAX = 256
-_OCR_CACHE_FILE_MAX_BYTES = 10 * 1024 * 1024  # 10MB，触发清理
-_OCR_CACHE_FILE_TRIM_BYTES = 5 * 1024 * 1024  # 清理后保留上限
+_OCR_CACHE_VERSION = 2
+_OCR_CACHE_TEXT_SNIPPET_MAX = 4096
+_OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
+_OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
 _OCR_CACHE_ENTRY_MAX_AGE_DAYS = 90
-# 大文件只算前 1MB 的 hash，控制校验耗时
 _OCR_CACHE_HASH_WINDOW = 1 * 1024 * 1024
-_OCR_CACHE_HASH_TRIGGER_SIZE = 10 * 1024 * 1024  # 超过此尺寸才走 window hash
+_OCR_CACHE_HASH_TRIGGER_SIZE = 10 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +80,35 @@ def _get_engine_signature() -> str:
 
 
 def _compute_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
-    """读取文件的 (size, mtime, sha256_window)；用于缓存命中校验。
+    """旧文件夹模式的缓存指纹；大文件保持原有的前 1MB hash 行为。"""
+    try:
+        stat = file_path.stat()
+    except (FileNotFoundError, OSError):
+        return None
 
-    返回 None 表示文件无法访问。sha256 对大文件（>10MB）只算前 1MB，
-    既保证识别内容变化的检测能力，又控制 IO 耗时。
+    size = stat.st_size
+    mtime = stat.st_mtime
+    sha = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as fp:
+            if size <= _OCR_CACHE_HASH_TRIGGER_SIZE:
+                while True:
+                    chunk = fp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+            else:
+                sha.update(fp.read(_OCR_CACHE_HASH_WINDOW))
+    except OSError:
+        return None
+    return (size, mtime, sha.hexdigest())
+
+
+def _compute_full_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
+    """TASK-8 无序索引专用完整指纹，保证大文件后半段变化也能失效。
+
+    返回 None 表示文件无法访问。首次索引流式计算完整 SHA-256；后续同一路径
+    会先用 size/mtime/ctime 元数据命中路径索引，避免重复读取大文件。
     """
     try:
         stat = file_path.stat()
@@ -94,23 +119,26 @@ def _compute_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
     mtime = stat.st_mtime
 
     sha = hashlib.sha256()
-    if size <= _OCR_CACHE_HASH_TRIGGER_SIZE:
-        try:
-            with open(file_path, "rb") as fp:
-                while True:
-                    chunk = fp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    sha.update(chunk)
-        except OSError:
-            return None
-    else:
-        try:
-            with open(file_path, "rb") as fp:
-                chunk = fp.read(_OCR_CACHE_HASH_WINDOW)
+    try:
+        with open(file_path, "rb") as fp:
+            while True:
+                chunk = fp.read(1024 * 1024)
+                if not chunk:
+                    break
                 sha.update(chunk)
-        except OSError:
-            return None
+    except OSError:
+        return None
+
+    try:
+        final_stat = file_path.stat()
+    except OSError:
+        return None
+    if (
+        final_stat.st_size != stat.st_size
+        or final_stat.st_mtime_ns != stat.st_mtime_ns
+        or final_stat.st_ctime_ns != stat.st_ctime_ns
+    ):
+        return None
 
     return (size, mtime, sha.hexdigest())
 
@@ -146,50 +174,47 @@ def _hash_id_card(id_card: str) -> str:
     return hashlib.sha256(id_card.encode("utf-8")).hexdigest()[:16]
 
 
+def _hash_phone(phone: str) -> str:
+    if not phone:
+        return ""
+    return hashlib.sha256(phone.encode("utf-8")).hexdigest()[:16]
+
+
+def _new_ocr_cache() -> dict[str, Any]:
+    now = _beijing_now_str()
+    return {
+        "version": _OCR_CACHE_VERSION,
+        "engine_signature": _get_engine_signature(),
+        "created_at": now,
+        "updated_at": now,
+        "entries": {},
+        "paths": {},
+    }
+
+
 def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
     """读取缓存 JSON；损坏时返回空结构并由上层决定是否重建。"""
-    if not cache_path.exists():
-        return {
-            "version": _OCR_CACHE_VERSION,
-            "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_str(),
-            "updated_at": _beijing_now_str(),
-            "entries": {},
-        }
+    if cache_path.is_symlink() or not cache_path.is_file():
+        return _new_ocr_cache()
 
     try:
         raw = cache_path.read_text(encoding="utf-8")
     except OSError:
-        return {
-            "version": _OCR_CACHE_VERSION,
-            "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_str(),
-            "updated_at": _beijing_now_str(),
-            "entries": {},
-        }
+        return _new_ocr_cache()
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return {
-            "version": _OCR_CACHE_VERSION,
-            "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_str(),
-            "updated_at": _beijing_now_str(),
-            "entries": {},
-        }
+        return _new_ocr_cache()
 
     if not isinstance(data, dict):
-        return {
-            "version": _OCR_CACHE_VERSION,
-            "engine_signature": _get_engine_signature(),
-            "created_at": _beijing_now_str(),
-            "updated_at": _beijing_now_str(),
-            "entries": {},
-        }
+        return _new_ocr_cache()
 
     data.setdefault("version", _OCR_CACHE_VERSION)
-    data.setdefault("entries", {})
+    if not isinstance(data.get("entries"), dict):
+        data["entries"] = {}
+    if not isinstance(data.get("paths"), dict):
+        data["paths"] = {}
     return data
 
 
@@ -203,14 +228,24 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     data["updated_at"] = _beijing_now_str()
     data.setdefault("created_at", data["updated_at"])
     data.setdefault("entries", {})
+    data.setdefault("paths", {})
 
-    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    if cache_path.is_symlink():
+        return False
+    tmp_path = cache_path.with_name(
+        f".{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
     try:
-        tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        if cache_path.parent.is_symlink():
+            return False
+        with tmp_path.open("x", encoding="utf-8") as temp_file:
+            temp_file.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        try:
+            tmp_path.chmod(0o600)
+        except OSError:
+            pass
+    except (FileExistsError, OSError):
         return False
 
     try:
@@ -218,8 +253,7 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     except OSError:
         # 兜底：清理残留 tmp
         try:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
         return False
@@ -233,7 +267,9 @@ def _trim_cache_by_age_and_size(data: dict[str, Any]) -> None:
 因此文件改名/移动不会导致缓存失效；文件被删除后条目会自然过期（90 天未命中后清理）。
     """
     entries: dict[str, Any] = data.get("entries") or {}
+    paths: dict[str, Any] = data.get("paths") or {}
     if not entries:
+        paths.clear()
         return
 
     # 1. 清理超过 90 天未验证的条目
@@ -265,6 +301,13 @@ def _trim_cache_by_age_and_size(data: dict[str, Any]) -> None:
     for key in stale_keys:
         entries.pop(key, None)
 
+    def _drop_orphan_paths() -> None:
+        for rel_path, path_entry in list(paths.items()):
+            if not isinstance(path_entry, dict) or path_entry.get("cache_key") not in entries:
+                paths.pop(rel_path, None)
+
+    _drop_orphan_paths()
+
     # 2. 估算大小并按 verified_at 升序删除
     serialized_len = sum(
         len(json.dumps(v, ensure_ascii=False).encode("utf-8")) + len(k.encode("utf-8"))
@@ -288,6 +331,7 @@ def _trim_cache_by_age_and_size(data: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             serialized_len -= 1024
         entries.pop(key, None)
+    _drop_orphan_paths()
 
 
 TOOL_NAME = "需求9-员工资料自动打包与信息提取"
@@ -303,6 +347,17 @@ MODE_LABELS = {
     "平铺输出（所有文件在同一文件夹）": MODE_FLAT,
 }
 MODE_LABELS_REVERSE = {v: k for k, v in MODE_LABELS.items()}
+
+# 资料库的组织形式与上面的“输出归类模式”是两个独立维度。默认值始终走旧逻辑，
+# 避免 TASK-8 影响当前已经投入使用的三种输出结构。
+LIBRARY_MODE_PERSON_FOLDER = "person_folder"
+LIBRARY_MODE_FLAT_OCR = "flat_ocr"
+LIBRARY_MODES = {LIBRARY_MODE_PERSON_FOLDER, LIBRARY_MODE_FLAT_OCR}
+LIBRARY_MODE_LABELS = {
+    "按人员文件夹查找（原模式）": LIBRARY_MODE_PERSON_FOLDER,
+    "无序平铺资料库（OCR 索引）": LIBRARY_MODE_FLAT_OCR,
+}
+LIBRARY_MODE_LABELS_REVERSE = {v: k for k, v in LIBRARY_MODE_LABELS.items()}
 
 # 预置常见材料类型及其多维度别名同义词库（互斥排他分类，绝不串门）
 MATERIAL_SYNONYMS: dict[str, list[str]] = {
@@ -445,6 +500,7 @@ class MaterialFileMatch:
     extracted_id_card: str = ""
     mismatch_warning: str = ""
     cache_hit: bool = False  # 新增：OCR 缓存命中标记
+    employee_identity_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -459,6 +515,7 @@ class MaterialFileMatch:
             "extracted_id_card": self.extracted_id_card,
             "mismatch_warning": self.mismatch_warning,
             "cache_hit": self.cache_hit,
+            "employee_identity_key": self.employee_identity_key,
         }
 
 
@@ -469,12 +526,14 @@ class MaterialCollectResult:
     zip_path: Path | None = None
     report_path: Path | None = None
     mode: str = MODE_BY_EMPLOYEE
+    library_mode: str = LIBRARY_MODE_PERSON_FOLDER
     target_employees: list[TargetEmployee] = field(default_factory=list)
     requested_materials: list[str] = field(default_factory=list)
     matches: list[MaterialFileMatch] = field(default_factory=list)
     missing_records: dict[str, list[str]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     folder_match_counts: dict[str, int] = field(default_factory=dict)
+    employee_result_keys: list[str] = field(default_factory=list, repr=False)
 
     # === 新增：OCR 缓存层指标（默认值保持向后兼容） ===
     ocr_cache_enabled: bool = True
@@ -499,7 +558,12 @@ class MaterialCollectResult:
 
     @property
     def complete_employee_count(self) -> int:
-        return sum(1 for emp in self.target_employees if not self.missing_records.get(emp.name))
+        keys = (
+            self.employee_result_keys
+            if len(self.employee_result_keys) == len(self.target_employees)
+            else [employee.name for employee in self.target_employees]
+        )
+        return sum(1 for key in keys if not self.missing_records.get(key))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -509,6 +573,7 @@ class MaterialCollectResult:
             "zip_path": str(self.zip_path) if self.zip_path else None,
             "report_path": str(self.report_path) if self.report_path else None,
             "mode": self.mode,
+            "library_mode": self.library_mode,
             "total_employees": self.total_employees,
             "matched_file_count": self.matched_file_count,
             "complete_employee_count": self.complete_employee_count,
@@ -966,6 +1031,162 @@ _DOC_CONTENT_PATTERNS: dict[str, list[str]] = {
 }
 
 
+def _sanitize_cached_text(text: str) -> str:
+    """缓存 OCR 摘要前脱敏证件号、手机号，并限制体积。"""
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    compact = re.sub(
+        r"(?<!\d)(\d{17}[\dXx]|\d{15})(?!\d)",
+        lambda match: _mask_id_card(match.group(1)),
+        compact,
+    )
+    compact = re.sub(
+        r"(?<!\d)(1[3-9]\d{9})(?!\d)",
+        lambda match: match.group(1)[:3] + "****" + match.group(1)[-4:],
+        compact,
+    )
+    return compact[:_OCR_CACHE_TEXT_SNIPPET_MAX]
+
+
+def _normalize_person_name(name: str) -> str:
+    return re.sub(r"[\s·•・]", "", str(name or "")).strip()
+
+
+def _extract_person_names(text: str) -> list[str]:
+    """从证件、合同等正文提取明确带字段标签的人名，不依赖文件名。"""
+    normalized = re.sub(r"[\r\n\t]+", " ", str(text or ""))
+    labels = (
+        "劳动者姓名", "员工姓名", "人员姓名", "持证人姓名", "申请人姓名",
+        "姓名", "持证人", "劳动者", "乙方", "受聘人", "开户人",
+    )
+    names: list[str] = []
+    suffix_noise = (
+        "性别", "民族", "出生", "住址", "身份证", "公民身份", "证件号码",
+        "电话", "手机号", "合同", "岗位", "部门", "文化程度", "有效期",
+    )
+    for label in labels:
+        pattern = rf"{re.escape(label)}\s*(?:名称)?\s*[:：]?\s*([\u3400-\u9fff·•・]{{2,10}})"
+        for match in re.finditer(pattern, normalized):
+            candidate = match.group(1).strip()
+            for suffix in suffix_noise:
+                if suffix in candidate:
+                    candidate = candidate.split(suffix, 1)[0]
+            candidate = candidate.strip()
+            if not (2 <= len(_normalize_person_name(candidate)) <= 8):
+                continue
+            if not _is_valid_person_name(candidate):
+                continue
+            if candidate not in names:
+                names.append(candidate)
+    return names
+
+
+def _extract_id_card(text: str) -> str:
+    match = re.search(r"(?<!\d)(\d{17}[\dXx]|\d{15})(?!\d)", str(text or ""))
+    return match.group(1) if match else ""
+
+
+def _extract_phone(text: str) -> str:
+    match = re.search(r"(?<!\d)(1[3-9]\d{9})(?!\d)", str(text or ""))
+    return match.group(1) if match else ""
+
+
+def _classify_text_content(
+    text: str,
+    *,
+    requested_types: list[str] | None = None,
+    method_prefix: str = "ocr",
+) -> tuple[str | None, str, str]:
+    """按正文判定材料类型；返回 (类型, 匹配方式, 正反面子类型)。"""
+    full_text = str(text or "")
+    if not full_text.strip():
+        return None, "", ""
+
+    if any(keyword in full_text for keyword in ("特种作业操作证", "特种作业人员", "特种设备作业")):
+        return "特种证书", f"{method_prefix}_special_cert", ""
+    if any(keyword in full_text for keyword in ("安全生产考核", "安全考核合格", "建安C证", "建安A证", "建安B证")):
+        return "安全员证", f"{method_prefix}_safety_cert", ""
+    if (
+        any(keyword in full_text for keyword in ("劳动合同", "用工合同", "劳务合同", "聘用合同"))
+        or ("甲方" in full_text and "乙方" in full_text and any(keyword in full_text for keyword in ("劳动", "报酬", "工作内容")))
+    ):
+        return "劳动合同", f"{method_prefix}_contract", ""
+    if any(keyword in full_text for keyword in ("毕业证书", "学位证书", "学信网", "学历证书", "普通高等学校")):
+        return "学历证明", f"{method_prefix}_degree", ""
+    if any(keyword in full_text for keyword in ("机动车驾驶证", "驾驶证", "职业资格证书", "职业资格", "职称证书", "技能等级证书")):
+        return "资格证书", f"{method_prefix}_certificate", ""
+    if re.search(r"\d{16,19}", full_text) and any(keyword in full_text for keyword in ("银行", "银联", "Bank")):
+        return "银行卡", f"{method_prefix}_bank", ""
+    if "居民身份证" in full_text or (
+        "签发机关" in full_text and "有效期限" in full_text
+        and "特种" not in full_text and "安全" not in full_text
+    ):
+        return "身份证", f"{method_prefix}_id_back", "反面"
+    extracted_id = _extract_id_card(full_text)
+    if (
+        "公民身份号码" in full_text
+        or ("姓名" in full_text and any(keyword in full_text for keyword in ("住址", "民族", "出生")))
+        or extracted_id
+    ):
+        return "身份证", f"{method_prefix}_id_front", "正面"
+
+    # 自定义材料只接受正文中的完整名称，避免随机文件名造成跨人员误判。
+    for requested in sorted(requested_types or [], key=len, reverse=True):
+        if requested and requested in full_text:
+            return requested, f"{method_prefix}_custom", ""
+    return None, "", ""
+
+
+def _read_ocr_text(file_path: Path) -> tuple[str, list[str], bool]:
+    """调用本地 OCR 并兼容 RapidOCR 与测试/旧适配器的两种结果形态。"""
+    engine = _get_ocr_engine()
+    if engine is None:
+        return "", [], False
+
+    target_input: str | bytes = str(file_path)
+    if file_path.suffix.lower() == ".pdf":
+        img_bytes = _extract_pdf_image_bytes(file_path)
+        if not img_bytes:
+            return "", [], False
+        target_input = img_bytes
+
+    try:
+        with _OCR_LOCK:
+            result, _ = engine(target_input)
+    except Exception:
+        return "", [], False
+    if not result:
+        return "", [], True
+
+    texts: list[str] = []
+    for item in result:
+        if not isinstance(item, (list, tuple)):
+            continue
+        if len(item) >= 3 and isinstance(item[1], str):
+            texts.append(item[1])
+        elif len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], str):
+            # 一些本地适配器以 [字段名, 字段值] 返回。
+            texts.append(f"{item[0]}：{item[1]}")
+        elif len(item) >= 2 and isinstance(item[1], str):
+            texts.append(item[1])
+    return " ".join(texts), texts, True
+
+
+def _analyze_ocr_file(
+    file_path: Path,
+    requested_types: list[str] | None = None,
+) -> tuple[str | None, str, str, str, str, str, list[str], bool]:
+    full_text, _texts, analysis_complete = _read_ocr_text(file_path)
+    names = _extract_person_names(full_text)
+    extracted_name = names[0] if names else ""
+    extracted_id = _extract_id_card(full_text)
+    material, method, subtype = _classify_text_content(
+        full_text,
+        requested_types=requested_types,
+        method_prefix="ocr",
+    )
+    return material, method, subtype, extracted_name, extracted_id, full_text, names, analysis_complete
+
+
 def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
     """通过本地离线 OCR 识别图片文字并进行材料分类与信息提取。
 
@@ -993,54 +1214,64 @@ def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
     except Exception:
         return None, "", "", "", ""
 
-    # 实体信息提取：姓名与身份证号
     extracted_name = ""
     extracted_id = ""
-
     id_match = re.search(r"\b\d{17}[\dxX]\b", full_text)
     if id_match:
         extracted_id = id_match.group(0)
 
-    for idx, t in enumerate(texts):
-        m = re.search(r"姓名(?:[/A-Za-z\s:：]*)([\u4e00-\u9fa5]{2,10})", t)
-        if m:
-            extracted_name = m.group(1).strip()
+    for idx, text in enumerate(texts):
+        match = re.search(r"姓名(?:[/A-Za-z\s:：]*)([\u4e00-\u9fa5]{2,10})", text)
+        if match:
+            extracted_name = match.group(1).strip()
             break
-        if re.search(r"^姓名(?:[/A-Za-z\s:：]*)$", t.strip()):
+        if re.search(r"^姓名(?:[/A-Za-z\s:：]*)$", text.strip()):
             if idx + 1 < len(texts) and re.match(r"^[\u4e00-\u9fa5]{2,10}$", texts[idx + 1].strip()):
                 extracted_name = texts[idx + 1].strip()
                 break
 
-    # 1. 特种证书（特征极强，优先判断）
-    if "特种作业操作证" in full_text or "特种作业" in full_text or "特种设备作业" in full_text or "特种作业人员" in full_text:
+    if (
+        "特种作业操作证" in full_text or "特种作业" in full_text
+        or "特种设备作业" in full_text or "特种作业人员" in full_text
+    ):
         return "特种证书", "ocr_special_cert", "", extracted_name, extracted_id
-
-    # 2. 安全员证（特征极强，优先判断）
-    if "安全生产考核" in full_text or "安全考核合格" in full_text or "建安C证" in full_text or "建安A证" in full_text or "建安B证" in full_text or "安全员" in full_text:
+    if (
+        "安全生产考核" in full_text or "安全考核合格" in full_text
+        or "建安C证" in full_text or "建安A证" in full_text
+        or "建安B证" in full_text or "安全员" in full_text
+    ):
         return "安全员证", "ocr_safety_cert", "", extracted_name, extracted_id
-
-    # 3. 劳动合同（照片扫描件）
-    if "劳动合同" in full_text or "用工合同" in full_text or ("甲方" in full_text and "乙方" in full_text and ("劳动" in full_text or "报酬" in full_text or "工作内容" in full_text)):
+    if (
+        "劳动合同" in full_text or "用工合同" in full_text
+        or ("甲方" in full_text and "乙方" in full_text and (
+            "劳动" in full_text or "报酬" in full_text or "工作内容" in full_text
+        ))
+    ):
         return "劳动合同", "ocr_contract", "", extracted_name, extracted_id
-
-    # 4. 学历证明
-    if "毕业证书" in full_text or "学位证书" in full_text or "学信网" in full_text or "学历证书" in full_text or "普通高等学校" in full_text:
+    if (
+        "毕业证书" in full_text or "学位证书" in full_text or "学信网" in full_text
+        or "学历证书" in full_text or "普通高等学校" in full_text
+    ):
         return "学历证明", "ocr_degree", "", extracted_name, extracted_id
-
-    # 5. 资格证书 / 驾驶证
-    if "机动车驾驶证" in full_text or "驾驶证" in full_text or "职业资格证书" in full_text or "职业资格" in full_text:
+    if (
+        "机动车驾驶证" in full_text or "驾驶证" in full_text
+        or "职业资格证书" in full_text or "职业资格" in full_text
+    ):
         return "资格证书", "ocr_certificate", "", extracted_name, extracted_id
-
-    # 6. 银行卡
-    if re.search(r"\d{16,19}", full_text) and ("银行" in full_text or "银联" in full_text or "Bank" in full_text):
+    if re.search(r"\d{16,19}", full_text) and (
+        "银行" in full_text or "银联" in full_text or "Bank" in full_text
+    ):
         return "银行卡", "ocr_bank", "", extracted_name, extracted_id
-
-    # 7. 身份证反面（国徽面）
-    if "居民身份证" in full_text or ("签发机关" in full_text and "有效期限" in full_text and "特种" not in full_text and "安全" not in full_text):
+    if "居民身份证" in full_text or (
+        "签发机关" in full_text and "有效期限" in full_text
+        and "特种" not in full_text and "安全" not in full_text
+    ):
         return "身份证", "ocr_id_back", "反面", extracted_name, extracted_id
-
-    # 8. 身份证正面（人像面）
-    if "公民身份号码" in full_text or ("姓名" in full_text and ("住址" in full_text or "民族" in full_text or "出生" in full_text)) or extracted_id:
+    if (
+        "公民身份号码" in full_text
+        or ("姓名" in full_text and ("住址" in full_text or "民族" in full_text or "出生" in full_text))
+        or extracted_id
+    ):
         return "身份证", "ocr_id_front", "正面", extracted_name, extracted_id
 
     return None, "", "", extracted_name, extracted_id
@@ -1154,6 +1385,612 @@ def _scan_folder_index(
     return folder_index
 
 
+@dataclass(frozen=True)
+class _FlatIndexedFile:
+    source_path: Path
+    relative_path: str
+    cache_key: str
+    material_type: str
+    match_method: str
+    subtype: str
+    extracted_names: tuple[str, ...]
+    extracted_id_hash: str
+    extracted_phone_hash: str = ""
+    text_snippet: str = ""
+    extracted_id_card: str = ""
+    cache_hit: bool = False
+
+
+def _scan_flat_library_files(lib_path: Path, skip_dir: Path | None = None) -> list[Path]:
+    """递归扫描无序资料库中的可识别文件，跳过隐藏项、链接目录和输出目录。"""
+    result: list[Path] = []
+    for root, dirs, files in os.walk(lib_path, followlinks=False):
+        root_path = Path(root)
+        dirs[:] = [
+            name
+            for name in dirs
+            if not name.startswith(".")
+            and name.lower() not in _IGNORED_FILENAMES
+            and not (root_path / name).is_symlink()
+            and not (skip_dir and _is_path_nested(root_path / name, skip_dir))
+        ]
+        for filename in files:
+            if _is_junk_or_temp_file(filename):
+                continue
+            source_path = root_path / filename
+            if source_path.is_symlink() or not source_path.is_file():
+                continue
+            if source_path.suffix.lower() not in SUPPORTED_FILE_EXTENSIONS:
+                continue
+            result.append(source_path)
+    return sorted(result, key=lambda path: path.relative_to(lib_path).as_posix().casefold())
+
+
+def _extract_flat_document_text(file_path: Path) -> str:
+    """提取无序库文档正文；该扩展能力仅用于 TASK-8，不改变原文件夹模式。"""
+    ext = file_path.suffix.lower()
+    if ext == ".docx":
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                tree = ET.fromstring(archive.read("word/document.xml"))
+                return " ".join(text for text in tree.itertext() if text)
+        except Exception:
+            return ""
+    if ext in DOC_EXTENSIONS:
+        return _extract_document_text(file_path)
+    if ext == ".xlsx":
+        try:
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+            chunks: list[str] = []
+            character_count = 0
+            try:
+                for sheet in workbook.worksheets:
+                    for row in sheet.iter_rows(values_only=True):
+                        for value in row:
+                            if value is not None:
+                                text = str(value)
+                                chunks.append(text)
+                                character_count += len(text)
+                                if character_count >= 20000:
+                                    return " ".join(chunks)
+            finally:
+                workbook.close()
+            return " ".join(chunks)
+        except Exception:
+            return ""
+    if ext == ".xls":
+        try:
+            import xlrd
+
+            workbook = xlrd.open_workbook(str(file_path), on_demand=True)
+            chunks: list[str] = []
+            character_count = 0
+            try:
+                for sheet in workbook.sheets():
+                    for row_index in range(sheet.nrows):
+                        for value in sheet.row_values(row_index):
+                            if value not in (None, ""):
+                                text = str(value)
+                                chunks.append(text)
+                                character_count += len(text)
+                                if character_count >= 20000:
+                                    return " ".join(chunks)
+            finally:
+                workbook.release_resources()
+            return " ".join(chunks)
+        except Exception:
+            return ""
+    if ext == ".pptx":
+        try:
+            with zipfile.ZipFile(file_path) as archive:
+                xml_names = [
+                    name for name in archive.namelist()
+                    if name.endswith(".xml") and (name.startswith("ppt/slides/") or name == "word/document.xml")
+                ]
+                chunks: list[str] = []
+                for name in xml_names:
+                    tree = ET.fromstring(archive.read(name))
+                    chunks.extend(text for text in tree.itertext() if text)
+                return " ".join(chunks)
+        except Exception:
+            return ""
+    return ""
+
+
+def _classify_material_from_filename(filename: str, requested_types: list[str]) -> tuple[str | None, str]:
+    """正文无法判型时，仅用文件名补充材料类型；绝不以文件名判断人员。"""
+    stem = Path(filename).stem.casefold()
+    types = list(dict.fromkeys([*requested_types, *MATERIAL_SYNONYMS.keys()]))
+    weak_tokens = {"id", "a面", "b面", "正", "反", "照片", "证件"}
+    for material in sorted(types, key=len, reverse=True):
+        synonyms = MATERIAL_SYNONYMS.get(material, [material])
+        for synonym in sorted(synonyms, key=len, reverse=True):
+            token = synonym.strip().casefold()
+            if not token or token in weak_tokens or len(token) < 2:
+                continue
+            if token in stem:
+                return material, "filename_material_only"
+    return None, ""
+
+
+def _flat_cache_entry_usable(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("analysis_state") == "complete":
+        return True
+    # 兼容旧缓存：只有明确识别出人员的成功条目才可用于无序库，不能把旧空结果当负缓存。
+    return bool(entry.get("material_type") and entry.get("extracted_name"))
+
+
+def _flat_path_metadata(file_path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = file_path.stat()
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _lookup_flat_index_cache(
+    cache: dict[str, Any],
+    file_path: Path,
+    rel_path: str,
+    cache_stats: dict[str, int],
+) -> tuple[dict[str, Any] | None, str | None, tuple[int, float, str] | None]:
+    """路径元数据先行、内容 hash 兜底；返回缓存条目、key 与指纹。"""
+    entries: dict[str, Any] = cache.setdefault("entries", {})
+    paths: dict[str, Any] = cache.setdefault("paths", {})
+    metadata = _flat_path_metadata(file_path)
+    if metadata is None:
+        return None, None, None
+    size, mtime_ns, ctime_ns = metadata
+
+    previous = paths.get(rel_path)
+    if isinstance(previous, dict) and (
+        previous.get("source_size") == size
+        and previous.get("source_mtime_ns") == mtime_ns
+        and previous.get("source_ctime_ns") == ctime_ns
+    ):
+        previous_key = previous.get("cache_key")
+        entry = entries.get(previous_key)
+        if _flat_cache_entry_usable(entry):
+            entry["verified_at"] = _beijing_now_str()
+            cache_stats["hits"] = cache_stats.get("hits", 0) + 1
+            return entry, str(previous_key), None
+
+    fingerprint = _compute_full_file_fingerprint(file_path)
+    if fingerprint is None:
+        return None, None, None
+    fp_size, mtime, sha = fingerprint
+    cache_key = f"{sha}_{fp_size}"
+    entry = entries.get(cache_key)
+    if not _flat_cache_entry_usable(entry):
+        legacy_key = f"{sha[:24]}_{fp_size}"
+        legacy_entry = entries.get(legacy_key)
+        if _flat_cache_entry_usable(legacy_entry):
+            entry = dict(legacy_entry)
+            entry["content_hash"] = sha
+            entries[cache_key] = entry
+            entries.pop(legacy_key, None)
+
+    old_key = previous.get("cache_key") if isinstance(previous, dict) else None
+    if old_key and old_key != cache_key:
+        cache_stats["invalidated"] = cache_stats.get("invalidated", 0) + 1
+
+    paths[rel_path] = {
+        "cache_key": cache_key,
+        "source_size": size,
+        "source_mtime_ns": mtime_ns,
+        "source_ctime_ns": ctime_ns,
+    }
+    if _flat_cache_entry_usable(entry):
+        entry["verified_at"] = _beijing_now_str()
+        cache_stats["hits"] = cache_stats.get("hits", 0) + 1
+        return entry, cache_key, fingerprint
+
+    cache_stats["misses"] = cache_stats.get("misses", 0) + 1
+    return None, cache_key, fingerprint
+
+
+def _store_flat_index_entry(
+    cache: dict[str, Any],
+    file_path: Path,
+    rel_path: str,
+    cache_key: str,
+    fingerprint: tuple[int, float, str],
+    *,
+    material_type: str,
+    match_method: str,
+    subtype: str,
+    extracted_names: list[str],
+    extracted_id: str,
+    extracted_text: str,
+) -> dict[str, Any]:
+    size, mtime, sha = fingerprint
+    entry = {
+        "content_hash": sha,
+        "source_size": size,
+        "source_mtime": mtime,
+        "material_type": material_type or "其他材料",
+        "match_method": match_method or "unrecognized",
+        "subtype": subtype,
+        "extracted_name": extracted_names[0] if extracted_names else "",
+        "extracted_names": list(dict.fromkeys(extracted_names)),
+        "extracted_id_hash": _hash_id_card(extracted_id),
+        "extracted_phone_hash": _hash_phone(_extract_phone(extracted_text)),
+        "ocr_text": _sanitize_cached_text(extracted_text),
+        "verified_at": _beijing_now_str(),
+        "sample_filename": file_path.name,
+        "source_relpath": rel_path,
+        "analysis_state": "complete",
+        "index_scope": LIBRARY_MODE_FLAT_OCR,
+    }
+    cache.setdefault("entries", {})[cache_key] = entry
+    return entry
+
+
+def _analyze_flat_source(
+    file_path: Path,
+    requested_types: list[str],
+) -> tuple[str, str, str, list[str], str, str, bool]:
+    """分析单个无序库文件，返回类型、方式、子类型、姓名列表、证件号和正文。"""
+    text = _extract_flat_document_text(file_path)
+    method_prefix = "doc_content"
+    analysis_complete = True
+    if not text and (file_path.suffix.lower() in IMAGE_EXTENSIONS or file_path.suffix.lower() == ".pdf"):
+        material, method, subtype, _name, extracted_id, text, names, analysis_complete = _analyze_ocr_file(
+            file_path,
+            requested_types=requested_types,
+        )
+    else:
+        names = _extract_person_names(text)
+        extracted_id = _extract_id_card(text)
+        material, method, subtype = _classify_text_content(
+            text,
+            requested_types=requested_types,
+            method_prefix=method_prefix,
+        )
+
+    if not material:
+        material, filename_method = _classify_material_from_filename(file_path.name, requested_types)
+        if material:
+            method = filename_method if not method else f"{method}+{filename_method}"
+    return material or "其他材料", method or "unrecognized", subtype, names, extracted_id, text, analysis_complete
+
+
+def _entry_to_flat_indexed_file(
+    file_path: Path,
+    rel_path: str,
+    cache_key: str,
+    entry: dict[str, Any],
+    *,
+    cache_hit: bool,
+    extracted_id_card: str = "",
+) -> _FlatIndexedFile:
+    raw_names = entry.get("extracted_names")
+    if not isinstance(raw_names, list):
+        raw_names = [entry.get("extracted_name")] if entry.get("extracted_name") else []
+    names = tuple(
+        str(name).strip() for name in raw_names
+        if str(name or "").strip()
+    )
+    return _FlatIndexedFile(
+        source_path=file_path,
+        relative_path=rel_path,
+        cache_key=cache_key,
+        material_type=str(entry.get("material_type") or "其他材料"),
+        match_method=str(entry.get("match_method") or "unrecognized"),
+        subtype=str(entry.get("subtype") or ""),
+        extracted_names=names,
+        extracted_id_hash=str(entry.get("extracted_id_hash") or ""),
+        extracted_phone_hash=str(entry.get("extracted_phone_hash") or ""),
+        text_snippet=str(entry.get("ocr_text") or ""),
+        extracted_id_card=extracted_id_card,
+        cache_hit=cache_hit,
+    )
+
+
+def _build_flat_ocr_index(
+    lib_path: Path,
+    out_path: Path,
+    requested_types: list[str],
+    cache: dict[str, Any],
+    cache_path: Path,
+    cache_stats: dict[str, int],
+    warnings: list[str],
+    progress_callback: Callable[[int, int, str], None] | None,
+) -> tuple[list[_FlatIndexedFile], bool]:
+    """建立/复用全局 OCR 索引；小批次密集、超大批次分段持久化。"""
+    source_files = [
+        path for path in _scan_flat_library_files(lib_path, skip_dir=out_path)
+        if path.resolve() != cache_path.resolve()
+    ]
+    indexed: list[_FlatIndexedFile] = []
+    active_paths: set[str] = set()
+    checkpoint_ok = True
+    cache_changed_since_checkpoint = False
+
+    for index, source_path in enumerate(source_files, start=1):
+        rel_path = source_path.relative_to(lib_path).as_posix()
+        active_paths.add(rel_path)
+        if progress_callback:
+            progress_callback(index, len(source_files), f"正在建立无序资料 OCR 索引：{index}/{len(source_files)}")
+
+        entry, cache_key, fingerprint = _lookup_flat_index_cache(
+            cache, source_path, rel_path, cache_stats,
+        )
+        if cache_key is None:
+            warnings.append(f"无法读取资料文件，已跳过：{rel_path}")
+            continue
+
+        cache_hit = entry is not None
+        extracted_id = ""
+        if entry is None:
+            material, method, subtype, names, extracted_id, text, analysis_complete = _analyze_flat_source(
+                source_path, requested_types,
+            )
+            if fingerprint is None:
+                fingerprint = _compute_full_file_fingerprint(source_path)
+            if fingerprint is None:
+                warnings.append(f"文件在索引过程中发生变化，已跳过：{rel_path}")
+                continue
+            if analysis_complete:
+                entry = _store_flat_index_entry(
+                    cache,
+                    source_path,
+                    rel_path,
+                    cache_key,
+                    fingerprint,
+                    material_type=material,
+                    match_method=method,
+                    subtype=subtype,
+                    extracted_names=names,
+                    extracted_id=extracted_id,
+                    extracted_text=text,
+                )
+                cache_changed_since_checkpoint = True
+            else:
+                # OCR 引擎不可用/文件暂时无法识别时不能写成永久负结果，下次查询必须重试。
+                entry = {
+                    "material_type": material,
+                    "match_method": method,
+                    "subtype": subtype,
+                    "extracted_names": names,
+                    "extracted_id_hash": _hash_id_card(extracted_id),
+                    "analysis_state": "incomplete",
+                }
+                if not any("暂时无法完成 OCR" in warning for warning in warnings):
+                    warnings.append(
+                        "部分图片或扫描版 PDF 暂时无法完成 OCR，未写入负缓存；下次查询会自动重试。"
+                    )
+        elif entry.get("material_type") == "其他材料" and entry.get("ocr_text"):
+            # 后续新增自定义材料时，直接用已缓存 OCR 文本重分类，不重新 OCR。
+            material, method, subtype = _classify_text_content(
+                str(entry.get("ocr_text") or ""),
+                requested_types=requested_types,
+                method_prefix="cached_text",
+            )
+            if material:
+                entry["material_type"] = material
+                entry["match_method"] = method
+                entry["subtype"] = subtype
+                cache_changed_since_checkpoint = True
+
+        indexed.append(_entry_to_flat_indexed_file(
+            source_path,
+            rel_path,
+            cache_key,
+            entry,
+            cache_hit=cache_hit,
+            extracted_id_card=extracted_id,
+        ))
+
+        should_checkpoint = (
+            (index <= 1000 and index % 100 == 0)
+            or (index > 1000 and index % 1000 == 0)
+        )
+        if should_checkpoint and cache_changed_since_checkpoint:
+            _trim_cache_by_age_and_size(cache)
+            if not _save_ocr_cache(cache_path, cache):
+                checkpoint_ok = False
+            cache_changed_since_checkpoint = False
+
+    # 移除已经删除/改名的旧路径；内容条目仅在没有任何现存路径引用时清理。
+    paths: dict[str, Any] = cache.setdefault("paths", {})
+    for rel_path in list(paths):
+        if rel_path not in active_paths:
+            paths.pop(rel_path, None)
+            cache_changed_since_checkpoint = True
+    referenced_keys = {
+        item.get("cache_key") for item in paths.values()
+        if isinstance(item, dict) and item.get("cache_key")
+    }
+    entries: dict[str, Any] = cache.setdefault("entries", {})
+    for key, entry in list(entries.items()):
+        if (
+            isinstance(entry, dict)
+            and entry.get("index_scope") == LIBRARY_MODE_FLAT_OCR
+            and key not in referenced_keys
+        ):
+            entries.pop(key, None)
+            cache_changed_since_checkpoint = True
+
+    if cache_changed_since_checkpoint:
+        _trim_cache_by_age_and_size(cache)
+        if not _save_ocr_cache(cache_path, cache):
+            checkpoint_ok = False
+    return indexed, checkpoint_ok
+
+
+def _flat_file_matches_employee(
+    indexed_file: _FlatIndexedFile,
+    employee: TargetEmployee,
+    duplicate_target_names: set[str],
+) -> bool:
+    target_name = _normalize_person_name(employee.name)
+    target_id_hash = _hash_id_card(employee.id_card)
+    target_phone_hash = _hash_phone(employee.phone)
+    if not target_id_hash and _ID_CARD_RE.fullmatch(employee.name.strip()):
+        target_id_hash = _hash_id_card(employee.name.strip())
+
+    if target_id_hash and indexed_file.extracted_id_hash:
+        return target_id_hash == indexed_file.extracted_id_hash
+    if target_phone_hash and indexed_file.extracted_phone_hash:
+        return target_phone_hash == indexed_file.extracted_phone_hash
+    if not target_name or target_name in duplicate_target_names:
+        return False
+    names = {_normalize_person_name(name) for name in indexed_file.extracted_names}
+    if target_name in names:
+        return True
+
+    # 部分证书只印姓名本身而没有“姓名：”标签；以非中文边界做全文精确匹配，
+    # 避免把“张三”错误命中“张三丰”。文件名始终不参与人员判断。
+    raw_target = str(employee.name or "").strip()
+    if raw_target and indexed_file.text_snippet:
+        return bool(re.search(
+            rf"(?<![\u3400-\u9fff]){re.escape(raw_target)}(?![\u3400-\u9fff])",
+            indexed_file.text_snippet,
+        ))
+    return False
+
+
+def _flat_employee_result_key(
+    employee: TargetEmployee,
+    duplicate_target_names: set[str],
+) -> str:
+    """同名人员的输出/缺件键使用非敏感限定符，防止文件互相覆盖。"""
+    if _normalize_person_name(employee.name) not in duplicate_target_names:
+        return employee.name
+    if employee.employee_no:
+        qualifier = f"工号{employee.employee_no}"
+    elif employee.id_card:
+        qualifier = f"证件尾号{employee.id_card[-4:]}"
+    elif employee.phone:
+        qualifier = f"手机尾号{employee.phone[-4:]}"
+    else:
+        qualifier = hashlib.sha256(employee.identity_key.encode("utf-8")).hexdigest()[:6]
+    return f"{employee.name}（{qualifier}）"
+
+
+def _unique_destination(path: Path) -> Path:
+    if not path.exists():
+        return path
+    sequence = 2
+    while True:
+        candidate = path.with_name(f"{path.stem}_{sequence}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        sequence += 1
+
+
+def _collect_from_flat_index(
+    employee: TargetEmployee,
+    indexed_files: list[_FlatIndexedFile],
+    out_path: Path,
+    mode: str,
+    requested_materials: list[str] | None,
+    matches: list[MaterialFileMatch],
+    warnings: list[str],
+    duplicate_target_names: set[str],
+) -> tuple[list[str], int]:
+    person_files = [
+        item for item in indexed_files
+        if _flat_file_matches_employee(item, employee, duplicate_target_names)
+    ]
+    person_file_count = len(person_files)
+    if requested_materials is not None:
+        person_files = [item for item in person_files if item.material_type in requested_materials]
+
+    material_counts: dict[str, int] = {}
+    for item in person_files:
+        material_counts[item.material_type] = material_counts.get(item.material_type, 0) + 1
+    material_sequences: dict[str, int] = {}
+    copied_materials: set[str] = set()
+    copied_count = 0
+    clean_employee = safe_filename(
+        _flat_employee_result_key(employee, duplicate_target_names)
+    )
+
+    for item in person_files:
+        material = item.material_type or "其他材料"
+        clean_material = safe_filename(material)
+        material_sequences[material] = material_sequences.get(material, 0) + 1
+        sequence = material_sequences[material]
+        extension = item.source_path.suffix
+
+        if requested_materials is None and mode == MODE_BY_EMPLOYEE:
+            destination_dir = out_path / clean_employee
+            target_name = item.source_path.name
+        else:
+            if item.subtype:
+                suffix = f"_{item.subtype}"
+                if material_counts[material] > 1 and sequence > 1:
+                    suffix += f"_{sequence}"
+            else:
+                suffix = f"_{sequence}" if material_counts[material] > 1 else ""
+            target_name = f"{clean_employee}_{clean_material}{suffix}{extension}"
+            if mode == MODE_BY_EMPLOYEE:
+                destination_dir = out_path / clean_employee
+            elif mode == MODE_BY_MATERIAL:
+                destination_dir = out_path / clean_material
+            else:
+                destination_dir = out_path
+
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = _unique_destination(destination_dir / target_name)
+        current_fingerprint = _compute_full_file_fingerprint(item.source_path)
+        if current_fingerprint is None:
+            warnings.append(f"资料文件在检索后无法读取，已跳过：{item.relative_path}")
+            continue
+        current_size, _current_mtime, current_sha = current_fingerprint
+        if f"{current_sha}_{current_size}" != item.cache_key:
+            warnings.append(f"资料文件在索引后发生变化，已跳过并请重新运行：{item.relative_path}")
+            continue
+        try:
+            shutil.copy2(item.source_path, destination)
+        except Exception as exc:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            warnings.append(f"复制失败：{item.source_path} → {destination}: {exc}")
+            continue
+
+        copied_fingerprint = _compute_full_file_fingerprint(destination)
+        if (
+            copied_fingerprint is None
+            or f"{copied_fingerprint[2]}_{copied_fingerprint[0]}" != item.cache_key
+        ):
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            warnings.append(f"资料文件复制后校验不一致，已移除结果并请重新运行：{item.relative_path}")
+            continue
+
+        matches.append(MaterialFileMatch(
+            employee_name=employee.name,
+            material_type=material,
+            source_path=item.source_path,
+            relative_source_path=item.relative_path,
+            matched_by=item.match_method,
+            target_filename=destination.name,
+            target_path=destination,
+            extracted_person_name=employee.name,
+            extracted_id_card=item.extracted_id_card,
+            cache_hit=item.cache_hit,
+            employee_identity_key=employee.identity_key,
+        ))
+        copied_materials.add(material)
+        copied_count += 1
+
+    if requested_materials is None:
+        return ([] if copied_count else ["（OCR 未识别到该人员资料）"], person_file_count)
+    return (
+        [material for material in requested_materials if material not in copied_materials],
+        person_file_count,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 核心：收集员工资料
 # ---------------------------------------------------------------------------
@@ -1165,6 +2002,7 @@ def collect_employee_materials(
     roster_source: str | Path | list[dict[str, Any]] | list[str],
     material_types: list[str] | None = None,
     mode: str = MODE_BY_EMPLOYEE,
+    library_mode: str = LIBRARY_MODE_PERSON_FOLDER,
     create_zip: bool = False,
     generate_report: bool = True,
     collect_all: bool = False,
@@ -1191,6 +2029,10 @@ def collect_employee_materials(
 
     if mode not in MODES:
         raise ValueError(f"不支持的归类模式：{mode}，可选值：{MODES}")
+    if library_mode not in LIBRARY_MODES:
+        raise ValueError(f"不支持的资料库形式：{library_mode}，可选值：{LIBRARY_MODES}")
+    if library_mode == LIBRARY_MODE_FLAT_OCR and not use_ocr_cache:
+        raise ValueError("无序平铺资料库必须启用 OCR 索引缓存，避免每次查询重复识别全部文件")
 
     employees = parse_employee_roster(roster_source)
     if not employees:
@@ -1208,6 +2050,7 @@ def collect_employee_materials(
     cache_stats: dict[str, int] = {"hits": 0, "misses": 0, "invalidated": 0}
     cache_path: Path | None = None
     cache_skipped_reason: str | None = None
+    cache_write_ok = True
     current_signature = _get_engine_signature()
 
     if use_ocr_cache:
@@ -1221,18 +2064,16 @@ def collect_employee_materials(
         prev_sig = ocr_cache.get("engine_signature")
         if prev_sig and prev_sig != current_signature:
             ocr_cache["entries"] = {}
+            ocr_cache["paths"] = {}
     else:
         cache_skipped_reason = "用户已关闭 OCR 识别缓存"
-
-    if progress_callback:
-        progress_callback(0, len(employees), "正在扫描资料库文件夹索引...")
-    folder_index = _scan_folder_index(lib_path, max_depth=scan_depth, skip_dir=out_path)
 
     total_steps = len(employees)
     matches: list[MaterialFileMatch] = []
     missing_records: dict[str, list[str]] = {}
     warnings: list[str] = []
     folder_match_counts: dict[str, int] = {}
+    employee_result_keys: list[str] = []
 
     # 引擎升级警告：本轮第一次识别时输出一次即可
     if (
@@ -1246,8 +2087,50 @@ def collect_employee_materials(
             "缓存已全量失效，本次将重新 OCR 识别所有图片。"
         )
 
+    folder_index: dict[str, list[Path]] = {}
+    flat_index: list[_FlatIndexedFile] = []
+    duplicate_target_names: set[str] = set()
+    if library_mode == LIBRARY_MODE_PERSON_FOLDER:
+        if progress_callback:
+            progress_callback(0, len(employees), "正在扫描资料库文件夹索引...")
+        folder_index = _scan_folder_index(lib_path, max_depth=scan_depth, skip_dir=out_path)
+    else:
+        assert ocr_cache is not None and cache_path is not None
+        normalized_name_counts: dict[str, int] = {}
+        for employee in employees:
+            normalized_name = _normalize_person_name(employee.name)
+            normalized_name_counts[normalized_name] = normalized_name_counts.get(normalized_name, 0) + 1
+        duplicate_target_names = {
+            name for name, count in normalized_name_counts.items() if name and count > 1
+        }
+        if duplicate_target_names:
+            warnings.append(
+                "名单中存在同名人员；无身份证号可核对的同名资料不会自动归属，请补充身份证号后重试。"
+            )
+        flat_index, checkpoint_ok = _build_flat_ocr_index(
+            lib_path,
+            out_path,
+            list(dict.fromkeys([*global_materials, *MATERIAL_SYNONYMS.keys()])),
+            ocr_cache,
+            cache_path,
+            cache_stats,
+            warnings,
+            progress_callback,
+        )
+        if not checkpoint_ok:
+            cache_write_ok = False
+            cache_skipped_reason = "资料库目录只读或无写入权限"
+            warnings.append(
+                f"OCR 索引缓存写入失败：{cache_path}；本次仍使用内存索引完成检索，下次会重新建立。"
+            )
+
     for idx, emp in enumerate(employees):
-        emp_key = emp.name
+        emp_key = (
+            _flat_employee_result_key(emp, duplicate_target_names)
+            if library_mode == LIBRARY_MODE_FLAT_OCR
+            else emp.name
+        )
+        employee_result_keys.append(emp_key)
         employee_key = _build_employee_key(emp)
         if progress_callback:
             progress_callback(
@@ -1262,6 +2145,22 @@ def collect_employee_materials(
             emp_materials = list(emp.per_person_materials)
         else:
             emp_materials = global_materials
+
+        if library_mode == LIBRARY_MODE_FLAT_OCR:
+            emp_missing, matched_count = _collect_from_flat_index(
+                emp,
+                flat_index,
+                out_path,
+                mode,
+                emp_materials,
+                matches,
+                warnings,
+                duplicate_target_names,
+            )
+            folder_match_counts[emp_key] = 1 if matched_count else 0
+            if emp_missing:
+                missing_records[emp_key] = emp_missing
+            continue
 
         matched_folders: list[tuple[Path, str]] = []
         for folder_name, paths in folder_index.items():
@@ -1306,24 +2205,35 @@ def collect_employee_materials(
                 missing_records[emp_key] = emp_missing
 
     # === OCR 缓存：跑完一轮后汇总写一次（而非每张图片即写）"""
-    cache_write_ok = True
-    if use_ocr_cache and ocr_cache is not None and cache_path is not None and ocr_cache.get("entries"):
+    if (
+        use_ocr_cache
+        and ocr_cache is not None
+        and cache_path is not None
+        and (ocr_cache.get("entries") or library_mode == LIBRARY_MODE_FLAT_OCR)
+    ):
         _trim_cache_by_age_and_size(ocr_cache)
         if not _save_ocr_cache(cache_path, ocr_cache):
+            if cache_write_ok:
+                warnings.append(
+                    f"OCR 缓存写入失败：{cache_path}（资料库目录可能为只读），本次未持久化识别结果。"
+                )
             cache_write_ok = False
-            warnings.append(
-                f"OCR 缓存写入失败：{cache_path}（资料库目录可能为只读），本次未持久化识别结果。"
-            )
             cache_skipped_reason = "资料库目录只读或无写入权限"
 
     # 缓存指标摘要写进 warnings
     if use_ocr_cache and cache_write_ok and ocr_cache is not None:
         total = cache_stats["hits"] + cache_stats["misses"]
         if total > 0:
-            warnings.append(
-                f"OCR 智能索引缓存：命中 {cache_stats['hits']} 次，跳过实时识别 {cache_stats['misses']} 次"
-                + (f"，缓存文件：{cache_path}" if cache_path else "")
-            )
+            if library_mode == LIBRARY_MODE_FLAT_OCR:
+                warnings.append(
+                    f"无序资料 OCR 索引：复用 {cache_stats['hits']} 个，新增识别 {cache_stats['misses']} 个"
+                    + (f"，缓存文件：{cache_path}" if cache_path else "")
+                )
+            else:
+                warnings.append(
+                    f"OCR 智能索引缓存：命中 {cache_stats['hits']} 次，跳过实时识别 {cache_stats['misses']} 次"
+                    + (f"，缓存文件：{cache_path}" if cache_path else "")
+                )
 
     zip_path: Path | None = None
     if create_zip:
@@ -1356,12 +2266,14 @@ def collect_employee_materials(
         zip_path=zip_path,
         report_path=report_path,
         mode=mode,
+        library_mode=library_mode,
         target_employees=employees,
         requested_materials=report_materials,
         matches=matches,
         missing_records=missing_records,
         warnings=warnings,
         folder_match_counts=folder_match_counts,
+        employee_result_keys=employee_result_keys,
         ocr_cache_enabled=use_ocr_cache,
         ocr_cache_hits=cache_stats["hits"],
         ocr_cache_misses=cache_stats["misses"],
@@ -1766,16 +2678,29 @@ def _write_excel_report(
     emp_file_counts: dict[str, int] = {}
     emp_cache_hits: dict[str, int] = {}
     emp_mismatch_warnings: dict[str, list[str]] = {}
+    uses_identity_keys = any(match.employee_identity_key for match in all_matches)
+
+    def _report_match_key(match: MaterialFileMatch) -> str:
+        if uses_identity_keys and match.employee_identity_key:
+            return match.employee_identity_key
+        return match.employee_name
+
+    def _report_employee_key(employee: TargetEmployee) -> str:
+        return employee.identity_key if uses_identity_keys else employee.name
+
     for m in all_matches:
-        emp_file_counts[m.employee_name] = emp_file_counts.get(m.employee_name, 0) + 1
+        match_key = _report_match_key(m)
+        emp_file_counts[match_key] = emp_file_counts.get(match_key, 0) + 1
         if m.cache_hit:
-            emp_cache_hits[m.employee_name] = emp_cache_hits.get(m.employee_name, 0) + 1
+            emp_cache_hits[match_key] = emp_cache_hits.get(match_key, 0) + 1
         if m.mismatch_warning:
-            emp_mismatch_warnings.setdefault(m.employee_name, []).append(m.mismatch_warning)
+            emp_mismatch_warnings.setdefault(match_key, []).append(m.mismatch_warning)
 
     total_emp = len(employees)
     total_files = len(all_matches)
-    found_emp = sum(1 for emp in employees if emp_file_counts.get(emp.name, 0) > 0)
+    found_emp = sum(
+        1 for emp in employees if emp_file_counts.get(_report_employee_key(emp), 0) > 0
+    )
     not_found_emp = total_emp - found_emp
 
     # OCR 缓存指标
@@ -1835,9 +2760,10 @@ def _write_excel_report(
         ws_summary.cell(current_r, 2, emp.name).alignment = Alignment(horizontal="center", vertical="center")
         ws_summary.cell(current_r, 3, emp.id_card).alignment = Alignment(horizontal="center", vertical="center")
 
-        file_count = emp_file_counts.get(emp.name, 0)
-        warn_list = emp_mismatch_warnings.get(emp.name, [])
-        emp_hits = emp_cache_hits.get(emp.name, 0)
+        employee_report_key = _report_employee_key(emp)
+        file_count = emp_file_counts.get(employee_report_key, 0)
+        warn_list = emp_mismatch_warnings.get(employee_report_key, [])
+        emp_hits = emp_cache_hits.get(employee_report_key, 0)
 
         if collect_all:
             status_cell = ws_summary.cell(current_r, 4)
@@ -1874,7 +2800,7 @@ def _write_excel_report(
         else:
             emp_matches_by_type: dict[str, int] = {}
             for m in all_matches:
-                if m.employee_name == emp.name and m.material_type in requested_materials:
+                if _report_match_key(m) == employee_report_key and m.material_type in requested_materials:
                     emp_matches_by_type[m.material_type] = emp_matches_by_type.get(m.material_type, 0) + 1
 
             found_count = sum(1 for m in requested_materials if emp_matches_by_type.get(m, 0) > 0)

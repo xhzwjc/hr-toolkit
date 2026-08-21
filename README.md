@@ -408,12 +408,25 @@ python3 -m hr_toolkit folder-rename \
 ```
 
 ### 9. 员工资料离线 OCR 提取打包：
+
+按人员文件夹查找（默认，保持原有行为）：
 ```bash
 python3 -m hr_toolkit material-collector \
-  --source-dir "待整理原始资料总目录" \
+  --library "按人员整理的资料库" \
   --roster "目标员工名单.xlsx" \
-  --output-dir "outputs/material_collector_demo"
+  --output "outputs/material_collector_demo"
 ```
+
+无序平铺资料库按 OCR 内容建立全局索引：
+```bash
+python3 -m hr_toolkit material-collector \
+  --library "无序混放的资料库" \
+  --roster "目标员工名单.xlsx" \
+  --output "outputs/material_collector_flat_demo" \
+  --library-mode flat_ocr
+```
+
+`flat_ocr` 首次运行会在资料库根目录写入隐藏索引缓存；后续查询会复用内容未变化的文件。源文件不会被修改。
 
 ---
 

@@ -22,7 +22,12 @@ from .tools.folder_rename import (
     rename_files_by_excel,
     rename_person_folders,
 )
-from .tools.material_collector import collect_employee_materials, MODE_BY_EMPLOYEE
+from .tools.material_collector import (
+    LIBRARY_MODE_FLAT_OCR,
+    LIBRARY_MODE_PERSON_FOLDER,
+    MODE_BY_EMPLOYEE,
+    collect_employee_materials,
+)
 from .tools.archive_import import export_company_archive_tables, import_archive_transfers
 from .tools.data_statistics import generate_data_statistics_reports
 from .tools.insurance_ledger import generate_insurance_ledger
@@ -145,6 +150,12 @@ def _build_material_collector_parser(subparsers: argparse._SubParsersAction) -> 
     p.add_argument("-o", "--output", required=True, type=Path, help="提取文件输出目录")
     p.add_argument("-m", "--materials", nargs="*", help="指定需要提取的材料类型列表（如 身份证 劳动合同 学历证明）")
     p.add_argument("--mode", choices=["by_employee", "by_material", "flat"], default="by_employee", help="归类方式：by_employee（按员工）、by_material（按材料）、flat（平铺）")
+    p.add_argument(
+        "--library-mode",
+        choices=[LIBRARY_MODE_PERSON_FOLDER, LIBRARY_MODE_FLAT_OCR],
+        default=LIBRARY_MODE_PERSON_FOLDER,
+        help="资料库形式：person_folder（按人员文件夹，原模式）或 flat_ocr（无序平铺 OCR 索引）",
+    )
     p.add_argument("--zip", action="store_true", help="自动生成 .zip 压缩包")
     p.add_argument("--no-report", action="store_true", help="不生成 Excel 汇总报告")
     p.add_argument("--no-ocr-cache", action="store_true", help="关闭 OCR 智能索引缓存（默认开启；关闭后所有图片都将实时 OCR）")
@@ -355,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
             roster_source=args.roster,
             material_types=args.materials if args.materials else None,
             mode=args.mode,
+            library_mode=args.library_mode,
             create_zip=args.zip,
             generate_report=not args.no_report,
             use_ocr_cache=not args.no_ocr_cache,
@@ -595,6 +607,7 @@ def _print_material_collector_summary(payload: dict) -> None:
     print(f"资料库目录：{payload['library_dir']}")
     print(f"输出目录：{payload['output_dir']}")
     print(f"归类方式：{payload['mode']}")
+    print(f"资料库形式：{payload.get('library_mode', LIBRARY_MODE_PERSON_FOLDER)}")
     print(f"目标员工数：{payload['total_employees']} 人")
     print(f"材料齐全员工数：{payload['complete_employee_count']} 人")
     print(f"提取文件总数：{payload['matched_file_count']} 个")

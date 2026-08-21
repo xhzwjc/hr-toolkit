@@ -8,6 +8,8 @@ import zipfile
 from pathlib import Path
 
 from hr_toolkit.tools.material_collector import (
+    LIBRARY_MODE_FLAT_OCR,
+    LIBRARY_MODE_PERSON_FOLDER,
     MODE_BY_EMPLOYEE,
     MODE_BY_MATERIAL,
     MODE_FLAT,
@@ -902,6 +904,485 @@ class TestOCRCacheIO(unittest.TestCase):
             self.assertTrue((emp_out / "王五_劳动合同_2.jpg").exists())
             self.assertTrue((emp_out / "王五_身份证_正面.jpg").exists())
             self.assertTrue((emp_out / "王五_身份证_反面.jpg").exists())
+
+
+class TestFlatOCRMaterialLibrary(unittest.TestCase):
+    def setUp(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        self.mc = mc
+        self.real_engine = mc._OCR_ENGINE
+        self.real_attempted = mc._OCR_ATTEMPTED
+
+        class ContentEngine:
+            call_count = 0
+
+            def __call__(self, source):
+                type(self).call_count += 1
+                marker = Path(source).read_bytes().decode("utf-8", errors="ignore")
+                if marker == "zhang_contract":
+                    return ([
+                        ["乙方", "张三"],
+                        ["材料", "劳动合同"],
+                    ], None)
+                if marker == "zhang_id_card":
+                    return ([
+                        ["姓名", "张三"],
+                        ["公民身份号码", "440111199001011234"],
+                        ["住址", "广东省"],
+                    ], None)
+                if marker in {"li_id_card", "lisi__id_card"}:
+                    return ([
+                        ["姓名", "李四"],
+                        ["公民身份号码", "440111199001011235"],
+                        ["住址", "广东省"],
+                    ], None)
+                if marker == "zhang_second_id_card":
+                    return ([
+                        ["姓名", "张三"],
+                        ["公民身份号码", "440111199001019999"],
+                        ["住址", "广东省"],
+                    ], None)
+                if marker == "zhang_household":
+                    return ([
+                        ["姓名", "张三"],
+                        ["材料", "户口本"],
+                    ], None)
+                if marker == "zhang_degree_unlabeled":
+                    return ([
+                        ["证书", "普通高等学校毕业证书"],
+                        ["持有人文字", "张三"],
+                    ], None)
+                if marker == "zhang_sanfeng_degree":
+                    return ([
+                        ["证书", "普通高等学校毕业证书"],
+                        ["持有人文字", "张三丰"],
+                    ], None)
+                return ([["标题", "无法识别的普通图片"]], None)
+
+        self.engine_type = ContentEngine
+        self.engine_type.call_count = 0
+        mc._OCR_ENGINE = ContentEngine()
+        mc._OCR_ATTEMPTED = True
+
+    def tearDown(self) -> None:
+        self.mc._OCR_ENGINE = self.real_engine
+        self.mc._OCR_ATTEMPTED = self.real_attempted
+
+    @staticmethod
+    def _write_image(path: Path, marker: str) -> None:
+        path.write_bytes(marker.encode("utf-8"))
+
+    def test_default_library_mode_remains_person_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "资料库"
+            employee = library / "张三"
+            employee.mkdir(parents=True)
+            (employee / "张三_劳动合同.txt").write_text("劳动合同", encoding="utf-8")
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["劳动合同"],
+            )
+
+            self.assertEqual(result.library_mode, LIBRARY_MODE_PERSON_FOLDER)
+            self.assertEqual(result.matched_file_count, 1)
+
+    def test_first_scan_indexes_negatives_and_second_query_does_not_repeat_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for index in range(99):
+                self._write_image(library / f"{index:03d}.png", f"noise-{index}")
+            self._write_image(library / "099.png", "zhang_id_card")
+
+            first = collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三 440111199001011234",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            first_calls = self.engine_type.call_count
+            self.assertEqual(first_calls, 100)
+            self.assertEqual(first.matched_file_count, 1)
+
+            cache_path = library / _OCR_CACHE_FILE_NAME
+            cache_data = _load_ocr_cache(cache_path)
+            self.assertEqual(len(cache_data["paths"]), 100)
+            self.assertEqual(len(cache_data["entries"]), 100)
+            self.assertTrue(any(
+                entry.get("material_type") == "其他材料"
+                for entry in cache_data["entries"].values()
+            ))
+            self.assertNotIn("440111199001011234", cache_path.read_text(encoding="utf-8"))
+
+            second = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三 440111199001011234",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            self.assertEqual(self.engine_type.call_count, first_calls)
+            self.assertEqual(second.ocr_cache_hits, 100)
+            self.assertEqual(second.ocr_cache_misses, 0)
+            self.assertEqual(second.matched_file_count, 1)
+
+    def test_filename_person_is_ignored_and_ocr_person_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "张三_身份证.png", "li_id_card")
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三,李四",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual([match.employee_name for match in result.matches], ["李四"])
+            self.assertEqual(self.engine_type.call_count, 1, "多人名单只能全库索引一次")
+            self.assertIn("张三", result.missing_records)
+            self.assertNotIn("李四", result.missing_records)
+
+    def test_same_size_changed_file_is_reindexed_even_when_mtime_is_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            source = library / "000.png"
+            self._write_image(source, "zhang_id_card")
+            original_stat = source.stat()
+
+            collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            first_calls = self.engine_type.call_count
+
+            # 两个 marker 等长；恢复 mtime 后仍必须依靠 ctime/hash 识别内容变更。
+            self.assertEqual(len("zhang_id_card"), len("lisi__id_card"))
+            self._write_image(source, "lisi__id_card")
+            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+            result = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            self.assertGreater(self.engine_type.call_count, first_calls)
+            self.assertEqual(result.matched_file_count, 0)
+            self.assertGreaterEqual(result.ocr_cache_invalidated, 1)
+
+    def test_file_changed_after_index_is_not_copied_as_stale_match(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            source = library / "000.png"
+            self._write_image(source, "zhang_contract")
+            changed = False
+
+            def mutate_before_copy(_current: int, _total: int, message: str) -> None:
+                nonlocal changed
+                if not changed and "正在检索与匹配" in message:
+                    self._write_image(source, "li_id_card")
+                    changed = True
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                progress_callback=mutate_before_copy,
+            )
+
+            self.assertEqual(result.matched_file_count, 0)
+            self.assertEqual(result.missing_records["张三"], ["劳动合同"])
+            self.assertTrue(any("索引后发生变化" in warning for warning in result.warnings))
+
+    def test_corrupted_copy_is_removed_and_reported_missing(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "000.png", "zhang_contract")
+
+            def corrupt_copy(_source, destination):
+                Path(destination).write_bytes(b"corrupted")
+
+            with patch.object(self.mc.shutil, "copy2", side_effect=corrupt_copy):
+                result = collect_employee_materials(
+                    library,
+                    root / "输出",
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+
+            self.assertEqual(result.matched_file_count, 0)
+            self.assertEqual(result.missing_records["张三"], ["劳动合同"])
+            self.assertFalse(any(path.is_file() for path in (root / "输出").rglob("*.png")))
+            self.assertTrue(any("复制后校验不一致" in warning for warning in result.warnings))
+
+    def test_renamed_file_reuses_content_hash_without_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            old_path = library / "old.png"
+            self._write_image(old_path, "zhang_contract")
+            collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            first_calls = self.engine_type.call_count
+
+            nested = library / "新目录"
+            nested.mkdir()
+            old_path.rename(nested / "new-random.png")
+            result = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual(self.engine_type.call_count, first_calls)
+            self.assertEqual(result.matched_file_count, 1)
+            self.assertEqual(result.ocr_cache_hits, 1)
+            cache = _load_ocr_cache(library / _OCR_CACHE_FILE_NAME)
+            self.assertEqual(set(cache["paths"]), {"新目录/new-random.png"})
+
+    def test_collect_all_only_copies_files_identified_for_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "a.png", "zhang_contract")
+            self._write_image(library / "b.png", "li_id_card")
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                collect_all=True,
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual(result.matched_file_count, 1)
+            self.assertEqual(result.matches[0].employee_name, "张三")
+            copied_files = [path.name for path in (root / "输出" / "张三").iterdir()]
+            self.assertEqual(copied_files, ["a.png"])
+
+    def test_same_name_employees_are_separated_by_id_in_output_and_report(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "a.png", "zhang_id_card")
+            self._write_image(library / "b.png", "zhang_second_id_card")
+
+            output = root / "输出"
+            result = collect_employee_materials(
+                library,
+                output,
+                roster_source=(
+                    "张三 440111199001011234,"
+                    "张三 440111199001019999"
+                ),
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual(result.total_employees, 2)
+            self.assertEqual(result.complete_employee_count, 2)
+            self.assertEqual(result.matched_file_count, 2)
+            self.assertTrue(
+                (output / "张三（证件尾号1234）" / "张三（证件尾号1234）_身份证_正面.png").exists()
+            )
+            self.assertTrue(
+                (output / "张三（证件尾号9999）" / "张三（证件尾号9999）_身份证_正面.png").exists()
+            )
+            self.assertEqual(
+                len({match.employee_identity_key for match in result.matches}),
+                2,
+            )
+
+            workbook = load_workbook(result.report_path, data_only=True)
+            try:
+                sheet = workbook["资料提取汇总与缺失清单"]
+                self.assertEqual(sheet["D8"].value, "1/1")
+                self.assertEqual(sheet["D9"].value, "1/1")
+                self.assertEqual(sheet["F8"].value, "已提取(1份)")
+                self.assertEqual(sheet["F9"].value, "已提取(1份)")
+            finally:
+                workbook.close()
+
+    def test_all_existing_output_modes_work_with_flat_library_input(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "random.png", "zhang_contract")
+
+            expected = {
+                MODE_BY_EMPLOYEE: lambda output: output / "张三" / "张三_劳动合同.png",
+                MODE_BY_MATERIAL: lambda output: output / "劳动合同" / "张三_劳动合同.png",
+                MODE_FLAT: lambda output: output / "张三_劳动合同.png",
+            }
+            for mode, expected_path in expected.items():
+                output = root / f"输出-{mode}"
+                result = collect_employee_materials(
+                    library,
+                    output,
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    mode=mode,
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+                self.assertEqual(result.matched_file_count, 1)
+                self.assertTrue(expected_path(output).exists(), mode)
+
+    def test_cached_text_supports_new_custom_material_without_reocr(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "random.png", "zhang_household")
+
+            first = collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            first_calls = self.engine_type.call_count
+            self.assertEqual(first.matched_file_count, 0)
+
+            second = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三",
+                material_types=["户口本"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            self.assertEqual(self.engine_type.call_count, first_calls)
+            self.assertEqual(second.matched_file_count, 1)
+
+    def test_text_document_is_indexed_without_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            (library / "random.txt").write_text(
+                "劳动合同 乙方：张三 工作内容：项目管理",
+                encoding="utf-8",
+            )
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual(self.engine_type.call_count, 0)
+            self.assertEqual(result.matched_file_count, 1)
+            self.assertEqual(result.matches[0].matched_by, "doc_content_contract")
+
+    def test_unlabeled_name_uses_exact_ocr_text_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "a.png", "zhang_degree_unlabeled")
+            self._write_image(library / "b.png", "zhang_sanfeng_degree")
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["学历证明"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual(result.matched_file_count, 1)
+            self.assertEqual(result.matches[0].relative_source_path, "a.png")
+
+    def test_ocr_unavailable_is_not_persisted_as_negative_result(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            self._write_image(library / "random.png", "zhang_contract")
+            self._write_image(library / "noise.png", "noise")
+
+            working_engine = self.mc._OCR_ENGINE
+            self.mc._OCR_ENGINE = None
+            self.mc._OCR_ATTEMPTED = True
+            first = collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            self.assertEqual(first.matched_file_count, 0)
+            self.assertEqual(
+                sum("暂时无法完成 OCR" in warning for warning in first.warnings),
+                1,
+            )
+            cache = _load_ocr_cache(library / _OCR_CACHE_FILE_NAME)
+            self.assertEqual(cache["entries"], {})
+
+            self.mc._OCR_ENGINE = working_engine
+            second = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            self.assertEqual(second.matched_file_count, 1)
+
+    def test_flat_library_rejects_disabled_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            with self.assertRaisesRegex(ValueError, "必须启用 OCR 索引缓存"):
+                collect_employee_materials(
+                    library,
+                    root / "输出",
+                    roster_source="张三",
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                    use_ocr_cache=False,
+                )
 
 
 if __name__ == "__main__":

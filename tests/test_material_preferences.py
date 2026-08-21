@@ -11,6 +11,10 @@ from hr_toolkit.material_preferences import (
     BUILTIN_MATERIAL_PRESETS,
     MaterialPreferences,
 )
+from hr_toolkit.tools.material_collector import (
+    LIBRARY_MODE_FLAT_OCR,
+    LIBRARY_MODE_PERSON_FOLDER,
+)
 
 
 class _Value:
@@ -136,6 +140,7 @@ class MaterialPreferencesGUITest(unittest.TestCase):
         }
         app.material_preset_name = _Value("入职材料")
         app.material_collect_all = _Value(True)
+        app.material_library_mode = _Value("按人员文件夹查找（原模式）")
         app._on_material_collect_all_changed = Mock()
         return app
 
@@ -198,6 +203,76 @@ class MaterialPreferencesGUITest(unittest.TestCase):
         call = app._start_tool_worker.call_args
         self.assertEqual(call.kwargs["material_types"], ["身份证", "户口本"])
         self.assertFalse(call.kwargs["collect_all"])
+        self.assertEqual(call.kwargs["library_mode"], LIBRARY_MODE_PERSON_FOLDER)
+
+    def test_flat_library_mode_forces_cache_and_updates_only_its_controls(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.material_library_mode = _Value("无序平铺资料库（OCR 索引）")
+        app.material_use_ocr_cache = _Value(False)
+        app.material_use_ocr_cache_check = Mock()
+        app.material_collect_all_check = Mock()
+        app.material_library_mode_hint = Mock()
+        app.material_types_hint = Mock()
+
+        app._on_material_library_mode_changed()
+
+        self.assertTrue(app.material_use_ocr_cache.get())
+        app.material_use_ocr_cache_check.configure.assert_called_with(state="disabled")
+        self.assertIn(
+            "OCR 识别到的该人员",
+            app.material_collect_all_check.configure.call_args.kwargs["text"],
+        )
+
+        app.material_library_mode.set("按人员文件夹查找（原模式）")
+        app._on_material_library_mode_changed()
+        self.assertFalse(app.material_use_ocr_cache.get(), "切回原模式应恢复用户原来的缓存选择")
+        app.material_use_ocr_cache_check.configure.assert_called_with(state="normal")
+
+    def test_run_passes_flat_library_mode_without_changing_output_mode(self) -> None:
+        import queue
+        import threading
+
+        app = self._make_app()
+        app.material_library_mode.set("无序平铺资料库（OCR 索引）")
+        app.material_target_input = _Value("张三")
+        app.summary_path = _Value("")
+        app.material_create_zip = _Value(False)
+        app.material_use_ocr_cache = _Value(False)
+        app._prepare_result_output_dir = Mock()
+        app._begin_tool_run = Mock()
+        app._clear_log = Mock()
+        app._write_log = Mock()
+        app._start_tool_worker = Mock()
+        app._tool_run_token = 7
+        cancel_event = threading.Event()
+        app._run_cancel_events = {7: cancel_event}
+        app.status_queue = queue.Queue()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            library = root / "资料库"
+            output = root / "输出"
+            result_dir = root / "本次结果"
+            library.mkdir()
+            output.mkdir()
+            app.input_path = _Value(str(library))
+            app.output_dir = _Value(str(output))
+            app._prepare_result_output_dir.return_value = result_dir
+
+            with patch("hr_toolkit.gui.app.messagebox") as mocked_messagebox:
+                app._run_material_collector()
+
+        mocked_messagebox.showwarning.assert_not_called()
+        call = app._start_tool_worker.call_args
+        self.assertEqual(call.kwargs["library_mode"], LIBRARY_MODE_FLAT_OCR)
+        self.assertEqual(call.kwargs["mode"], "by_employee")
+        self.assertTrue(call.kwargs["use_ocr_cache"])
+        progress = call.kwargs["progress_callback"]
+        progress(1, 100, "正在建立无序资料 OCR 索引：1/100")
+        self.assertEqual(app.status_queue.get_nowait()[0], "progress")
+        cancel_event.set()
+        with self.assertRaisesRegex(RuntimeError, "已停止"):
+            progress(2, 100, "正在建立无序资料 OCR 索引：2/100")
 
 
 if __name__ == "__main__":
