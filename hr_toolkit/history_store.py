@@ -26,6 +26,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
+from hr_toolkit.common.inputs import SUPPORTED_ARCHIVE_SUFFIX_SET
+
 
 DATA_DIR_ENV = "HR_TOOLKIT_DATA_DIR"
 SCHEMA_VERSION = 1
@@ -46,7 +48,7 @@ DATABASE_BACKUP_MANIFEST_NAME = "complete.json"
 DATABASE_ACCESS_LOCK_NAME = ".database-access.lock"
 TASK_ARCHIVE_LOCKS_DIR_NAME = ".task-archive-locks"
 TRASH_MOVE_PENDING_PREFIX = ".trash-move-"
-DEFAULT_ARCHIVE_SUFFIXES = frozenset({".xlsx", ".xls", ".zip"})
+DEFAULT_ARCHIVE_SUFFIXES = frozenset({".xlsx", ".xls", *SUPPORTED_ARCHIVE_SUFFIX_SET})
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -1736,13 +1738,13 @@ class HistoryStore:
                     raise HistoryStoreError("不能把资料库自身作为原始资料归档。")
             suffixes = None if spec.suffixes is None else {suffix.lower() for suffix in spec.suffixes}
             if source.is_file():
-                if suffixes is None or source.suffix.lower() in suffixes:
+                if suffixes is None or _path_matches_suffixes(source, suffixes):
                     yield source, spec.role, (*_source_context_parts(source.parent, 3), source.name)
                 continue
             if not source.is_dir():
                 raise HistoryStoreError(f"无法读取原始资料：{source.name}")
             for child in _walk_regular_files(source):
-                if suffixes is not None and child.suffix.lower() not in suffixes:
+                if suffixes is not None and not _path_matches_suffixes(child, suffixes):
                     continue
                 relative = child.relative_to(source)
                 yield child, spec.role, (*_source_context_parts(source.parent, 2), source.name, *relative.parts)
@@ -2652,6 +2654,11 @@ def _is_safe_active_task_storage(task: TaskDetail, records_dir: Path) -> bool:
         if not _path_components_are_real(task.task_dir, Path(child_name)):
             return False
     return True
+
+
+def _path_matches_suffixes(path: Path, suffixes: set[str]) -> bool:
+    name = path.name.casefold()
+    return any(name.endswith(suffix) for suffix in suffixes)
 
 
 def _unique_destination(path: Path) -> Path:

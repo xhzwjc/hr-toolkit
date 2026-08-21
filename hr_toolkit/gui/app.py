@@ -30,6 +30,12 @@ from hr_toolkit.app_update import (
     resolve_download_url,
     update_check_enabled,
 )
+from hr_toolkit.common.inputs import (
+    ARCHIVE_FILE_DIALOG_PATTERN,
+    ARCHIVE_FORMAT_DESCRIPTION,
+    archive_suffix,
+    is_supported_archive_file,
+)
 from hr_toolkit.history_store import (
     HISTORY_PAGE_SIZE,
     HistoryStore,
@@ -191,6 +197,20 @@ from .helpers import (
     open_path,
 )
 from .task_runner import TaskRunner, TaskToken
+
+
+EXCEL_ARCHIVE_FILE_DIALOG_PATTERN = f"*.xlsx *.xls {ARCHIVE_FILE_DIALOG_PATTERN}"
+EXCEL_ARCHIVE_FILETYPES = (
+    ("Excel 或压缩包", EXCEL_ARCHIVE_FILE_DIALOG_PATTERN),
+    ("Excel 工作簿", "*.xlsx *.xls"),
+    ("常见压缩包", ARCHIVE_FILE_DIALOG_PATTERN),
+    ("所有文件", "*.*"),
+)
+EXCEL_ARCHIVE_FORMAT_TEXT = f".xlsx、.xls 以及 {ARCHIVE_FORMAT_DESCRIPTION} 压缩包"
+
+
+def _is_excel_or_archive_file(path: Path) -> bool:
+    return path.suffix.lower() in {".xlsx", ".xls"} or is_supported_archive_file(path)
 
 
 class _DynamicProxy:
@@ -7059,7 +7079,7 @@ class HRToolkitApp:
 
     def _set_tool_texts(self) -> None:
         self.tool_group.set(TOOL_GROUP_LABELS.get(self.current_tool, "人员运营自动化"))
-        multi_hint = "支持 .xlsx / .xls / .zip / 文件夹 · 可多选"
+        multi_hint = "支持 .xlsx / .xls / ZIP / RAR / 7Z / TAR / 文件夹 · 可多选"
         if self.current_tool == "social_security":
             self.tool_title.set("社保明细与汇总")
             self.tool_description.set("选择社保缴费清单、压缩包或文件夹，再选择参保人员花名册，自动生成明细和汇总。")
@@ -7410,8 +7430,21 @@ class HRToolkitApp:
             return "", COLOR_BADGE_DIR_BG, COLOR_BADGE_DIR_FG, detail
         suffix = path.suffix.lower()
         size_text = self._format_file_size(path)
-        if suffix == ".zip":
-            return "ZIP", COLOR_BADGE_ZIP_BG, COLOR_BADGE_ZIP_FG, size_text
+        archive_type = archive_suffix(path)
+        if archive_type:
+            archive_badges = {
+                ".zip": "ZIP",
+                ".rar": "RAR",
+                ".7z": "7Z",
+                ".tar": "TAR",
+                ".tar.gz": "TGZ",
+                ".tgz": "TGZ",
+                ".tar.bz2": "TBZ",
+                ".tbz2": "TBZ",
+                ".tar.xz": "TXZ",
+                ".txz": "TXZ",
+            }
+            return archive_badges[archive_type], COLOR_BADGE_ZIP_BG, COLOR_BADGE_ZIP_FG, size_text
         if suffix in {".xlsx", ".xls"}:
             return "XLS", COLOR_BADGE_XLS_BG, COLOR_BADGE_XLS_FG, size_text
         return suffix.lstrip(".").upper()[:3] or "?", COLOR_BADGE_DIR_BG, COLOR_BADGE_DIR_FG, size_text
@@ -7739,7 +7772,7 @@ class HRToolkitApp:
         if tool_id == "social_security":
             return [
                 ("适用：把各社保账户缴费清单整理成社保明细表和社保汇总表。", "strong"),
-                ("步骤：选择单个缴费清单、多个清单、zip压缩包，或包含清单的文件夹；再选择参保人员花名册。", None),
+                ("步骤：选择单个缴费清单、多个清单、常见压缩包，或包含清单的文件夹；再选择参保人员花名册。", None),
                 ("结果：生成“社保明细表.xlsx”和“社保汇总表.xlsx”，汇总表里含基础数据分析和异常提醒。", None),
                 ("目前规则：按身份证关联花名册；优先按账单文件夹或文件名识别账单月份、缴纳地和缴纳单位。", None),
                 ("注意：公积金、残保金、管理费暂无数据时留空；账单识别结果与花名册不一致时会提醒。", "warning"),
@@ -7747,7 +7780,7 @@ class HRToolkitApp:
         if tool_id == "data_statistics":
             return [
                 ("适用：把 HR 系统导出的考勤结果、周报记录、月报记录自动整理成统计表。", "strong"),
-                ("步骤：选择单个文件、多个文件、zip压缩包，或包含这些文件的文件夹。", None),
+                ("步骤：选择单个文件、多个文件、常见压缩包，或包含这些文件的文件夹。", None),
                 ("如需统计未写周报/月报，请选择“应汇报人员名单”；不选时只能按文件中出现过的人推断。", None),
                 ("周报统计日期（可选）：填写如 2026-06-02 至 2026-06-30，只统计范围内周一截止的周报；留空按整月统计。适合 1 号正好是周一的月份，避免把上月最后一周重复统计。", None),
                 ("结果：生成“考勤周月报汇总表.xlsx”，包含考勤统计、周月报统计、考勤异常明细、周月报异常明细。", None),
@@ -7759,7 +7792,7 @@ class HRToolkitApp:
         if tool_id == "insurance_ledger":
             return [
                 ("适用：把各保单人员清单整理成保险台账，并根据需求6的人力资源分析表做增减预警。", "strong"),
-                ("步骤：选择单个保单清单、多个清单、zip压缩包，或包含清单的文件夹；再选择人力资源分析表。", None),
+                ("步骤：选择单个保单清单、多个清单、常见压缩包，或包含清单的文件夹；再选择人力资源分析表。", None),
                 ("结果：生成“保险台账.xlsx”，包含保险台账和人员增减预警两个工作表。", None),
                 ("当前规则：PZDX保额取“每人伤残死亡限额”，按万元显示；PEAC保额固定按60万元。", None),
                 ("注意：人力资源分析表需包含“花名册”工作表；花名册在职但保单没有会提示需加保，保单有但花名册没有或已标记离职会提示需减保。", "warning"),
@@ -7767,7 +7800,7 @@ class HRToolkitApp:
         if tool_id == "salary_merge":
             return [
                 ("适用：把 1-12 个月工资表合成一张个人应发工资汇总表。", "strong"),
-                ("步骤：可选择单个月度工资表、多个工资表、zip压缩包，或包含这些文件的文件夹。", None),
+                ("步骤：可选择单个月度工资表、多个工资表、常见压缩包，或包含这些文件的文件夹。", None),
                 ("如已有前几月汇总表，再选择“已有汇总表”；不选则新建一张汇总表。", None),
                 ("点击“开始合并”后，上传资料和结果会自动保存到当前工作项目。", None),
                 ("结果：按姓名、身份证号、月份合并；没有工资的月份填 0；已存在的人员月份不会覆盖。", None),
@@ -7784,7 +7817,7 @@ class HRToolkitApp:
                 ]
             return [
                 ("适用：把项目异动表按记录日期分到对应月份汇总表。", "strong"),
-                ("步骤：可选择单个异动表、多个异动表、zip压缩包，或包含这些文件的文件夹。", None),
+                ("步骤：可选择单个异动表、多个异动表、常见压缩包，或包含这些文件的文件夹。", None),
                 ("如已有月度汇总表，可选择单个汇总表或包含多个汇总表的文件夹；工具会按月份追加，原有记录不会清空。", None),
                 ("不选择已有汇总表时，工具会按月份新建干净汇总表。缺少某个月份汇总表时也会自动创建。", None),
                 ("如果同一文件夹里放了人力资源分析表，工具会自动更新其中的花名册。", None),
@@ -7796,14 +7829,14 @@ class HRToolkitApp:
             if mode == "export":
                 return [
                     ("适用：把一个或多个档案汇总表写入各公司独立档案表。", "strong"),
-                    ("步骤：选择档案汇总表文件、多个文件、zip压缩包，或包含汇总表的文件夹。", None),
-                    ("如已有某个公司的档案表，可选择文件、zip压缩包或文件夹；不选或没匹配到时会按内置干净模板新建。", None),
+                    ("步骤：选择档案汇总表文件、多个文件、常见压缩包，或包含汇总表的文件夹。", None),
+                    ("如已有某个公司的档案表，可选择文件、常见压缩包或文件夹；不选或没匹配到时会按内置干净模板新建。", None),
                     ("结果：按公司生成独立 Excel；已有身份证不重复新增，只补充空白字段。", None),
                     ("注意：公司档案表会自动改公司名，新增行会补边框、居中和公式。", "warning"),
                 ]
             return [
                 ("适用：把项目部提交的人事档案移交表写入公司档案汇总表。", "strong"),
-                ("步骤：可选择单个移交表、多个移交表、zip压缩包，或包含这些文件的文件夹。", None),
+                ("步骤：可选择单个移交表、多个移交表、常见压缩包，或包含这些文件的文件夹。", None),
                 ("已有档案汇总表可不选；不选时工具会用内置空模板新建一份汇总表。", None),
                 ("结果：按“公司”写入对应工作表；身份证已存在时不重复新增，只补充空白材料字段。", None),
                 ("注意：编号会从文件名或表头标题识别项目地区，如“茂名项目部”自动填 11；识别不到会留空并提醒。", "warning"),
@@ -8502,7 +8535,7 @@ class HRToolkitApp:
     def _choose_change_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择异动表文件或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8515,7 +8548,7 @@ class HRToolkitApp:
     def _choose_salary_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择工资表文件或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8528,7 +8561,7 @@ class HRToolkitApp:
     def _choose_social_security_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择社保缴费清单或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8570,7 +8603,7 @@ class HRToolkitApp:
     def _choose_data_statistics_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择考勤周月报文件或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             # 替换式：每次重新选择都覆盖旧路径，避免 chip 残留导致重复上传时统计报错
@@ -8596,7 +8629,7 @@ class HRToolkitApp:
     def _choose_insurance_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择保单人员清单或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8617,7 +8650,7 @@ class HRToolkitApp:
     def _choose_archive_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择档案移交表文件或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8633,7 +8666,7 @@ class HRToolkitApp:
     def _choose_archive_export_summary_files_or_zip(self) -> None:
         filenames = self._askopenfilenames(
             title="选择档案汇总表或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8646,7 +8679,7 @@ class HRToolkitApp:
     def _choose_archive_export_existing_file_or_zip(self) -> None:
         filename = self._askopenfilename(
             title="选择已有公司档案表或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filename:
             self.summary_path.set(filename)
@@ -8664,7 +8697,7 @@ class HRToolkitApp:
     def _choose_roster_summary_files(self) -> None:
         filenames = self._askopenfilenames(
             title="选择异动汇总表文件或压缩包",
-            filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
+            filetypes=EXCEL_ARCHIVE_FILETYPES,
         )
         if filenames:
             self._set_change_input_paths([Path(filename) for filename in filenames])
@@ -8898,8 +8931,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的工资表文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "工资表文件只支持 .xlsx、.xls 或 .zip。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"工资表文件只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         if summary_path is not None and not summary_path.exists():
             messagebox.showwarning("汇总表不存在", "选择的已有汇总表不存在，请重新选择。")
@@ -8935,8 +8968,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的社保缴费清单文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "社保缴费清单只支持 .xlsx、.xls 或 .zip。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"社保缴费清单只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         if not roster_text:
             messagebox.showwarning("缺少花名册", "请先选择参保人员花名册。")
@@ -8976,8 +9009,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的数据文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "数据文件只支持 .xlsx、.xls 或 .zip。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"数据文件只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         if staff_path is not None and (not staff_path.exists() or not staff_path.is_file()):
             messagebox.showwarning("名单不存在", "选择的应汇报人员名单不存在，请重新选择。")
@@ -9040,8 +9073,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的保单人员清单文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "保单人员清单只支持 .xlsx、.xls 或 .zip。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"保单人员清单只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         if not roster_text:
             messagebox.showwarning("缺少分析表", "请先选择人力资源分析表。")
@@ -9081,8 +9114,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的异动表文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "异动表文件只支持 .xlsx、.xls 或 .zip。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"异动表文件只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         if summary_path is not None and not summary_path.exists():
             messagebox.showwarning("汇总表不存在", "选择的已有异动汇总表不存在，请重新选择。")
@@ -9118,8 +9151,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("汇总表不存在", "选择的异动汇总表文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "异动汇总表只支持 .xlsx、.xls、.zip 文件或文件夹。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"异动汇总表只支持 {EXCEL_ARCHIVE_FORMAT_TEXT} 或文件夹。")
                 return
         if not roster_text:
             messagebox.showwarning("缺少花名册", "请先选择人力资源花名册。")
@@ -9158,8 +9191,8 @@ class HRToolkitApp:
             if not input_path.exists():
                 messagebox.showwarning("输入不存在", "选择的档案移交表文件、压缩包或文件夹不存在，请重新选择。")
                 return
-            if input_path.is_file() and input_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "档案移交表文件只支持 .xlsx、.xls 或 .zip。")
+            if input_path.is_file() and not _is_excel_or_archive_file(input_path):
+                messagebox.showwarning("格式不支持", f"档案移交表文件只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         if target_path is not None and (not target_path.exists() or not target_path.is_file()):
             messagebox.showwarning("汇总表不存在", "选择的档案汇总表不存在，请重新选择。")
@@ -9193,15 +9226,15 @@ class HRToolkitApp:
             if not summary_path.exists():
                 messagebox.showwarning("汇总表不存在", "选择的档案汇总表不存在，请重新选择。")
                 return
-            if summary_path.is_file() and summary_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-                messagebox.showwarning("格式不支持", "档案汇总表目前只支持 .xlsx、.xls 或 .zip。")
+            if summary_path.is_file() and not _is_excel_or_archive_file(summary_path):
+                messagebox.showwarning("格式不支持", f"档案汇总表目前只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
                 return
         existing_path = Path(existing_text) if existing_text else None
         if existing_path is not None and not existing_path.exists():
             messagebox.showwarning("档案表不存在", "选择的已有公司档案表不存在，请重新选择。")
             return
-        if existing_path is not None and existing_path.is_file() and existing_path.suffix.lower() not in {".xlsx", ".xls", ".zip"}:
-            messagebox.showwarning("格式不支持", "已有公司档案表目前只支持 .xlsx、.xls 或 .zip。")
+        if existing_path is not None and existing_path.is_file() and not _is_excel_or_archive_file(existing_path):
+            messagebox.showwarning("格式不支持", f"已有公司档案表目前只支持 {EXCEL_ARCHIVE_FORMAT_TEXT}。")
             return
         if not output_text:
             messagebox.showwarning("缺少目录", "请选择保存位置。")

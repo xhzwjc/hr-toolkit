@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import sys
 import tempfile
@@ -7,6 +8,7 @@ import zipfile
 from pathlib import Path
 
 from hr_toolkit import __version__
+from hr_toolkit.common.inputs import extract_archive_excel_files
 from hr_toolkit.common.resources import open_template_resource
 
 
@@ -19,6 +21,9 @@ TEMPLATE_NAMES = (
     "personnel_change_summary_template.xlsx",
     "social_security_detail_template.xlsx",
     "social_security_summary_template.xlsx",
+)
+_RAR_RUNTIME_FIXTURE = base64.b64decode(
+    "UmFyIRoHAQAzkrXlCgEFBgAFAQGAgACVrTL6KgIDC58ABJ8ApIMCvJeqS4AAAQxydW50aW1lLnhsc3gKAxPxW4hqhkEQMUhSVG9vbGtpdCBhcmNoaXZlIHJ1bnRpbWUgc21va2Udd1ZRAwUEAA=="
 )
 
 
@@ -56,7 +61,9 @@ def smoke_test() -> None:
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_smoke_") as temp_root:
         # macOS 上 tempfile 可能返回经过 /var -> /private/var 的系统链接；
         # 运行检查使用真实路径，不降低项目对链接路径的安全限制。
-        project_root = Path(temp_root).resolve() / "project"
+        resolved_temp_root = Path(temp_root).resolve()
+        _smoke_test_archive_runtimes(resolved_temp_root / "archive-runtime")
+        project_root = resolved_temp_root / "project"
         with ProjectStore.create(project_root, "运行检查项目") as project:
             draft = project.create_draft_batch(
                 group_name="薪酬管理",
@@ -81,6 +88,34 @@ def smoke_test() -> None:
         bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
         if not (bundle_root / "README.md").is_file():
             raise RuntimeError("打包程序缺少 README.md。")
+
+
+def _smoke_test_archive_runtimes(root: Path) -> None:
+    import py7zr
+    from unrar.cffi.unrarlib import get_unrar_version
+
+    unrar_version = get_unrar_version()
+    if len(unrar_version) != 3 or unrar_version[0] <= 0:
+        raise RuntimeError(f"RAR 解压组件版本无效：{unrar_version}")
+
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "runtime.xlsx"
+    payload = b"HRToolkit archive runtime smoke"
+    source.write_bytes(payload)
+    archive_path = root / "runtime.7z"
+    with py7zr.SevenZipFile(archive_path, "w") as archive:
+        archive.write(source, arcname=source.name)
+    warnings: list[str] = []
+    files = extract_archive_excel_files(archive_path, root / "extract", warnings)
+    if warnings or len(files) != 1 or files[0].read_bytes() != payload:
+        raise RuntimeError(f"7Z 解压组件运行检查失败：warnings={warnings}，files={len(files)}")
+
+    rar_path = root / "runtime.rar"
+    rar_path.write_bytes(_RAR_RUNTIME_FIXTURE)
+    rar_warnings: list[str] = []
+    rar_files = extract_archive_excel_files(rar_path, root / "extract-rar", rar_warnings)
+    if rar_warnings or len(rar_files) != 1 or rar_files[0].read_bytes() != payload:
+        raise RuntimeError(f"RAR 解压组件运行检查失败：warnings={rar_warnings}，files={len(rar_files)}")
 
 
 def update_smoke_test() -> str:

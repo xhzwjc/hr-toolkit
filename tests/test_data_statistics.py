@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import tarfile
 import tempfile
 import unittest
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
+import py7zr
 from openpyxl import Workbook, load_workbook
 
 from hr_toolkit.tools.data_statistics import (
@@ -582,21 +585,60 @@ class DataStatisticsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 generate_data_statistics_reports(input_dir, root / "out", remark_unit="week")
 
-    def test_generate_from_zip(self) -> None:
+    def test_same_attendance_archive_has_identical_output_across_formats(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "考勤结果.xlsx"
-            archive = root / "数据统计.zip"
-            output_dir = root / "output"
             _write_attendance_file(source)
-            with zipfile.ZipFile(archive, "w") as zip_file:
+
+            archives: list[Path] = []
+            zip_path = root / "数据统计.zip"
+            with zipfile.ZipFile(zip_path, "w") as zip_file:
                 zip_file.write(source, arcname=source.name)
+            archives.append(zip_path)
 
-            result = generate_data_statistics_reports([archive], output_dir)
+            seven_zip_path = root / "数据统计.7z"
+            with py7zr.SevenZipFile(seven_zip_path, "w") as seven_zip_file:
+                seven_zip_file.write(source, arcname=source.name)
+            archives.append(seven_zip_path)
 
-            self.assertEqual(result.attendance_source_count, 4)
-            self.assertEqual(result.attendance_person_count, 1)
-            self.assertTrue(result.output_file and result.output_file.exists())
+            for suffix, mode in {
+                ".tar": "w",
+                ".tar.gz": "w:gz",
+                ".tgz": "w:gz",
+                ".tar.bz2": "w:bz2",
+                ".tbz2": "w:bz2",
+                ".tar.xz": "w:xz",
+                ".txz": "w:xz",
+            }.items():
+                archive_path = root / f"数据统计{suffix}"
+                with tarfile.open(archive_path, mode) as tar_file:
+                    tar_file.add(source, arcname=source.name)
+                archives.append(archive_path)
+
+            reference_result = None
+            reference_manifest = None
+            for index, archive_path in enumerate(archives):
+                result = generate_data_statistics_reports([archive_path], root / f"output-{index}")
+                output_manifest = _xlsx_business_manifest(result.output_file)
+                summary = (
+                    result.attendance_source_count,
+                    result.attendance_person_count,
+                    result.attendance_exception_count,
+                    result.weekly_record_count,
+                    result.monthly_record_count,
+                    result.report_person_count,
+                    result.report_exception_count,
+                    result.warnings,
+                )
+                if reference_result is None:
+                    reference_result = summary
+                    reference_manifest = output_manifest
+
+                with self.subTest(archive=archive_path.name):
+                    self.assertEqual(summary, reference_result)
+                    self.assertEqual(output_manifest, reference_manifest)
+                    self.assertTrue(result.output_file and result.output_file.exists())
 
     def test_late_early_displayed_in_minutes(self) -> None:
         """迟到/早退以分钟数写入统计表，列头改为"迟到/早退（分钟）"."""
@@ -1253,6 +1295,17 @@ def _write_report_boundary_file(path: Path, report_time: datetime, report_kind: 
         ws.cell(2, col_index).value = value
     wb.save(path)
     wb.close()
+
+
+def _xlsx_business_manifest(path: Path | None) -> tuple[tuple[str, str], ...]:
+    assert path is not None
+    with zipfile.ZipFile(path) as workbook:
+        return tuple(
+            (info.filename, hashlib.sha256(workbook.read(info.filename)).hexdigest())
+            for info in workbook.infolist()
+            # openpyxl 每次保存都会刷新这里的修改时间；其余 XML/资源必须逐字节一致。
+            if info.filename != "docProps/core.xml"
+        )
 
 
 if __name__ == "__main__":

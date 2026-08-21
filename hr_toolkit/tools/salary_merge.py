@@ -21,7 +21,11 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.excel import cached_style_id, set_style_ids
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
-from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
+from hr_toolkit.common.inputs import (
+    extract_archive_excel_files,
+    is_supported_archive_file,
+    normalize_input_paths,
+)
 
 
 TOOL_NAME = "需求5-多月工资合并个人薪资汇总"
@@ -207,11 +211,10 @@ def _find_salary_files(input_paths: list[Path], temp_dir: Path, existing_summary
 
 def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
     if input_path.is_file():
-        suffix = input_path.suffix.lower()
         if is_supported_excel_file(input_path):
             return [input_path]
-        if suffix == ".zip":
-            return extract_zip_excel_files(input_path, temp_dir, warnings)
+        if is_supported_archive_file(input_path):
+            return extract_archive_excel_files(input_path, temp_dir, warnings)
         return []
     if not input_path.is_dir():
         return []
@@ -221,8 +224,8 @@ def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) ->
             continue
         if is_supported_excel_file(child):
             files.append(child)
-        elif child.suffix.lower() == ".zip":
-            files.extend(extract_zip_excel_files(child, temp_dir, warnings))
+        elif is_supported_archive_file(child):
+            files.extend(extract_archive_excel_files(child, temp_dir, warnings))
     return files
 
 

@@ -33,6 +33,8 @@ WINDOWS_BUILD_MODULES = {
     "PyInstaller": "pyinstaller",
     "certifi": "certifi",
     "openpyxl": "openpyxl",
+    "py7zr": "py7zr",
+    "unrar.cffi.rarfile": "unrar2-cffi",
     "xlrd": "xlrd",
     "pythoncom": "pywin32",
     "pywintypes": "pywin32",
@@ -44,7 +46,15 @@ HIDDEN_IMPORTS = (
     "pywintypes",
     "win32com.client",
     "win32timezone",
+    "py7zr",
+    "unrar.cffi.rarfile",
+    "unrar.cffi.unrarlib",
     "xlrd",
+)
+COLLECT_ALL_MODULES = (
+    "rapidocr_onnxruntime",
+    "py7zr",
+    "unrar",
 )
 EXCLUDED_MODULES = (
     "pytest",
@@ -281,7 +291,8 @@ def pyinstaller_commands(
         main.extend(["--hidden-import", module])
     for module in EXCLUDED_MODULES:
         main.extend(["--exclude-module", module])
-    main.extend(["--collect-all", "rapidocr_onnxruntime"])
+    for module in COLLECT_ALL_MODULES:
+        main.extend(["--collect-all", module])
     main.append(str(APP_ENTRYPOINT))
 
     updater = [

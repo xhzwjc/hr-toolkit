@@ -32,7 +32,11 @@ from hr_toolkit.common.excel import (
     snapshot_row,
     style_source_id,
 )
-from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
+from hr_toolkit.common.inputs import (
+    extract_archive_excel_files,
+    is_supported_archive_file,
+    normalize_input_paths,
+)
 
 
 TOOL_NAME = "需求6-异动表汇总"
@@ -246,7 +250,7 @@ def merge_personnel_changes(
             raise ValueError("未找到 .xlsx 或 .xls 异动表")
 
         summary_sources = _resolve_summary_sources(template_path, temp_dir)
-        analysis_template = _resolve_analysis_template_path(analysis_template_path, input_paths, temp_dir)
+        analysis_template = _resolve_analysis_template_path(analysis_template_path, source_files, temp_dir)
         rows_by_period = _empty_period_sheet_map()
         used_files: list[str] = []
 
@@ -412,11 +416,10 @@ def _find_change_files(input_paths: list[Path], temp_dir: Path, warnings: list[s
 
 def _iter_input_files(path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
     if path.is_file():
-        suffix = path.suffix.lower()
         if is_supported_excel_file(path):
             return [path]
-        if suffix == ".zip":
-            return extract_zip_excel_files(path, temp_dir, warnings)
+        if is_supported_archive_file(path):
+            return extract_archive_excel_files(path, temp_dir, warnings)
         return []
     if path.is_dir():
         files: list[Path] = []
@@ -425,8 +428,8 @@ def _iter_input_files(path: Path, temp_dir: Path, warnings: list[str]) -> list[P
                 continue
             if is_supported_excel_file(child):
                 files.append(child)
-            elif child.suffix.lower() == ".zip":
-                files.extend(extract_zip_excel_files(child, temp_dir, warnings))
+            elif is_supported_archive_file(child):
+                files.extend(extract_archive_excel_files(child, temp_dir, warnings))
         return files
     return []
 
@@ -435,12 +438,7 @@ def _find_summary_files(input_paths: list[Path], warnings: list[str], temp_dir: 
     files: list[Path] = []
     seen: set[Path] = set()
     for path in input_paths:
-        if path.is_file():
-            candidates = [path]
-        elif path.is_dir():
-            candidates = sorted(item for item in path.rglob("*") if item.is_file() and is_supported_excel_file(item))
-        else:
-            candidates = []
+        candidates = _iter_input_files(path, temp_dir, warnings)
         for candidate in candidates:
             if not is_supported_excel_file(candidate):
                 continue
@@ -1403,4 +1401,3 @@ def _normalize_header(value: Any) -> str:
 
 def _normalize_id_card(value: Any) -> str:
     return _cell_text(value).upper()
-

@@ -39,7 +39,7 @@ from .tools.social_security import generate_social_security_reports
 
 def _build_social_security_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("social-security", help="需求1：生成社保明细表和社保汇总表")
-    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个社保缴费清单 .xlsx/.xls、zip 压缩包，或包含清单/压缩包的文件夹")
+    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个社保缴费清单 .xlsx/.xls、ZIP/RAR/7Z/TAR 压缩包，或包含清单/压缩包的文件夹")
     p.add_argument("-r", "--roster", required=True, type=Path, help="参保人员花名册 .xlsx 或 .xls")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("--dry-run", action="store_true", help="只识别社保缴费记录，不生成 Excel 文件")
@@ -48,7 +48,7 @@ def _build_social_security_parser(subparsers: argparse._SubParsersAction) -> Non
 
 def _build_data_statistics_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("data-statistics", help="需求2：生成考勤和周月报统计表")
-    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个考勤/周报/月报 .xlsx/.xls、zip 压缩包，或包含这些文件/压缩包的文件夹")
+    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个考勤/周报/月报 .xlsx/.xls、ZIP/RAR/7Z/TAR 压缩包，或包含这些文件/压缩包的文件夹")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("-s", "--staff", type=Path, help="可选应汇报人员名单 .xlsx/.xls；传入后可统计未写周报/月报人员")
     p.add_argument("--week-start", help="可选周报统计开始日期（如 2026-06-02）；只统计该范围内周一截止的周报，需与 --week-end 同时使用")
@@ -68,7 +68,7 @@ def _build_data_statistics_parser(subparsers: argparse._SubParsersAction) -> Non
 
 def _build_insurance_ledger_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("insurance-ledger", help="需求3：生成保险台账和人员增减预警")
-    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个保单人员清单 .xlsx/.xls、zip 压缩包，或包含保单清单/压缩包的文件夹")
+    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个保单人员清单 .xlsx/.xls、ZIP/RAR/7Z/TAR 压缩包，或包含保单清单/压缩包的文件夹")
     p.add_argument("-r", "--roster", required=True, type=Path, help="需求6人力资源分析表 .xlsx 或 .xls，需包含“花名册”工作表")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("--dry-run", action="store_true", help="只识别保单人员，不生成 Excel 文件")
@@ -85,7 +85,7 @@ def _build_salary_split_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _build_salary_merge_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("salary-merge", help="需求5：合并多个月工资表，生成个人应发工资汇总")
-    p.add_argument("-i", "--input-dir", required=True, nargs="+", type=Path, help="一个或多个 .xlsx/.xls 月度工资表、zip 压缩包，或包含月度工资表/压缩包的文件夹")
+    p.add_argument("-i", "--input-dir", required=True, nargs="+", type=Path, help="一个或多个 .xlsx/.xls 月度工资表、ZIP/RAR/7Z/TAR 压缩包，或包含月度工资表/压缩包的文件夹")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("-s", "--summary", type=Path, help="已有个人薪资汇总表；传入后只追加缺失月份，不覆盖已有金额")
     p.add_argument("--year", type=int, help="汇总年份，例如 2026；不填时自动根据工资表月份推断")
@@ -95,7 +95,7 @@ def _build_salary_merge_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _build_change_merge_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("change-merge", help="需求6：汇总多个项目异动表")
-    p.add_argument("-i", "--input-dir", required=True, nargs="+", type=Path, help="一个或多个 .xlsx/.xls 项目异动表、zip 压缩包，或包含项目异动表/压缩包的文件夹")
+    p.add_argument("-i", "--input-dir", required=True, nargs="+", type=Path, help="一个或多个 .xlsx/.xls 项目异动表、ZIP/RAR/7Z/TAR 压缩包，或包含项目异动表/压缩包的文件夹")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("--template", type=Path, help="可选已有异动汇总表文件或汇总表文件夹；会按异动日期写入对应月份")
     p.add_argument("--analysis-template", type=Path, help="可选人力资源分析表；传入后会同步更新其中的花名册")
@@ -105,7 +105,7 @@ def _build_change_merge_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _build_roster_update_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("roster-update", help="需求6：根据异动汇总表单独更新人力资源花名册")
-    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个异动汇总表 .xlsx/.xls、zip 压缩包，或包含异动汇总表/压缩包的文件夹")
+    p.add_argument("-i", "--input", required=True, nargs="+", type=Path, help="一个或多个异动汇总表 .xlsx/.xls、ZIP/RAR/7Z/TAR 压缩包，或包含异动汇总表/压缩包的文件夹")
     p.add_argument("-r", "--roster", required=True, type=Path, help="人力资源花名册 .xlsx/.xls")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("--dry-run", action="store_true", help="只识别汇总表记录，不生成花名册")
@@ -127,7 +127,7 @@ def _build_folder_rename_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _build_archive_import_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("archive-import", help="需求7：将项目档案移交表写入公司档案汇总表")
-    p.add_argument("-i", "--input", required=True, type=Path, nargs="+", help="档案移交表 .xlsx/.xls、.zip，或包含多个移交表/压缩包的文件夹")
+    p.add_argument("-i", "--input", required=True, type=Path, nargs="+", help="档案移交表 .xlsx/.xls、ZIP/RAR/7Z/TAR 压缩包，或包含多个移交表/压缩包的文件夹")
     p.add_argument("-t", "--target", type=Path, help="已有档案汇总表 .xlsx/.xls；不传时使用内置空模板")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("--dry-run", action="store_true", help="只识别记录，不生成 Excel 文件")
@@ -136,8 +136,8 @@ def _build_archive_import_parser(subparsers: argparse._SubParsersAction) -> None
 
 def _build_archive_export_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser("archive-export", help="需求7：按公司从档案汇总表生成独立档案表")
-    p.add_argument("-s", "--summary", required=True, nargs="+", type=Path, help="一个或多个档案汇总表 .xlsx/.xls，或包含档案汇总表的文件夹")
-    p.add_argument("-e", "--existing", nargs="+", type=Path, help="可选已有公司档案表文件或文件夹；匹配到公司则追加，未匹配则用内置空模板新建")
+    p.add_argument("-s", "--summary", required=True, nargs="+", type=Path, help="一个或多个档案汇总表 .xlsx/.xls、ZIP/RAR/7Z/TAR 压缩包，或包含档案汇总表的文件夹")
+    p.add_argument("-e", "--existing", nargs="+", type=Path, help="可选已有公司档案表文件、ZIP/RAR/7Z/TAR 压缩包或文件夹；匹配到公司则追加，未匹配则用内置空模板新建")
     p.add_argument("-o", "--output", required=True, type=Path, help="输出目录")
     p.add_argument("--dry-run", action="store_true", help="只识别公司，不生成 Excel 文件")
     p.add_argument("--json", action="store_true", help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成")

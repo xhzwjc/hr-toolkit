@@ -125,6 +125,21 @@ class HistoryStoreTests(unittest.TestCase):
         nested.mkdir(parents=True)
         excel = nested / "异动.xlsx"
         excel.write_bytes(b"excel")
+        archive_names = (
+            "资料.zip",
+            "资料.rar",
+            "资料.7z",
+            "资料.tar",
+            "资料.tar.gz",
+            "资料.tgz",
+            "资料.tar.bz2",
+            "资料.tbz2",
+            "资料.tar.xz",
+            "资料.txz",
+        )
+        for archive_name in archive_names:
+            (nested / archive_name).write_bytes(archive_name.encode("utf-8"))
+        (nested / "单文件.gz").write_bytes(b"not supported")
         (nested / "说明.txt").write_text("not archived", encoding="utf-8")
         link = nested / "链接.xlsx"
         try:
@@ -134,10 +149,14 @@ class HistoryStoreTests(unittest.TestCase):
 
         task_id = self._start("异动汇总")
         records = self.store.archive_sources(task_id, [SourceSpec(self.source_dir, role="input_paths")])
-        self.assertEqual([record.display_name for record in records], ["异动.xlsx"])
-        self.assertIn("项目", records[0].relative_path)
+        self.assertEqual(
+            {record.display_name for record in records},
+            {"异动.xlsx", *archive_names},
+        )
+        self.assertTrue(all("项目" in record.relative_path for record in records))
+        self.assertNotIn("单文件.gz", {record.display_name for record in records})
         if link is not None:
-            self.assertNotIn("链接.xlsx", records[0].relative_path)
+            self.assertNotIn("链接.xlsx", {record.display_name for record in records})
 
     def test_duplicate_names_never_overwrite(self) -> None:
         first_dir = self.source_dir / "a"

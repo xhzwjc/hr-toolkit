@@ -27,7 +27,11 @@ from hr_toolkit.common.excel import (
     snapshot_row,
 )
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
-from hr_toolkit.common.inputs import extract_zip_excel_files, normalize_input_paths
+from hr_toolkit.common.inputs import (
+    extract_archive_excel_files,
+    is_supported_archive_file,
+    normalize_input_paths,
+)
 
 
 TOOL_NAME = "需求2-考勤周月报统计"
@@ -389,8 +393,8 @@ def _iter_input_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> 
     if input_path.is_file():
         if is_supported_excel_file(input_path):
             return [input_path]
-        if input_path.suffix.lower() == ".zip":
-            return extract_zip_excel_files(input_path, temp_dir, warnings)
+        if is_supported_archive_file(input_path):
+            return extract_archive_excel_files(input_path, temp_dir, warnings)
         return []
     if not input_path.is_dir():
         raise FileNotFoundError(f"路径不存在：{input_path}")
@@ -400,8 +404,8 @@ def _iter_input_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> 
             continue
         if is_supported_excel_file(path):
             files.append(path)
-        elif path.suffix.lower() == ".zip":
-            files.extend(extract_zip_excel_files(path, temp_dir, warnings))
+        elif is_supported_archive_file(path):
+            files.extend(extract_archive_excel_files(path, temp_dir, warnings))
     return files
 
 

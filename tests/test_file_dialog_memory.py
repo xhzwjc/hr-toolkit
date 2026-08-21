@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from hr_toolkit.gui.app import HRToolkitApp
+from hr_toolkit.gui.app import (
+    EXCEL_ARCHIVE_FILE_DIALOG_PATTERN,
+    HRToolkitApp,
+    _is_excel_or_archive_file,
+)
 from hr_toolkit.material_preferences import MaterialPreferences
 
 
@@ -22,6 +26,25 @@ class FileDialogMemoryTestCase(unittest.TestCase):
         self.app._workspace_recent_projects = []
         self.app._workspace_last_project_path = None
         self.app._last_selected_dir = None
+
+    def test_excel_archive_dialog_accepts_every_supported_archive_suffix(self) -> None:
+        for suffix in (
+            ".zip",
+            ".rar",
+            ".7z",
+            ".tar",
+            ".tar.gz",
+            ".tgz",
+            ".tar.bz2",
+            ".tbz2",
+            ".tar.xz",
+            ".txz",
+        ):
+            with self.subTest(suffix=suffix):
+                self.assertIn(f"*{suffix}", EXCEL_ARCHIVE_FILE_DIALOG_PATTERN)
+                self.assertTrue(_is_excel_or_archive_file(Path(f"资料{suffix.upper()}")))
+        self.assertTrue(_is_excel_or_archive_file(Path("资料.xlsx")))
+        self.assertFalse(_is_excel_or_archive_file(Path("资料.gz")))
 
     def test_file_dialog_initial_dir_hierarchy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

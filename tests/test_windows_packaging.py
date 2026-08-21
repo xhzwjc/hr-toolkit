@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 from scripts import build_update_assets
+from scripts import build_macos
 from scripts import build_windows
 from scripts import build_windows_installers
 from scripts import release_windows
@@ -52,6 +53,10 @@ class WindowsPackagingTests(unittest.TestCase):
         for excluded in build_windows.EXCLUDED_MODULES:
             self.assertIn(excluded, main)
             self.assertIn(excluded, updater)
+        for hidden_import in build_windows.HIDDEN_IMPORTS:
+            self.assertIn(["--hidden-import", hidden_import], [main[index : index + 2] for index in range(len(main) - 1)])
+        for module in build_windows.COLLECT_ALL_MODULES:
+            self.assertIn(["--collect-all", module], [main[index : index + 2] for index in range(len(main) - 1)])
 
         data_values = [main[index + 1] for index, value in enumerate(main[:-1]) if value == "--add-data"]
         self.assertEqual(len(data_values), 1 + len(build_windows.release_template_files()))
@@ -64,6 +69,24 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertEqual(template_sources, {str(path) for path in build_windows.release_template_files()})
         self.assertFalse(any(value.startswith(str(build_windows.TEMPLATES_DIR) + ";") for value in data_values))
         self.assertFalse(any("附件" in value or "outputs" in value for value in data_values))
+
+    def test_macos_spec_collects_7z_and_embedded_unrar_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            spec_path = tmp_dir / "HRToolkit.spec"
+            build_macos._write_spec(
+                spec_path,
+                architecture="arm64",
+                version=self.version,
+                icon_path=tmp_dir / "HRToolkit.icns",
+                codesign_identity=None,
+                entitlements_file=None,
+            )
+            spec = spec_path.read_text(encoding="utf-8")
+        self.assertIn('collect_all("py7zr")', spec)
+        self.assertIn('collect_all("unrar")', spec)
+        self.assertIn("_sevenzip_binaries + _rar_binaries", spec)
+        self.assertIn("_sevenzip_hidden + _rar_hidden", spec)
 
     def test_windows_version_metadata_uses_requested_version(self) -> None:
         payload = build_windows.windows_version_info("0.2.1")
