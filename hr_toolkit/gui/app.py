@@ -533,6 +533,7 @@ class HRToolkitApp:
 
     def _load_workspace_preferences(self) -> None:
         self._workspace_last_project_path: Path | None = None
+        self._last_selected_dir: Path | None = None
         settings_path = self._workspace_settings_path()
         try:
             if settings_path.is_symlink() or not settings_path.is_file():
@@ -568,6 +569,14 @@ class HRToolkitApp:
         raw_current = state.get("current_project")
         if isinstance(raw_current, str) and raw_current.strip():
             self._workspace_last_project_path = Path(raw_current).expanduser().absolute()
+        raw_last_dir = state.get("last_selected_dir")
+        if isinstance(raw_last_dir, str) and raw_last_dir.strip():
+            try:
+                candidate_dir = Path(raw_last_dir).expanduser().absolute()
+                if candidate_dir.is_dir():
+                    self._last_selected_dir = candidate_dir
+            except Exception:
+                pass
 
     def _save_workspace_preferences(self) -> None:
         settings_path = self._workspace_settings_path()
@@ -577,6 +586,7 @@ class HRToolkitApp:
             "project_panel_expanded": bool(self._workspace_preferred_expanded),
             "current_project": str(self.current_project_path) if self.current_project_path is not None else None,
             "recent_projects": [str(path) for _name, path in self._workspace_recent_projects[:8]],
+            "last_selected_dir": str(self._last_selected_dir) if getattr(self, "_last_selected_dir", None) is not None else None,
         }
         temp_path = settings_path.with_name(
             f".{settings_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
@@ -599,6 +609,76 @@ class HRToolkitApp:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _file_dialog_initial_dir(self) -> str:
+        last_dir = getattr(self, "_last_selected_dir", None)
+        if last_dir is not None:
+            try:
+                cand = Path(last_dir).expanduser().absolute()
+                if cand.is_dir():
+                    return str(cand)
+            except Exception:
+                pass
+        project_path = getattr(self, "current_project_path", None)
+        if project_path is not None:
+            try:
+                cand = Path(project_path).expanduser().absolute()
+                if cand.is_dir():
+                    return str(cand)
+            except Exception:
+                pass
+        try:
+            fallback = desktop_dir() or Path.home()
+            if fallback and Path(fallback).is_dir():
+                return str(Path(fallback).expanduser().absolute())
+        except Exception:
+            pass
+        return str(Path.home())
+
+    def _remember_file_dialog_path(self, selected: str | Path | list[str | Path] | tuple[str | Path, ...] | None) -> None:
+        if not selected:
+            return
+        item = selected[0] if isinstance(selected, (list, tuple)) else selected
+        if not item:
+            return
+        try:
+            path = Path(item).expanduser().absolute()
+            folder = path if path.is_dir() else path.parent
+            if folder.is_dir():
+                self._last_selected_dir = folder
+                self._save_workspace_preferences()
+        except Exception:
+            pass
+
+    def _askopenfilename(self, **kwargs) -> str:
+        if "initialdir" not in kwargs:
+            kwargs["initialdir"] = self._file_dialog_initial_dir()
+        if "parent" not in kwargs and getattr(self, "root", None) is not None:
+            kwargs["parent"] = self.root
+        result = filedialog.askopenfilename(**kwargs)
+        if result:
+            self._remember_file_dialog_path(result)
+        return result
+
+    def _askopenfilenames(self, **kwargs) -> tuple[str, ...]:
+        if "initialdir" not in kwargs:
+            kwargs["initialdir"] = self._file_dialog_initial_dir()
+        if "parent" not in kwargs and getattr(self, "root", None) is not None:
+            kwargs["parent"] = self.root
+        result = filedialog.askopenfilenames(**kwargs)
+        if result:
+            self._remember_file_dialog_path(result)
+        return result
+
+    def _askdirectory(self, **kwargs) -> str:
+        if "initialdir" not in kwargs:
+            kwargs["initialdir"] = self._file_dialog_initial_dir()
+        if "parent" not in kwargs and getattr(self, "root", None) is not None:
+            kwargs["parent"] = self.root
+        result = filedialog.askdirectory(**kwargs)
+        if result:
+            self._remember_file_dialog_path(result)
+        return result
 
     def _apply_app_icon(self) -> None:
         # 替换标题栏/任务栏默认的 Tk 羽毛图标；iconphoto(True, ...) 会同时
@@ -3144,6 +3224,7 @@ class HRToolkitApp:
         )
         if selected:
             parent_var.set(str(Path(selected).expanduser().absolute()))
+            self._remember_file_dialog_path(selected)
         try:
             window.lift()
             window.focus_force()
@@ -3288,7 +3369,7 @@ class HRToolkitApp:
                 parent=self.root,
             )
             return
-        directory = filedialog.askdirectory(title="打开已有工作项目")
+        directory = self._askdirectory(title="打开已有工作项目")
         if directory:
             self._open_workspace_project_path(Path(directory))
 
@@ -5240,7 +5321,7 @@ class HRToolkitApp:
         if target is None or self.current_project_path is None or store is None:
             return
         batch_target = self._workspace_batch_for_target(target)
-        selected = filedialog.askopenfilenames(title="选择要导入项目的文件")
+        selected = self._askopenfilenames(title="选择要导入项目的文件")
         if not selected:
             return
         paths = [Path(path) for path in selected]
@@ -5269,7 +5350,7 @@ class HRToolkitApp:
         if target is None or self.current_project_path is None or store is None:
             return
         batch_target = self._workspace_batch_for_target(target)
-        selected = filedialog.askdirectory(title="选择要导入项目的文件夹")
+        selected = self._askdirectory(title="选择要导入项目的文件夹")
         if not selected:
             return
         source_dir = Path(selected)
@@ -7873,7 +7954,7 @@ class HRToolkitApp:
                 title = "选择员工资料库根目录"
             else:
                 title = "选择工资表文件夹"
-            directory = filedialog.askdirectory(title=title)
+            directory = self._askdirectory(title=title)
             if directory:
                 self.input_path.set(directory)
                 if not self.output_dir_user_selected:
@@ -7881,7 +7962,7 @@ class HRToolkitApp:
                 self._refresh_upload_card()
             return
 
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择工资表",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -7892,12 +7973,12 @@ class HRToolkitApp:
             self._refresh_upload_card()
 
     def _choose_change_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择异动表文件夹")
+        directory = self._askdirectory(title="选择异动表文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_change_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择异动表文件或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -7905,12 +7986,12 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _choose_salary_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择工资表文件夹")
+        directory = self._askdirectory(title="选择工资表文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_salary_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择工资表文件或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -7918,12 +7999,12 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _choose_social_security_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择社保缴费清单文件夹")
+        directory = self._askdirectory(title="选择社保缴费清单文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_social_security_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择社保缴费清单或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -7931,7 +8012,7 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _choose_social_security_roster_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择参保人员花名册",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -7939,7 +8020,7 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_material_roster_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择员工名单 Excel 文件",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -7947,7 +8028,7 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_data_statistics_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择考勤周月报数据文件夹")
+        directory = self._askdirectory(title="选择考勤周月报数据文件夹")
         if directory:
             # 替换式：每次重新选择都覆盖旧路径，避免 chip 残留导致重复上传时统计报错
             self.change_input_paths = [Path(directory)]
@@ -7957,7 +8038,7 @@ class HRToolkitApp:
                 self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
 
     def _choose_data_statistics_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择考勤周月报文件或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -7970,7 +8051,7 @@ class HRToolkitApp:
                 self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
 
     def _choose_data_statistics_staff_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择应汇报人员名单",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -7978,12 +8059,12 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_insurance_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择保单人员清单文件夹")
+        directory = self._askdirectory(title="选择保单人员清单文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_insurance_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择保单人员清单或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -7991,7 +8072,7 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _choose_insurance_roster_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择人力资源分析表",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -7999,12 +8080,12 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_archive_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择档案移交表文件夹")
+        directory = self._askdirectory(title="选择档案移交表文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_archive_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择档案移交表文件或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -8012,7 +8093,7 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _choose_archive_summary_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择已有档案汇总表",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -8020,7 +8101,7 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_archive_export_summary_files_or_zip(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择档案汇总表或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -8028,12 +8109,12 @@ class HRToolkitApp:
             self._set_change_input_paths([Path(filename) for filename in filenames])
 
     def _choose_archive_export_summary_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择档案汇总表文件夹")
+        directory = self._askdirectory(title="选择档案汇总表文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_archive_export_existing_file_or_zip(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择已有公司档案表或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -8041,17 +8122,17 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_archive_export_existing_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择已有公司档案表文件夹")
+        directory = self._askdirectory(title="选择已有公司档案表文件夹")
         if directory:
             self.summary_path.set(directory)
 
     def _choose_roster_summary_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择异动汇总表文件夹")
+        directory = self._askdirectory(title="选择异动汇总表文件夹")
         if directory:
             self._set_change_input_paths([Path(directory)])
 
     def _choose_roster_summary_files(self) -> None:
-        filenames = filedialog.askopenfilenames(
+        filenames = self._askopenfilenames(
             title="选择异动汇总表文件或压缩包",
             filetypes=[("Excel 或 ZIP", "*.xlsx *.xls *.zip"), ("Excel 工作簿", "*.xlsx *.xls"), ("ZIP 压缩包", "*.zip"), ("所有文件", "*.*")],
         )
@@ -8066,6 +8147,8 @@ class HRToolkitApp:
                 current.append(path)
         self.change_input_paths = current or None
         self._sync_input_path_text()
+        if paths:
+            self._remember_file_dialog_path(paths)
         if not self.output_dir_user_selected:
             self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
         self._refresh_upload_card()
@@ -8080,12 +8163,12 @@ class HRToolkitApp:
             self.input_path.set(f"已选择 {len(paths)} 个文件")
 
     def _choose_change_summary_folder(self) -> None:
-        directory = filedialog.askdirectory(title="选择已有异动汇总表文件夹")
+        directory = self._askdirectory(title="选择已有异动汇总表文件夹")
         if directory:
             self.summary_path.set(directory)
 
     def _choose_change_summary_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择已有异动汇总表",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -8093,7 +8176,7 @@ class HRToolkitApp:
             self.summary_path.set(filename)
 
     def _choose_roster_analysis_file(self) -> None:
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title="选择人力资源花名册",
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
@@ -8150,7 +8233,7 @@ class HRToolkitApp:
             title = "选择档案汇总表"
         else:
             title = "选择已有汇总表"
-        filename = filedialog.askopenfilename(
+        filename = self._askopenfilename(
             title=title,
             filetypes=[("Excel 工作簿", "*.xlsx *.xls"), ("所有文件", "*.*")],
         )
