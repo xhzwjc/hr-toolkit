@@ -98,6 +98,7 @@ class GuiPerformanceTests(unittest.TestCase):
         card.destroy()
 
     def test_tool_switching_layout_stability_and_redraw_counts(self) -> None:
+        app = None
         try:
             app = HRToolkitApp(self.root)
             self.root.update_idletasks()
@@ -125,6 +126,8 @@ class GuiPerformanceTests(unittest.TestCase):
             self.root.update_idletasks()
             self.assertEqual(app.current_tool, prev_tool)
         finally:
+            if app is not None:
+                app.destroy()
             for child in self.root.winfo_children():
                 try:
                     child.destroy()
@@ -132,6 +135,7 @@ class GuiPerformanceTests(unittest.TestCase):
                     pass
 
     def test_right_canvas_scrolling_does_not_mutate_items(self) -> None:
+        app = None
         try:
             app = HRToolkitApp(self.root)
             self.root.update_idletasks()
@@ -146,6 +150,8 @@ class GuiPerformanceTests(unittest.TestCase):
 
             self.assertEqual(len(canvas.find_all()), initial_items)
         finally:
+            if app is not None:
+                app.destroy()
             for child in self.root.winfo_children():
                 try:
                     child.destroy()

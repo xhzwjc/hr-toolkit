@@ -444,6 +444,10 @@ class HRToolkitApp:
             self._history_init_error = str(exc)
             runlog.log_exception("历史资料库初始化失败", exc)
 
+        self._is_alive = True
+        self._poll_update_timer = None
+        self._startup_check_timer = None
+
         try:
             tk_scaling = float(self.root.tk.call("tk", "scaling"))
         except Exception:
@@ -483,7 +487,7 @@ class HRToolkitApp:
                 pass
             self._was_withdrawn = False
         self.root.after_idle(self._restore_workspace_project)
-        self.root.after(600, self._check_updates_on_startup)
+        self._startup_check_timer = self.root.after(600, self._check_updates_on_startup)
         # 清理历史更新遗留的临时文件（下载包、解压目录），后台低优先执行
         threading.Thread(target=cleanup_stale_update_files, daemon=True).start()
 
@@ -5969,14 +5973,20 @@ class HRToolkitApp:
         return names[0] if len(names) == 1 else f"{names[0]} 等 {len(names)} 个"
 
     def _check_updates_on_startup(self) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
         if not update_check_enabled():
             return
         self._start_update_check(manual=False)
 
     def _check_updates_manually(self) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
         self._start_update_check(manual=True)
 
     def _start_update_check(self, manual: bool) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
         if self.update_check_in_progress:
             if manual:
                 # 静默检查进行中时用户点了“检查更新”：升级为手动检查并给出可见反馈
@@ -5991,7 +6001,11 @@ class HRToolkitApp:
         self.manual_update_check_active = manual
         self.update_check_dismissed = False
         if hasattr(self, "check_update_button"):
-            self.check_update_button.config(state="disabled")
+            try:
+                if self.check_update_button.winfo_exists():
+                    self.check_update_button.config(state="disabled")
+            except Exception:
+                pass
         self._write_log("正在检查更新...")
         # 启动时的自动检查静默进行，只有确实存在新版本才打扰用户
         if manual:
@@ -6011,6 +6025,13 @@ class HRToolkitApp:
             self.update_queue.put(("available", update))
 
     def _poll_update_queue(self) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
+            return
         try:
             while True:
                 status, payload = self.update_queue.get_nowait()
@@ -6046,13 +6067,22 @@ class HRToolkitApp:
                     self._handle_manual_update_failure(payload)
         except queue.Empty:
             pass
-        self.root.after(150, self._poll_update_queue)
+        if getattr(self, "_is_alive", True):
+            try:
+                if self.root.winfo_exists():
+                    self._poll_update_timer = self.root.after(150, self._poll_update_queue)
+            except Exception:
+                pass
 
     def _finish_update_check(self) -> None:
         self.update_check_in_progress = False
         self.manual_update_check_active = False
         if hasattr(self, "check_update_button"):
-            self.check_update_button.config(state="normal")
+            try:
+                if self.check_update_button.winfo_exists():
+                    self.check_update_button.config(state="normal")
+            except Exception:
+                pass
 
     def _show_update_checking_window(self) -> None:
         self._show_update_progress_window(
@@ -9489,6 +9519,15 @@ class HRToolkitApp:
         open_path(directory)
 
     def _write_log(self, text: str) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
+        if not hasattr(self, "log_text"):
+            return
+        try:
+            if not self.log_text.winfo_exists():
+                return
+        except Exception:
+            return
         # 时间线式日志：彩色圆点 + 时间戳 + 内容（对应设计稿“运行记录”）
         tag = None
         if any(keyword in text for keyword in ("失败", "错误")):
@@ -9506,24 +9545,55 @@ class HRToolkitApp:
             "muted": "dot_muted",
         }.get(tag or "", "dot_success")
         timestamp = datetime.now().strftime("%H:%M:%S")
-        if tag == "muted":
-            self.log_text.insert(END, "   ", "muted")
-        else:
-            self.log_text.insert(END, "● ", dot_tag)
-            self.log_text.insert(END, f"{timestamp}  ", "timestamp")
-        if tag:
-            self.log_text.insert(END, text + "\n", tag)
-        else:
-            self.log_text.insert(END, text + "\n")
-        self.log_text.see(END)
+        try:
+            if tag == "muted":
+                self.log_text.insert(END, "   ", "muted")
+            else:
+                self.log_text.insert(END, "● ", dot_tag)
+                self.log_text.insert(END, f"{timestamp}  ", "timestamp")
+            if tag:
+                self.log_text.insert(END, text + "\n", tag)
+            else:
+                self.log_text.insert(END, text + "\n")
+            self.log_text.see(END)
+        except Exception:
+            pass
 
     def _flush_log_view(self) -> None:
-        self.log_text.see(END)
-        self.log_text.update_idletasks()
-        self.root.update_idletasks()
+        if not getattr(self, "_is_alive", True):
+            return
+        try:
+            if hasattr(self, "log_text") and self.log_text.winfo_exists():
+                self.log_text.see(END)
+                self.log_text.update_idletasks()
+            if hasattr(self, "root") and self.root.winfo_exists():
+                self.root.update_idletasks()
+        except Exception:
+            pass
 
     def _clear_log(self) -> None:
-        self.log_text.delete("1.0", END)
+        if not getattr(self, "_is_alive", True):
+            return
+        try:
+            if hasattr(self, "log_text") and self.log_text.winfo_exists():
+                self.log_text.delete("1.0", END)
+        except Exception:
+            pass
+
+    def destroy(self) -> None:
+        self._is_alive = False
+        if hasattr(self, "_startup_check_timer") and self._startup_check_timer:
+            try:
+                self.root.after_cancel(self._startup_check_timer)
+            except Exception:
+                pass
+            self._startup_check_timer = None
+        if hasattr(self, "_poll_update_timer") and self._poll_update_timer:
+            try:
+                self.root.after_cancel(self._poll_update_timer)
+            except Exception:
+                pass
+            self._poll_update_timer = None
 
 
 
