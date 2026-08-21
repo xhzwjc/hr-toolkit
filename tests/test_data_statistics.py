@@ -105,6 +105,60 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertEqual(remarks_by_day[29], "上班未打卡")
             self.assertEqual(remarks_by_day[30], "下班未打卡")
 
+    def test_overtime_slot_uses_last_punch_and_exact_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_overtime_slot_file(input_dir / "考勤结果.xlsx")
+
+            day_result = generate_data_statistics_reports(input_dir, root / "out_day")
+            day_wb = load_workbook(day_result.output_file, data_only=True)
+            stats = day_wb["考勤统计"]
+            remark = stats.cell(3, stats.max_column).value or ""
+            expected_fragments = (
+                "4.1上午加班0.5天",
+                "4.2上午加班0.5天",
+                "4.3下午加班0.5天",
+                "4.4下午加班0.5天",
+                "4.5晚上加班0.5天",
+                "4.6晚上加班0.5天",
+                "4.7加班0.5天",
+                "4.8加班0.5天",
+                "4.9加班1天",
+            )
+            for fragment in expected_fragments:
+                self.assertIn(fragment, remark)
+            self.assertNotIn("4.7晚上加班", remark)
+            self.assertNotIn("4.8上午加班", remark)
+            self.assertNotIn("4.9晚上加班", remark)
+
+            detail = day_wb["考勤异常明细"]
+            detail_by_day = {
+                detail.cell(row, 4).value.day: detail.cell(row, 7).value
+                for row in range(2, detail.max_row + 1)
+                if detail.cell(row, 5).value == "加班"
+            }
+            self.assertEqual(detail_by_day[1], "上午加班0.5天")
+            self.assertEqual(detail_by_day[3], "下午加班0.5天")
+            self.assertEqual(detail_by_day[5], "晚上加班0.5天")
+            self.assertEqual(detail_by_day[6], "晚上加班0.5天")
+            self.assertEqual(detail_by_day[7], "加班0.5天")
+            self.assertEqual(detail_by_day[9], "加班1天")
+            day_wb.close()
+
+            hour_result = generate_data_statistics_reports(
+                input_dir, root / "out_hour", remark_unit="hour"
+            )
+            hour_wb = load_workbook(hour_result.output_file, data_only=True)
+            hour_stats = hour_wb["考勤统计"]
+            hour_remark = hour_stats.cell(3, hour_stats.max_column).value or ""
+            self.assertIn("4.1上午加班3.5小时", hour_remark)
+            self.assertIn("4.3下午加班3.5小时", hour_remark)
+            self.assertIn("4.5晚上加班3.5小时", hour_remark)
+            self.assertIn("4.9加班7小时", hour_remark)
+            hour_wb.close()
+
     def test_report_staff_list_counts_missing_people(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -719,6 +773,34 @@ def _write_attendance_file(path: Path) -> None:
     for row_index, row in enumerate(rows, start=2):
         for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index).value = value
+    wb.save(path)
+    wb.close()
+
+
+def _write_overtime_slot_file(path: Path) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "日结果"
+    ws.append([
+        "姓名", "部门名称", "日期", "漏打卡次数", "应出勤小时数", "实出勤小时数",
+        "调休", "加班计调休时长", "计划上下班时间", "当日刷卡记录", "缺卡记录",
+    ])
+    cases = (
+        (1, 3.5, "08:30:00"),
+        (2, 3.5, "15:29:59"),
+        (3, 3.5, "15:30:00"),
+        (4, 3.5, "20:30:00"),
+        (5, 3.5, "20:30:01"),
+        (6, 3.5, "20:00:00,03:30:00"),
+        (7, 3.5, "20:00:00,03:30:01"),
+        (8, 3.5, "08:29:59"),
+        (9, 7, "21:00:00"),
+    )
+    for day, overtime, punches in cases:
+        ws.append([
+            "王小丽", "运营部", datetime(2026, 4, day), 0, 7, 7,
+            0, overtime, "08:30~12:00|14:00~17:30", punches, None,
+        ])
     wb.save(path)
     wb.close()
 

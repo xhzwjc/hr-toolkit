@@ -485,7 +485,7 @@ _SUMMARY_REMARK_ITEM_PATTERN = re.compile(
 )
 _PROJECT_BRACKET_SPLIT_PATTERN = re.compile(r"[/／]")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
-_TIME_HHMM_PATTERN = re.compile(r"([0-2]?\d):([0-5]\d)")
+_TIME_HHMM_PATTERN = re.compile(r"(?<!\d)([0-2]?\d):([0-5]\d)(?::([0-5]\d))?(?!\d)")
 
 
 def _find_header_row(grid: SheetGrid) -> int | None:
@@ -944,6 +944,22 @@ def _summarize_attendance(
     return list(summaries.values()), exceptions
 
 
+def _detect_overtime_slot(row: AttendanceSourceRow) -> str:
+    """按计调休时长和最后一条打卡记录判断短时加班时段。"""
+    if not row.overtime_days or row.overtime_hours > 3.5:
+        return ""
+    last_punch = _last_time_in_text(row.punch_record)
+    if last_punch is None:
+        return ""
+    if time(8, 30) <= last_punch <= time(15, 29, 59):
+        return "上午"
+    if time(15, 30) <= last_punch <= time(20, 30):
+        return "下午"
+    if last_punch >= time(20, 30, 1) or last_punch <= time(3, 30):
+        return "晚上"
+    return ""
+
+
 def _attendance_row_remarks(
     row: AttendanceSourceRow,
     remark_unit: str = REMARK_UNIT_DAY,
@@ -954,10 +970,11 @@ def _attendance_row_remarks(
     by_hour = remark_unit == REMARK_UNIT_HOUR
     remarks: list[str] = []
     if row.overtime_days:
+        prefix = _detect_overtime_slot(row)
         if by_hour:
-            remarks.append(f"晚上加班{_format_number(row.overtime_hours)}小时")
+            remarks.append(f"{prefix}加班{_format_number(row.overtime_hours)}小时")
         else:
-            remarks.append(f"晚上加班{_format_number(row.overtime_days)}天")
+            remarks.append(f"{prefix}加班{_format_number(row.overtime_days)}天")
     if row.rest_days:
         prefix = "上午" if row.expected_hours and row.expected_hours <= 3.5 and row.actual_hours == 0 else ""
         if by_hour:
@@ -1025,7 +1042,12 @@ def _attendance_row_exceptions(
     if row.rest_days:
         exceptions.append(("调休", _format_number(row.rest_days), f"调休{_format_number(row.rest_days)}天"))
     if row.overtime_days:
-        exceptions.append(("加班", _format_number(row.overtime_days), f"加班{_format_number(row.overtime_days)}天"))
+        prefix = _detect_overtime_slot(row)
+        exceptions.append((
+            "加班",
+            _format_number(row.overtime_days),
+            f"{prefix}加班{_format_number(row.overtime_days)}天",
+        ))
     if include_business_trip and row.out_minutes:
         # 公出按 8 小时/天换算成天展示
         out_days = row.out_minutes / 480
@@ -1877,9 +1899,11 @@ def _datetime_from_value(value: Any) -> datetime | None:
 def _times_in_text(text: str) -> tuple[time, ...]:
     values: list[time] = []
     for match in _TIME_HHMM_PATTERN.finditer(text):
-        hour, minute = (int(part) for part in match.groups())
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3) or 0)
         if hour <= 23:
-            values.append(time(hour, minute))
+            values.append(time(hour, minute, second))
     return tuple(values)
 
 
