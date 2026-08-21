@@ -61,6 +61,8 @@ __all__ = [
     "_font_size",
     "_widget_ui_scale",
     "_paint_tool_icon",
+    "_paint_codex_badge_icon",
+    "_get_default_font_family",
     "_default_workspace_project_name",
     "_workspace_project_name_error",
     "_workspace_project_creation_target",

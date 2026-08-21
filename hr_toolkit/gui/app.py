@@ -161,6 +161,8 @@ from .widgets import (
     RoundedCard,
     SidebarItem,
     _paint_tool_icon,
+    _paint_codex_badge_icon,
+    _get_default_font_family,
 )
 from .helpers import (
     _default_result_dir_name,
@@ -226,6 +228,9 @@ class HRToolkitApp:
         self.root.geometry(f"{initial_width}x{initial_height}")
         self.root.minsize(min_width, min_height)
         self.root.configure(bg=COLOR_BG)
+        self._loading_overlay = None
+        self._startup_loading_timer = None
+        self._setup_startup_loading_screen()
         # Window starts hidden and fully transparent so the synchronous widget-creation
         # storm (~70 Canvas widgets on Windows GDI) happens completely off-screen. The
         # user only sees the final, fully-laid-out state when we deiconify and fade back in
@@ -468,6 +473,11 @@ class HRToolkitApp:
         self._configure_style()
         self._set_tool_texts()
         self._build_layout()
+        if self._loading_overlay is not None:
+            try:
+                self._loading_overlay.lift()
+            except Exception:
+                pass
         self._update_project_output_controls()
         self.root.protocol("WM_DELETE_WINDOW", self._request_close)
         self._poll_status_queue()
@@ -475,7 +485,7 @@ class HRToolkitApp:
         self._poll_history_queue()
         self._poll_workspace_queue()
         # Force one synchronous layout pass while the window is still
-        # invisible — every Canvas subclass needs at least one ``update``
+        # covered by the loading overlay — every Canvas subclass needs at least one ``update``
         # cycle to realize its backing GDI surface on Windows.
         self.root.update_idletasks()
         if self._window_faded_out:
@@ -490,8 +500,14 @@ class HRToolkitApp:
             except Exception:
                 pass
             self._was_withdrawn = False
+        if self._loading_overlay is not None:
+            try:
+                self._loading_overlay.lift()
+            except Exception:
+                pass
         self.root.after_idle(self._restore_workspace_project)
         self._startup_check_timer = self.root.after(600, self._check_updates_on_startup)
+        self._startup_loading_timer = self.root.after(400, self._dismiss_startup_loading_screen)
         # 清理历史更新遗留的临时文件（下载包、解压目录），后台低优先执行
         threading.Thread(target=cleanup_stale_update_files, daemon=True).start()
 
@@ -693,6 +709,82 @@ class HRToolkitApp:
                 PhotoImage(data=APP_ICON_PNGS_BASE64[size]) for size in sorted(APP_ICON_PNGS_BASE64, reverse=True)
             ]
             self.root.iconphoto(True, *self._app_icon_images)
+        except Exception:
+            pass
+
+    def _setup_startup_loading_screen(self) -> None:
+        """Create the Codex-style startup loading overlay that covers initial widget creation."""
+        self._loading_overlay = Frame(self.root, bg=COLOR_BG)
+        self._loading_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        try:
+            self._loading_overlay.lift()
+        except Exception:
+            pass
+
+        center_container = Frame(self._loading_overlay, bg=COLOR_BG)
+        center_container.place(relx=0.5, rely=0.5, anchor="center")
+
+        icon_size = self._px(64)
+        canvas_padding = self._px(12)
+        canvas_dim = icon_size + canvas_padding * 2
+
+        icon_canvas = Canvas(
+            center_container,
+            width=canvas_dim,
+            height=canvas_dim,
+            bg=COLOR_BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        icon_canvas.pack(side=TOP, pady=(0, self._px(14)))
+
+        _paint_codex_badge_icon(
+            icon_canvas,
+            canvas_padding,
+            canvas_padding,
+            icon_size,
+            scale=self.ui_scale,
+        )
+
+        family = _get_default_font_family(self.root)
+        title_font = (family, _font_size(12), "bold")
+        title_label = Label(
+            center_container,
+            text=APP_DISPLAY_NAME,
+            font=title_font,
+            fg="#4A4845",
+            bg=COLOR_BG,
+        )
+        title_label.pack(side=TOP, pady=(0, self._px(4)))
+
+        sub_font = (family, _font_size(9))
+        self._loading_status_label = Label(
+            center_container,
+            text="正在准备工作区…",
+            font=sub_font,
+            fg="#8C8A85",
+            bg=COLOR_BG,
+        )
+        self._loading_status_label.pack(side=TOP)
+
+    def _on_startup_rendered(self) -> None:
+        """Called once initial project restore and layout passes have settled completely."""
+        if not getattr(self, "_is_alive", True):
+            return
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        self.root.after(40, self._dismiss_startup_loading_screen)
+
+    def _dismiss_startup_loading_screen(self) -> None:
+        """Dismiss the startup loading overlay after all initial UI rendering has settled."""
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is None:
+            return
+        self._loading_overlay = None
+        try:
+            overlay.destroy()
         except Exception:
             pass
 
@@ -1433,8 +1525,10 @@ class HRToolkitApp:
         self._last_scroll_region = (0, 0, 0, 0)
 
         def _sync_right_canvas_window(_event=None):
-            canvas_width = max(self._right_canvas.winfo_width(), 1)
-            canvas_height = max(self._right_canvas.winfo_height(), 1)
+            canvas_width = self._right_canvas.winfo_width()
+            canvas_height = self._right_canvas.winfo_height()
+            if canvas_width <= 1:
+                return
             content_height = _right_frame_natural_height()
             window_height = max(content_height, canvas_height)
             if (canvas_width, window_height) != self._last_canvas_window_size:
@@ -2823,16 +2917,19 @@ class HRToolkitApp:
         return str(getattr(value, "name", None) or path.name or "工作项目"), path
 
     def _restore_workspace_project(self) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
         # after_idle 可能和自动化测试或极快的用户操作交错；已有项目时不要
         # 再打开第二份只读实例，也不要覆盖刚刚切换完成的界面状态。
         if self.current_project_path is not None:
             self._refresh_workspace_tree()
-            return
-        last_path = getattr(self, "_workspace_last_project_path", None)
-        if last_path is not None and last_path.is_dir():
-            self._open_workspace_project_path(last_path, quiet=True)
         else:
-            self._refresh_workspace_tree()
+            last_path = getattr(self, "_workspace_last_project_path", None)
+            if last_path is not None and last_path.is_dir():
+                self._open_workspace_project_path(last_path, quiet=True)
+            else:
+                self._refresh_workspace_tree()
+        self.root.after_idle(self._on_startup_rendered)
 
     def _reload_recent_workspace_projects(self) -> None:
         refreshed: list[tuple[str, Path]] = []
@@ -9773,6 +9870,13 @@ class HRToolkitApp:
 
     def destroy(self) -> None:
         self._is_alive = False
+        if hasattr(self, "_startup_loading_timer") and self._startup_loading_timer:
+            try:
+                self.root.after_cancel(self._startup_loading_timer)
+            except Exception:
+                pass
+            self._startup_loading_timer = None
+        self._dismiss_startup_loading_screen()
         if hasattr(self, "_startup_check_timer") and self._startup_check_timer:
             try:
                 self.root.after_cancel(self._startup_check_timer)

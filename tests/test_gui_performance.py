@@ -152,6 +152,28 @@ class GuiPerformanceTests(unittest.TestCase):
         finally:
             if app is not None:
                 app.destroy()
+    def test_paint_codex_badge_icon(self) -> None:
+        from hr_toolkit.gui.widgets import _paint_codex_badge_icon
+
+        canvas = tk.Canvas(self.root, width=100, height=100)
+        items = _paint_codex_badge_icon(canvas, 10, 10, 64)
+        self.assertGreater(len(items), 4)
+        canvas.destroy()
+
+    def test_startup_loading_screen_lifecycle(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            # The loading overlay is initially created
+            self.assertTrue(hasattr(app, "_setup_startup_loading_screen"))
+            # Explicitly dismiss
+            app._dismiss_startup_loading_screen()
+            self.assertIsNone(app._loading_overlay)
+            # Idempotent dismiss
+            app._dismiss_startup_loading_screen()
+        finally:
+            if app is not None:
+                app.destroy()
             for child in self.root.winfo_children():
                 try:
                     child.destroy()

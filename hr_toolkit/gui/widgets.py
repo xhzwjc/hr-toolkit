@@ -369,6 +369,66 @@ def _paint_tool_icon(canvas: Canvas, icon_id: str, color: str, x: float, y: floa
     return item_ids
 
 
+def _paint_codex_badge_icon(
+    canvas: Canvas,
+    x: float,
+    y: float,
+    size: float,
+    *,
+    badge_bg: str = "#E8E6E1",
+    badge_border: str = "#DBD8D1",
+    icon_color: str = "#6E6C68",
+    scale: float = 1.0,
+) -> list[int]:
+    """在 size×size 的方框内绘制灰色 Codex / 工具箱风格品牌圆角徽标与线性图标。"""
+    item_ids: list[int] = []
+
+    def track(item_id: int) -> int:
+        item_ids.append(item_id)
+        return item_id
+
+    # 1. 浅灰圆角卡片底板 + 柔和阴影
+    radius = size * 0.22
+    shadow_offset = max(1.0, _scale_float(1.5, scale))
+    shadow_pts = _tessellate_round_rect(
+        x + shadow_offset,
+        y + shadow_offset * 1.5,
+        x + size + shadow_offset,
+        y + size + shadow_offset * 1.5,
+        radius,
+    )
+    track(canvas.create_polygon(*shadow_pts, fill="#DCD9D2", outline=""))
+
+    badge_pts = _tessellate_round_rect(x, y, x + size, y + size, radius)
+    track(canvas.create_polygon(*badge_pts, fill=badge_bg, outline=badge_border, width=max(1.0, _scale_float(1.0, scale))))
+
+    # 2. 居中的工具箱/Codex 线性图标（按 48×48 设计坐标换算）
+    def gx(v: float) -> float:
+        return x + (v / 48.0) * size
+
+    def gy(v: float) -> float:
+        return y + (v / 48.0) * size
+
+    line_w = max(1.5, _scale_float(2.0, scale))
+    line_opts = {"fill": icon_color, "width": line_w, "capstyle": "round", "joinstyle": "round"}
+
+    # 工具箱提手拱形
+    track(canvas.create_line(gx(18), gy(17), gx(18), gy(12.5), gx(30), gy(12.5), gx(30), gy(17), **line_opts))
+    # 工具箱主体圆角轮廓
+    body_r = size * 0.08
+    body_pts = _tessellate_round_rect(gx(9.5), gy(17), gx(38.5), gy(37.5), body_r, segments_per_corner=3)
+    track(canvas.create_polygon(*body_pts, fill="", outline=icon_color, width=line_w))
+    # 工具箱水平开合中缝
+    track(canvas.create_line(gx(9.5), gy(26), gx(38.5), gy(26), **line_opts))
+    # 工具箱中央卡扣锁
+    track(canvas.create_rectangle(
+        gx(21.5), gy(23.5), gx(26.5), gy(28.5),
+        fill=badge_bg, outline=icon_color, width=max(1.0, _scale_float(1.2, scale))
+    ))
+
+    return item_ids
+
+
 class SidebarItem(Canvas):
     """侧边栏导航条目：圆角底 + 线性图标 + 文字（对应设计稿导航行）。"""
 
@@ -555,13 +615,14 @@ class RoundedCard(Canvas):
                 if inner_width != self._last_inner_size[0]:
                     self._last_inner_size = (inner_width, 0)
                     self.itemconfigure(self._window, width=inner_width)
-                height = max(self.inner.winfo_reqheight() + top + bottom, 1)
+                req_h = max(self.inner.winfo_reqheight() + top + bottom, 1)
                 try:
                     curr_h = int(float(self.cget("height")))
                 except Exception:
                     curr_h = 0
-                if curr_h != height:
-                    self.configure(height=height)
+                if curr_h != req_h:
+                    self.configure(height=req_h)
+                height = req_h
             if (width, height) != self._last_bg_size:
                 self._last_bg_size = (width, height)
                 self._redraw_bg(width, height)
@@ -591,4 +652,6 @@ __all__ = [
     "SidebarItem",
     "RoundedCard",
     "_paint_tool_icon",
+    "_paint_codex_badge_icon",
+    "_get_default_font_family",
 ]
