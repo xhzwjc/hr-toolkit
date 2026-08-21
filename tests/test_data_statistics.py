@@ -204,6 +204,69 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertIn("4.7上午调休3.5小时", hour_remark)
             hour_wb.close()
 
+    def test_paid_leave_remarks_use_specific_types_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_paid_leave_remark_file(input_dir / "考勤结果.xlsx")
+
+            remarks: dict[str, str] = {}
+            details: dict[str, list[list[object]]] = {}
+            for unit in ("day", "hour"):
+                result = generate_data_statistics_reports(
+                    input_dir, root / f"out_{unit}", remark_unit=unit
+                )
+                wb = load_workbook(result.output_file, data_only=False)
+                stats = wb["考勤统计"]
+                self.assertEqual(stats.max_column, 17)
+                self.assertEqual(stats.cell(3, 5).value, 0.5)
+                self.assertEqual(stats.cell(3, 6).value, 0.5)
+                # TASK-5 只改备注，带薪休假统计值继续保持原有年假口径。
+                self.assertEqual(stats.cell(3, 7).value, 1.5)
+                remarks[unit] = stats.cell(3, 17).value or ""
+                detail = wb["考勤异常明细"]
+                details[unit] = [
+                    [detail.cell(row, col).value for col in range(1, detail.max_column + 1)]
+                    for row in range(1, detail.max_row + 1)
+                ]
+                wb.close()
+
+            remark = remarks["day"]
+            self.assertNotIn("带薪休假", remark)
+            self.assertIn("4.1年假1天", remark)
+            self.assertIn("4.2年假下午0.5天", remark)
+            self.assertIn("4.3病假上午0.5天", remark)
+            self.assertIn(
+                "4.4婚假1天、产假1天、陪护假1天、丧假1天、探亲假1天、工伤1天",
+                remark,
+            )
+            self.assertIn("4.5事假上午0.5天", remark)
+            self.assertEqual(remarks["hour"], remark)
+            self.assertEqual(details["hour"], details["day"])
+
+    def test_summary_paid_leave_remarks_use_specific_types_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_summary_paid_leave_remark_file(
+                input_dir / "春苗2026年5月考勤.xlsx"
+            )
+
+            result = generate_data_statistics_reports(input_dir, root / "out")
+            wb = load_workbook(result.output_file, data_only=False)
+            stats = wb["考勤统计"]
+            self.assertEqual(stats.cell(3, 7).value, 0.5)
+            remark = stats.cell(3, stats.max_column).value or ""
+            self.assertNotIn("带薪休假", remark)
+            self.assertIn("病假上午0.5天", remark)
+            self.assertIn(
+                "婚假1天、产假1天、陪护假1天、丧假1天、探亲假1天、工伤1天、年假上午0.5天",
+                remark,
+            )
+            wb.close()
+
     def test_report_staff_list_counts_missing_people(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -878,6 +941,58 @@ def _write_rest_slot_file(path: Path) -> None:
             "王小丽", "运营部", datetime(2026, 4, day), 0, expected, actual,
             rest, 0, plan, punches, None,
         ])
+    wb.save(path)
+    wb.close()
+
+
+def _write_paid_leave_remark_file(path: Path) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "日结果"
+    headers = [
+        "姓名", "部门名称", "日期", "漏打卡次数", "应出勤小时数", "实出勤小时数",
+        "事假", "病假天数", "婚假", "产假天数", "陪护假", "丧假", "探亲假",
+        "工伤", "年假天数", "调休", "加班计调休时长", "计划上下班时间",
+        "当日刷卡记录", "缺卡记录",
+    ]
+    ws.append(headers)
+    rows = (
+        # 全天年假不加时段。
+        (1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 7, 0, None, None),
+        # 上午出勤，下午半天年假。
+        (2, 0, 0, 0, 0, 0, 0, 0, 0, 0.5, 7, 3.5, "08:30~17:30", "08:30,12:00"),
+        # 下午出勤，上午半天病假。
+        (3, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 7, 3.5, "08:30~17:30", "14:00,17:30"),
+        # 同一天存在多个具体带薪假别时逐项显示。
+        (4, 0, 0, 1, 1, 1, 1, 1, 1, 0, 7, 0, None, None),
+        # 信息不足的半天事假按甲方口径兜底为上午。
+        (5, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 7, 3.5, None, None),
+    )
+    for (
+        day, personal, sick, marriage, maternity, nursing, bereavement,
+        home_visit, injury, annual, expected, actual, plan, punches,
+    ) in rows:
+        ws.append([
+            "王小丽", "运营部", datetime(2026, 4, day), 0, expected, actual,
+            personal, sick, marriage, maternity, nursing, bereavement, home_visit,
+            injury, annual, 0, 0, plan, punches, None,
+        ])
+    wb.save(path)
+    wb.close()
+
+
+def _write_summary_paid_leave_remark_file(path: Path) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "考勤表"
+    ws.append([
+        "姓名", "应出勤天数", "事假\n(小时)", "病假\n(天)", "丧假\n(天)",
+        "年假\n(天)", "婚嫁（天）", "产假\n(天)", "陪护假", "探亲假", "工伤",
+        "带薪休假（天）", "备注",
+    ])
+    ws.append([
+        "张三", 20, 0, 0.5, 1, 0.5, 1, 1, 1, 1, 1, 6.5, None,
+    ])
     wb.save(path)
     wb.close()
 

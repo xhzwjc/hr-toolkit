@@ -53,6 +53,7 @@ class AttendanceSourceRow:
     personal_leave_days: float = 0.0
     sick_leave_days: float = 0.0
     paid_leave_days: float = 0.0
+    paid_leave_details: dict[str, float] = field(default_factory=dict)
     rest_days: float = 0.0
     overtime_days: float = 0.0
     # 与 rest_days/overtime_days 来自同一单元格，换算为小时后的数值，
@@ -538,7 +539,7 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
     # 列号外提:循环外一次性解析,循环内只做 grid.cell 访问
     cols = {name: headers.get(_normalize_header(name)) for name in (
         "姓名", "日期", "部门名称",
-        "事假", "病假天数", "年假天数",
+        "事假", "病假天数", "婚假", "产假天数", "陪护假", "丧假", "探亲假", "工伤", "年假天数",
         "调休", "加班计调休时长", "旷工天数",
         "迟到次数", "早退次数", "漏打卡次数",
         "迟到分钟数", "早退分钟数", "公出", "外出", "工作日出差",
@@ -551,6 +552,15 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
     personal_col = cols["事假"]
     sick_col = cols["病假天数"]
     paid_col = cols["年假天数"]
+    paid_leave_cols = (
+        ("婚假", cols["婚假"]),
+        ("产假", cols["产假天数"]),
+        ("陪护假", cols["陪护假"]),
+        ("丧假", cols["丧假"]),
+        ("探亲假", cols["探亲假"]),
+        ("工伤", cols["工伤"]),
+        ("年假", cols["年假天数"]),
+    )
     rest_col = cols["调休"]
     overtime_col = cols["加班计调休时长"]
     absence_col = cols["旷工天数"]
@@ -582,6 +592,14 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
                 return num
         return 0.0
 
+    def _paid_leave_details(row_index: int) -> dict[str, float]:
+        details: dict[str, float] = {}
+        for leave_name, col in paid_leave_cols:
+            leave_days = _to_days(_number(_val(row_index, col)))
+            if leave_days:
+                details[leave_name] = leave_days
+        return details
+
     rows: list[AttendanceSourceRow] = []
     for row_index in range(header_row + 1, (grid.max_row or 0) + 1):
         name = _cell_text(_val(row_index, name_col))
@@ -603,6 +621,7 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
                 personal_leave_days=_to_days(_number(_val(row_index, personal_col))),
                 sick_leave_days=_to_days(_number(_val(row_index, sick_col))),
                 paid_leave_days=_to_days(_number(_val(row_index, paid_col))),
+                paid_leave_details=_paid_leave_details(row_index),
                 rest_days=_to_days(rest_raw),
                 overtime_days=_to_days(overtime_raw),
                 rest_hours=_to_hours(rest_raw),
@@ -638,6 +657,15 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
     personal_cols = _cols("事假", "事假（天）", "事假\n(天)", "事假\n(小时)")
     sick_cols = _cols("病假天数", "病假", "病假（天）", "病假\n(天)")
     paid_cols = _cols("年假天数", "年假", "年假\n（天）", "年假\n(天)", "带薪休假", "带薪休假（天）")
+    paid_leave_cols = (
+        ("婚假", _cols("婚假", "婚假天数", "婚假（天）", "婚假\n(天)", "婚嫁（天）")),
+        ("产假", _cols("产假", "产假天数", "产假（天）", "产假\n(天)")),
+        ("陪护假", _cols("陪护假", "陪护假天数", "陪护假（天）", "陪护假\n(天)")),
+        ("丧假", _cols("丧假", "丧假天数", "丧假（天）", "丧假\n(天)")),
+        ("探亲假", _cols("探亲假", "探亲假天数", "探亲假（天）", "探亲假\n(天)")),
+        ("工伤", _cols("工伤", "工伤天数", "工伤（天）", "工伤\n(天)")),
+        ("年假", _cols("年假天数", "年假", "年假\n（天）", "年假\n(天)")),
+    )
     rest_cols = _cols("调休", "调休（小时）", "总调休", "总调休\n(小时)", "总调休（小时）")
     overtime_cols = _cols("加班计调休时长", "当月加班时长", "当月加班（小时）")
     absence_cols = _cols("旷工天数", "旷工", "旷工（天）")
@@ -663,6 +691,14 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
             if v is not None:
                 return v
         return None
+
+    def _paid_leave_details(row_index: int) -> dict[str, float]:
+        details: dict[str, float] = {}
+        for leave_name, leave_cols in paid_leave_cols:
+            leave_days = _to_days(_number(_first_not_none(row_index, leave_cols)))
+            if leave_days:
+                details[leave_name] = leave_days
+        return details
 
     rows: list[AttendanceSourceRow] = []
     # 从文件名或标题行推断月份
@@ -699,6 +735,7 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
                 personal_leave_days=_to_days(_number(_first_not_none(row_index, personal_cols))),
                 sick_leave_days=_to_days(_number(_first_not_none(row_index, sick_cols))),
                 paid_leave_days=_to_days(_number(_first_not_none(row_index, paid_cols))),
+                paid_leave_details=_paid_leave_details(row_index),
                 rest_days=_to_days(rest_raw),
                 overtime_days=_to_days(overtime_raw),
                 rest_hours=_to_hours(rest_raw),
@@ -1067,11 +1104,26 @@ def _attendance_row_remarks(
     if include_workday_business_trip and row.workday_business_trip_days:
         remarks.append(f"出差{_format_number(row.workday_business_trip_days)}天")
     if row.personal_leave_days:
-        remarks.append(f"事假{_format_number(row.personal_leave_days)}天")
+        slot = _detect_leave_slot(
+            row,
+            leave_days=row.personal_leave_days,
+            leave_hours=row.personal_leave_days * STANDARD_HOURS_PER_DAY,
+        )
+        remarks.append(f"事假{slot}{_format_number(row.personal_leave_days)}天")
     if row.sick_leave_days:
-        remarks.append(f"病假{_format_number(row.sick_leave_days)}天")
-    if row.paid_leave_days:
-        remarks.append(f"带薪休假{_format_number(row.paid_leave_days)}天")
+        slot = _detect_leave_slot(
+            row,
+            leave_days=row.sick_leave_days,
+            leave_hours=row.sick_leave_days * STANDARD_HOURS_PER_DAY,
+        )
+        remarks.append(f"病假{slot}{_format_number(row.sick_leave_days)}天")
+    for leave_name, leave_days in row.paid_leave_details.items():
+        slot = _detect_leave_slot(
+            row,
+            leave_days=leave_days,
+            leave_hours=leave_days * STANDARD_HOURS_PER_DAY,
+        )
+        remarks.append(f"{leave_name}{slot}{_format_number(leave_days)}天")
     if row.absence_days:
         remarks.append(f"旷工{_format_number(row.absence_days)}天")
     if row.late_minutes:
