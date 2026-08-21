@@ -497,7 +497,8 @@ class DataStatisticsTest(unittest.TestCase):
                 (False, True): (False, True, 9, "=SUM(J3:M3)-H3"),
                 (True, True): (True, True, 10, "=SUM(K3:N3)-H3"),
             }
-            unaffected_output: dict[tuple[bool, bool], tuple[str, list[list[object]]]] = {}
+            remarks: dict[tuple[bool, bool], str] = {}
+            detail_outputs: dict[tuple[bool, bool], list[list[object]]] = {}
             for (include_out, include_trip), (has_out, has_trip, trip_col, expected_formula) in cases.items():
                 with self.subTest(include_out=include_out, include_trip=include_trip):
                     result = generate_data_statistics_reports(
@@ -530,15 +531,34 @@ class DataStatisticsTest(unittest.TestCase):
                         [detail_ws.cell(row, col).value for col in range(1, detail_ws.max_column + 1)]
                         for row in range(1, detail_ws.max_row + 1)
                     ]
-                    unaffected_output[(include_out, include_trip)] = (
-                        ws.cell(3, headers.index("备注") + 1).value or "",
-                        detail_values,
-                    )
+                    remarks[(include_out, include_trip)] = ws.cell(
+                        3, headers.index("备注") + 1
+                    ).value or ""
+                    detail_outputs[(include_out, include_trip)] = detail_values
                     wb.close()
 
-            # 单独切换“出差”时，备注和异常明细不得发生任何变化。
-            self.assertEqual(unaffected_output[(False, False)], unaffected_output[(False, True)])
-            self.assertEqual(unaffected_output[(True, False)], unaffected_output[(True, True)])
+            self.assertNotIn("出差", remarks[(False, False)])
+            self.assertNotIn("出差", remarks[(True, False)])
+            self.assertIn("4.8出差1.5天、迟到15分钟", remarks[(False, True)])
+            self.assertIn("4.9出差0.25天、早退30分钟", remarks[(False, True)])
+            self.assertIn("4.8公出2天、出差1.5天、迟到15分钟", remarks[(True, True)])
+            # 本次只扩展备注；单独切换“出差”时，异常明细不得发生变化。
+            self.assertEqual(detail_outputs[(False, False)], detail_outputs[(False, True)])
+            self.assertEqual(detail_outputs[(True, False)], detail_outputs[(True, True)])
+
+            hour_result = generate_data_statistics_reports(
+                input_dir,
+                root / "out_hour",
+                include_workday_business_trip=True,
+                remark_unit="hour",
+            )
+            hour_wb = load_workbook(hour_result.output_file)
+            hour_ws = hour_wb["考勤统计"]
+            hour_headers = [hour_ws.cell(2, col).value for col in range(1, hour_ws.max_column + 1)]
+            hour_remark = hour_ws.cell(3, hour_headers.index("备注") + 1).value or ""
+            self.assertIn("出差1.5天", hour_remark)
+            self.assertIn("出差0.25天", hour_remark)
+            hour_wb.close()
 
     def test_business_trip_remark_includes_days(self) -> None:
         """include_business_trip=True 时，备注中包含「公出X天」."""

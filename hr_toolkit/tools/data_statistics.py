@@ -263,7 +263,10 @@ def generate_data_statistics_reports(
             raise ValueError("未识别到考勤结果、周报记录或月报记录，请确认文件格式。")
 
         attendance_summaries, attendance_exceptions = _summarize_attendance(
-            attendance_rows, remark_unit, include_business_trip
+            attendance_rows,
+            remark_unit,
+            include_business_trip,
+            include_workday_business_trip,
         )
         report_summaries, report_exceptions, report_warnings = _summarize_reports(
             weekly_records,
@@ -896,6 +899,7 @@ def _summarize_attendance(
     rows: list[AttendanceSourceRow],
     remark_unit: str = REMARK_UNIT_DAY,
     include_business_trip: bool = False,
+    include_workday_business_trip: bool = False,
 ) -> tuple[list[AttendancePersonSummary], list[AttendanceException]]:
     summaries: OrderedDict[tuple[str, str, str], AttendancePersonSummary] = OrderedDict()
     exceptions: list[AttendanceException] = []
@@ -915,7 +919,12 @@ def _summarize_attendance(
         summary.workday_business_trip_days += row.workday_business_trip_days
         summary.missing_punch_count += row.missing_punch_count
 
-        remarks = _attendance_row_remarks(row, remark_unit, include_business_trip)
+        remarks = _attendance_row_remarks(
+            row,
+            remark_unit,
+            include_business_trip,
+            include_workday_business_trip,
+        )
         if remarks:
             summary.remarks.append(f"{row.day.month}.{row.day.day}" + "、".join(remarks))
         for exception_type, value, remark in _attendance_row_exceptions(row, remark_unit, include_business_trip):
@@ -939,6 +948,7 @@ def _attendance_row_remarks(
     row: AttendanceSourceRow,
     remark_unit: str = REMARK_UNIT_DAY,
     include_business_trip: bool = False,
+    include_workday_business_trip: bool = False,
 ) -> list[str]:
     # 加班、调休、公出支持按小时/按天展示；其余备注内容不受单位影响
     by_hour = remark_unit == REMARK_UNIT_HOUR
@@ -958,6 +968,8 @@ def _attendance_row_remarks(
         # 公出按 8 小时/天换算成天展示
         out_days = row.out_minutes / 480
         remarks.append(f"公出{_format_number(out_days)}天")
+    if include_workday_business_trip and row.workday_business_trip_days:
+        remarks.append(f"出差{_format_number(row.workday_business_trip_days)}天")
     if row.personal_leave_days:
         remarks.append(f"事假{_format_number(row.personal_leave_days)}天")
     if row.sick_leave_days:
