@@ -47,6 +47,11 @@ def _build_data_statistics_parser(subparsers: argparse._SubParsersAction) -> Non
     p.add_argument("--month-end", help="可选月报统计结束日期（如 2026-06-30）；需与 --month-start 同时使用")
     p.add_argument("--remark-unit", choices=["day", "hour"], default="day", help="考勤统计表备注中加班/调休的单位：day 按天（默认），hour 按小时")
     p.add_argument("--include-business-trip", action="store_true", help="在考勤统计表中新增公出列；默认不勾选（不加该列）")
+    p.add_argument(
+        "--include-workday-business-trip",
+        action="store_true",
+        help="在考勤统计表中新增出差列；仅统计工作日出差，不含休息日出差天数",
+    )
     p.add_argument("--dry-run", action="store_true", help="只识别记录，不生成 Excel 文件")
     p.add_argument("--json", action="store_true", help="以 JSON 输出执行结果，便于 ScriptHub/Web 集成")
 
@@ -200,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
             month_end=args.month_end,
             remark_unit=args.remark_unit,
             include_business_trip=args.include_business_trip,
+            include_workday_business_trip=args.include_workday_business_trip,
             dry_run=args.dry_run,
         )
         payload = result.to_dict()

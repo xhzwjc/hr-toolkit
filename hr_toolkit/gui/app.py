@@ -403,6 +403,8 @@ class HRToolkitApp:
         self.stats_remark_unit = StringVar(value="day")
         # 是否在考勤统计表新增「公出」列：默认否（不加列）
         self.stats_include_business_trip = BooleanVar(value=False)
+        # 是否新增「出差」列：只统计源表中的工作日出差，不含休息日出差天数
+        self.stats_include_workday_business_trip = BooleanVar(value=False)
         # 正式结果只写入当前工作项目。这个变量保留给现有工具表单，实际运行时
         # 会被替换为本次批次的“处理结果”目录。
         self.output_dir = StringVar(value="")
@@ -1930,7 +1932,7 @@ class HRToolkitApp:
             button.pack(side=LEFT, padx=self._pad(0, 8))
 
         # ──────── 区块 2：输出选项 ────────
-        # 与上方日期范围独立分组；含「加班/调休备注单位」「公出列」两条并列选项
+        # 与上方日期范围独立分组；三个输出选项并列展示
         self.stats_options_label = ttk.Label(form, text="输出选项", style="App.TLabel")
         self.stats_options_frame = ttk.Frame(form, style="InputWrap.TFrame")
         stats_options_grid = ttk.Frame(self.stats_options_frame, style="InputWrap.TFrame")
@@ -1974,6 +1976,24 @@ class HRToolkitApp:
             )
         )
         self._stats_out_help.bind("<Leave>", lambda _e: self._hide_tooltip())
+
+        # 第 3 列：是否新增出差列（勾选）
+        trip_col = ttk.Frame(stats_options_grid, style="InputWrap.TFrame")
+        trip_col.pack(side=LEFT, fill="x", expand=True)
+        self.stats_workday_business_trip_check = ttk.Checkbutton(
+            trip_col, text="新增「出差」列",
+            variable=self.stats_include_workday_business_trip, style="App.TCheckbutton",
+        )
+        self.stats_workday_business_trip_check.pack(side=LEFT)
+        self._stats_trip_help = ttk.Label(trip_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
+        self._stats_trip_help.pack(side=LEFT, padx=self._pad(6, 0))
+        self._stats_trip_help.bind(
+            "<Enter>", lambda _e: self._show_tooltip(
+                self._stats_trip_help,
+                "仅统计源表中的工作日出差，不含休息日出差天数；与公出分别统计",
+            )
+        )
+        self._stats_trip_help.bind("<Leave>", lambda _e: self._hide_tooltip())
 
         def _refresh_picker_button_bar(button_bar) -> None:
             visible_buttons = [child for child in button_bar.winfo_children() if getattr(child, "_hr_picker_visible", False)]
@@ -8390,6 +8410,7 @@ class HRToolkitApp:
             month_end=None if month_range is None else month_range[1],
             remark_unit=self.stats_remark_unit.get() or "day",
             include_business_trip=bool(self.stats_include_business_trip.get()),
+            include_workday_business_trip=bool(self.stats_include_workday_business_trip.get()),
         )
 
     def _run_insurance_ledger(self) -> None:

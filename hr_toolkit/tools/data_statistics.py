@@ -65,6 +65,7 @@ class AttendanceSourceRow:
     late_minutes: float = 0.0
     early_minutes: float = 0.0
     out_minutes: float = 0.0
+    workday_business_trip_days: float = 0.0
     missing_punch_count: int = 0
     expected_hours: float = 0.0
     actual_hours: float = 0.0
@@ -91,6 +92,7 @@ class AttendancePersonSummary:
     late_minutes: float = 0.0
     early_minutes: float = 0.0
     out_minutes: float = 0.0
+    workday_business_trip_days: float = 0.0
     missing_punch_count: int = 0
     remarks: list[str] = field(default_factory=list)
 
@@ -216,6 +218,7 @@ def generate_data_statistics_reports(
     month_end: date | str | None = None,
     remark_unit: str = REMARK_UNIT_DAY,
     include_business_trip: bool = False,
+    include_workday_business_trip: bool = False,
     dry_run: bool = False,
 ) -> DataStatisticsResult:
     if remark_unit not in _VALID_REMARK_UNITS:
@@ -309,6 +312,7 @@ def generate_data_statistics_reports(
             week_range=week_range,
             month_range=month_range,
             include_business_trip=include_business_trip,
+            include_workday_business_trip=include_workday_business_trip,
         )
         result.output_file = output_file
         return result
@@ -534,7 +538,7 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
         "事假", "病假天数", "年假天数",
         "调休", "加班计调休时长", "旷工天数",
         "迟到次数", "早退次数", "漏打卡次数",
-        "迟到分钟数", "早退分钟数", "公出", "外出",
+        "迟到分钟数", "早退分钟数", "公出", "外出", "工作日出差",
         "应出勤小时数", "实出勤小时数",
         "计划上下班时间", "当日刷卡记录", "缺卡记录",
     )}
@@ -553,6 +557,7 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
     late_minutes_col = cols["迟到分钟数"]
     early_minutes_col = cols["早退分钟数"]
     out_col_candidates = [cols[name] for name in ("公出", "外出") if cols.get(name)]
+    workday_business_trip_col = cols["工作日出差"]
     expected_col = cols["应出勤小时数"]
     actual_col = cols["实出勤小时数"]
     plan_col = cols["计划上下班时间"]
@@ -605,6 +610,7 @@ def _read_attendance_sheet(grid: SheetGrid, headers: dict[str, int], header_row:
                 late_minutes=_number(_val(row_index, late_minutes_col)),
                 early_minutes=_number(_val(row_index, early_minutes_col)),
                 out_minutes=_first_out_value(row_index, out_col_candidates) * 480,
+                workday_business_trip_days=_number(_val(row_index, workday_business_trip_col)),
                 missing_punch_count=int(_number(_val(row_index, missing_col))),
                 expected_hours=_number(_val(row_index, expected_col)),
                 actual_hours=_number(_val(row_index, actual_col)),
@@ -637,6 +643,7 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
     late_minutes_cols = _cols("迟到分钟数", "迟到（分钟）", "迟到时长", "迟到分钟")
     early_minutes_cols = _cols("早退分钟数", "早退（分钟）", "早退时长", "早退分钟")
     out_cols = _cols("公出", "公出（小时）", "公出（分钟）", "公出时长", "外出", "外出（小时）", "外出（分钟）", "外出时长")
+    workday_business_trip_cols = _cols("工作日出差")
     missing_cols = _cols("漏打卡次数", "漏打卡", "漏打卡（次）")
     expected_cols = _cols("应出勤小时数", "应出勤天数")
     actual_cols = _cols("实出勤小时数", "实际出勤天数")
@@ -699,6 +706,9 @@ def _read_summary_attendance_sheet(grid: SheetGrid, headers: dict[str, int], hea
                 late_minutes=_number(_first_not_none(row_index, late_minutes_cols)),
                 early_minutes=_number(_first_not_none(row_index, early_minutes_cols)),
                 out_minutes=_number(_first_not_none(row_index, out_cols)) * 480,
+                workday_business_trip_days=_number(
+                    _first_not_none(row_index, workday_business_trip_cols)
+                ),
                 missing_punch_count=int(_number(_first_not_none(row_index, missing_cols))),
                 expected_hours=_number(_first_not_none(row_index, expected_cols)),
                 actual_hours=_number(_first_not_none(row_index, actual_cols)),
@@ -902,6 +912,7 @@ def _summarize_attendance(
         summary.late_minutes += row.late_minutes
         summary.early_minutes += row.early_minutes
         summary.out_minutes += row.out_minutes
+        summary.workday_business_trip_days += row.workday_business_trip_days
         summary.missing_punch_count += row.missing_punch_count
 
         remarks = _attendance_row_remarks(row, remark_unit, include_business_trip)
@@ -1359,6 +1370,7 @@ def _write_output_workbook(
     week_range: tuple[date, date] | None = None,
     month_range: tuple[date, date] | None = None,
     include_business_trip: bool = False,
+    include_workday_business_trip: bool = False,
 ) -> None:
     template_path = _copy_template(temp_dir)
     workbook = load_workbook(template_path)
@@ -1367,7 +1379,12 @@ def _write_output_workbook(
         attendance_ws.title = "考勤统计"
         report_ws = workbook["周月报模板"]
         report_ws.title = "周月报统计"
-        _write_attendance_sheet(attendance_ws, attendance_summaries, include_business_trip=include_business_trip)
+        _write_attendance_sheet(
+            attendance_ws,
+            attendance_summaries,
+            include_business_trip=include_business_trip,
+            include_workday_business_trip=include_workday_business_trip,
+        )
         _write_report_sheet(report_ws, report_summaries, weekly_records, monthly_records, week_range, month_range)
         _write_attendance_detail_sheet(workbook, attendance_exceptions)
         _write_report_detail_sheet(workbook, report_exceptions)
@@ -1387,6 +1404,7 @@ def _write_attendance_sheet(
     ws: Worksheet,
     summaries: list[AttendancePersonSummary],
     include_business_trip: bool = False,
+    include_workday_business_trip: bool = False,
 ) -> None:
     max_month = max([4] + [month for summary in summaries for month in summary.month_overtime_days])
     if max_month > 4:
@@ -1402,16 +1420,20 @@ def _write_attendance_sheet(
     template_snapshot = snapshot_row(ws, 3, min(ws.max_column, max_col))
     if len(summaries) > 1:
         insert_rows(ws, 4, len(summaries) - 1)
-    # 公出列：默认不勾选 → 不插入；勾选后插入在"调休"（col 8）与"1月份加班"之间（即 col 9）
+    # 公出、出差各自独立控制；都勾选时，出差紧跟在公出后面。
     out_col_index: int | None = None
     if include_business_trip:
         insert_cols(ws, 9, 1)
         ws.cell(2, 9).value = "公出（天）"
         out_col_index = 9
-        # 公式列与列头整体右移 1
         stat_start_col += 1
-    # 月份加班从"调休"+1 或"公出"+1 开始
-    first_overtime_col = 9 if out_col_index is None else out_col_index + 1
+    workday_business_trip_col_index: int | None = None
+    if include_workday_business_trip:
+        workday_business_trip_col_index = 10 if out_col_index is not None else 9
+        insert_cols(ws, workday_business_trip_col_index, 1)
+        ws.cell(2, workday_business_trip_col_index).value = "出差"
+        stat_start_col += 1
+    first_overtime_col = 9 + int(out_col_index is not None) + int(workday_business_trip_col_index is not None)
     for offset, summary in enumerate(summaries):
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
@@ -1427,6 +1449,10 @@ def _write_attendance_sheet(
         ws.cell(row_index, 8).value = _zero_blank(summary.rest_days)
         if out_col_index is not None:
             ws.cell(row_index, out_col_index).value = _zero_blank(summary.out_minutes / 480)
+        if workday_business_trip_col_index is not None:
+            ws.cell(row_index, workday_business_trip_col_index).value = _zero_blank(
+                summary.workday_business_trip_days
+            )
         for month in range(1, max_month + 1):
             ws.cell(row_index, first_overtime_col + month - 1).value = _zero_blank(summary.month_overtime_days.get(month, 0.0))
         ws.cell(row_index, stat_start_col).value = _zero_blank(summary.absence_days)

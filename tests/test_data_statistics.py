@@ -483,6 +483,63 @@ class DataStatisticsTest(unittest.TestCase):
             off_wb.close()
             on_wb.close()
 
+    def test_workday_business_trip_toggle_is_independent_from_public_outing(self) -> None:
+        """公出和出差可独立勾选，出差只累计工作日出差。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_attendance_file_with_minutes(input_dir / "考勤结果.xlsx")
+
+            cases = {
+                (False, False): (False, False, None, "=SUM(I3:L3)-H3"),
+                (True, False): (True, False, None, "=SUM(J3:M3)-H3"),
+                (False, True): (False, True, 9, "=SUM(J3:M3)-H3"),
+                (True, True): (True, True, 10, "=SUM(K3:N3)-H3"),
+            }
+            unaffected_output: dict[tuple[bool, bool], tuple[str, list[list[object]]]] = {}
+            for (include_out, include_trip), (has_out, has_trip, trip_col, expected_formula) in cases.items():
+                with self.subTest(include_out=include_out, include_trip=include_trip):
+                    result = generate_data_statistics_reports(
+                        input_dir,
+                        root / f"out_{int(include_out)}_{int(include_trip)}",
+                        include_business_trip=include_out,
+                        include_workday_business_trip=include_trip,
+                    )
+                    wb = load_workbook(result.output_file)
+                    ws = wb["考勤统计"]
+                    headers = [ws.cell(2, col).value for col in range(1, ws.max_column + 1)]
+                    self.assertEqual("公出（天）" in headers, has_out)
+                    self.assertEqual("出差" in headers, has_trip)
+                    if has_out:
+                        out_col = headers.index("公出（天）") + 1
+                        self.assertEqual(out_col, 9)
+                        self.assertAlmostEqual(ws.cell(3, out_col).value or 0, 2.0)
+                    if has_trip:
+                        self.assertEqual(headers.index("出差") + 1, trip_col)
+                        # 工作日出差共 1.75 天；休息日出差列中的 187 天必须排除。
+                        self.assertAlmostEqual(ws.cell(3, trip_col).value or 0, 1.75)
+                        self.assertEqual(ws.cell(2, trip_col).style_id, ws.cell(2, trip_col + 1).style_id)
+                        late_minutes_col = headers.index("迟到/早退（分钟）") + 1
+                        self.assertEqual(ws.cell(3, trip_col).style_id, ws.cell(3, late_minutes_col).style_id)
+                        self.assertEqual(ws.cell(3, trip_col).number_format, "0.##")
+                    balance_col = headers.index("累计剩余加班天数") + 1
+                    self.assertEqual(ws.cell(3, balance_col).value, expected_formula)
+                    detail_ws = wb["考勤异常明细"]
+                    detail_values = [
+                        [detail_ws.cell(row, col).value for col in range(1, detail_ws.max_column + 1)]
+                        for row in range(1, detail_ws.max_row + 1)
+                    ]
+                    unaffected_output[(include_out, include_trip)] = (
+                        ws.cell(3, headers.index("备注") + 1).value or "",
+                        detail_values,
+                    )
+                    wb.close()
+
+            # 单独切换“出差”时，备注和异常明细不得发生任何变化。
+            self.assertEqual(unaffected_output[(False, False)], unaffected_output[(False, True)])
+            self.assertEqual(unaffected_output[(True, False)], unaffected_output[(True, True)])
+
     def test_business_trip_remark_includes_days(self) -> None:
         """include_business_trip=True 时，备注中包含「公出X天」."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -717,9 +774,9 @@ def _write_attendance_file_with_minutes(path: Path) -> None:
         ws.cell(1, col).value = header
     rows = [
         # 迟到 15 分钟 + 公出 2 小时
-        ["赵小亮", "市场部", "否", datetime(2026, 4, 8), "否", 0, 8, 8, 1, 15, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "08:30,12:00|14:00,17:30", "08:45,17:30", None],
+        ["赵小亮", "市场部", "否", datetime(2026, 4, 8), "否", 0, 8, 8, 1, 15, 0, 0, 0, 0, 2, 1.5, 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "08:30,12:00|14:00,17:30", "08:45,17:30", None],
         # 早退 30 分钟
-        ["赵小亮", "市场部", "否", datetime(2026, 4, 9), "否", 0, 8, 8, 0, 0, 1, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "08:30,12:00|14:00,17:30", "08:30,17:00", None],
+        ["赵小亮", "市场部", "否", datetime(2026, 4, 9), "否", 0, 8, 8, 0, 0, 1, 30, 0, 0, 0, 0.25, 88, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "08:30,12:00|14:00,17:30", "08:30,17:00", None],
     ]
     for row_index, row in enumerate(rows, start=2):
         for col_index, value in enumerate(row, start=1):
