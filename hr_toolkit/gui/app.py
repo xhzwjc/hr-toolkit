@@ -756,8 +756,19 @@ class HRToolkitApp:
         except Exception:
             pass
 
+    def _create_brand_mark_image(self, target_size: int) -> tuple[PhotoImage, int]:
+        """按当前 DPI 选取最接近的 F1 原生位图，并持有 Tk 图片引用。"""
+        from hr_toolkit._icon_data import BRAND_MARK_PNGS_BASE64
+
+        selected_size = min(BRAND_MARK_PNGS_BASE64, key=lambda size: (abs(size - target_size), size))
+        image = PhotoImage(master=self.root, data=BRAND_MARK_PNGS_BASE64[selected_size])
+        if not hasattr(self, "_brand_mark_images"):
+            self._brand_mark_images = []
+        self._brand_mark_images.append(image)
+        return image, selected_size
+
     def _setup_startup_loading_screen(self) -> None:
-        """Create the Codex-style startup loading overlay that covers initial widget creation."""
+        """Create the branded startup loading overlay that covers initial widget creation."""
         self._loading_overlay = Frame(self.root, bg=COLOR_BG)
         self._loading_overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
         try:
@@ -769,6 +780,11 @@ class HRToolkitApp:
         center_container.place(relx=0.5, rely=0.5, anchor="center")
 
         icon_size = self._px(64)
+        brand_image = None
+        try:
+            brand_image, icon_size = self._create_brand_mark_image(icon_size)
+        except Exception:
+            pass
         canvas_padding = self._px(12)
         canvas_dim = icon_size + canvas_padding * 2
 
@@ -782,13 +798,16 @@ class HRToolkitApp:
         )
         icon_canvas.pack(side=TOP, pady=(0, self._px(14)))
 
-        _paint_codex_badge_icon(
-            icon_canvas,
-            canvas_padding,
-            canvas_padding,
-            icon_size,
-            scale=self.ui_scale,
-        )
+        if brand_image is not None:
+            icon_canvas.create_image(canvas_dim / 2, canvas_dim / 2, image=brand_image)
+        else:
+            _paint_codex_badge_icon(
+                icon_canvas,
+                canvas_padding,
+                canvas_padding,
+                icon_size,
+                scale=self.ui_scale,
+            )
 
         family = _get_default_font_family(self.root)
         title_font = (family, _font_size(12), "bold")
@@ -1391,10 +1410,41 @@ class HRToolkitApp:
 
         brand_row = ttk.Frame(left_content, style="Sidebar.TFrame")
         brand_row.pack(fill="x", padx=self._pad(6), pady=self._pad(2, 16))
-        brand_mark = Canvas(brand_row, width=self._px(26), height=self._px(26), bg=COLOR_SIDEBAR, highlightthickness=0, bd=0)
+        brand_target_size = self._px(26)
+        brand_image = None
+        try:
+            brand_image, brand_size = self._create_brand_mark_image(brand_target_size)
+        except Exception:
+            brand_size = brand_target_size
+        brand_mark = Canvas(
+            brand_row,
+            width=brand_size,
+            height=brand_size,
+            bg=COLOR_SIDEBAR,
+            highlightthickness=0,
+            bd=0,
+        )
         brand_mark.pack(side=LEFT)
-        self._draw_round_rect(brand_mark, self._pxf(0.5), self._pxf(0.5), self._pxf(25.5), self._pxf(25.5), self._pxf(7), fill=COLOR_PRIMARY, outline="")
-        brand_mark.create_text(self._pxf(13), self._pxf(13), text="HR", fill="#ffffff", font=(self.base_font[0], _font_size(8), "bold"))
+        if brand_image is not None:
+            brand_mark.create_image(brand_size / 2, brand_size / 2, image=brand_image)
+        else:
+            self._draw_round_rect(
+                brand_mark,
+                0.5,
+                0.5,
+                brand_size - 0.5,
+                brand_size - 0.5,
+                max(1.0, brand_size * 7 / 26),
+                fill=COLOR_PRIMARY,
+                outline="",
+            )
+            brand_mark.create_text(
+                brand_size / 2,
+                brand_size / 2,
+                text="HR",
+                fill="#ffffff",
+                font=(self.base_font[0], _font_size(8), "bold"),
+            )
         brand_text = ttk.Frame(brand_row, style="Sidebar.TFrame")
         brand_text.pack(side=LEFT, fill="x", expand=True, padx=self._pad(9, 0))
         ttk.Label(brand_text, text=APP_DISPLAY_NAME, style="SidebarTitle.TLabel").pack(anchor="w")

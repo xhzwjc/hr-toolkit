@@ -1,8 +1,7 @@
-"""生成应用图标资源。
+"""从正式品牌源图生成应用图标资源。
 
-图标是品牌绿圆角方块 + 白色 "HR" 字标，与主界面侧栏的品牌标识一致。
-仅用标准库实现：带符号距离场（SDF）抗锯齿光栅化 + 手写 PNG/ICO 编码，
-不引入 Pillow 等图像依赖。
+品牌源图是 F1 暖陶土色抽象标识。脚本只使用标准库解析 8 位 RGBA PNG，
+再以预乘 Alpha 超采样缩放生成各平台尺寸，不依赖 Pillow 等图像库。
 
 输出：
 - hr_toolkit/_icon_data.py        运行时窗口图标（base64 PNG，Tk iconphoto 使用）
@@ -15,159 +14,246 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import math
 import struct
 import sys
 import zlib
+from functools import lru_cache
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ICON_FILE = REPO_ROOT / "packaging" / "icons" / "HRToolkit-source.png"
 ICON_DATA_FILE = REPO_ROOT / "hr_toolkit" / "_icon_data.py"
 ICO_FILE = REPO_ROOT / "packaging" / "windows" / "HRToolkit.ico"
 PREVIEW_FILE = REPO_ROOT / "release" / "app_icon_preview.png"
+SOURCE_ICON_SHA256 = "f567181bc26f828657cc0dc53f4c226caac1461f33e5a8b6303e823519324c9e"
 
 # 从大到小排列：Tk 在 macOS 上只取第一张作为 Dock 图标，
 # 必须让最大尺寸排在最前，否则会拿小图放大导致模糊
 RUNTIME_PNG_SIZES = (512, 256, 128, 64, 32, 16)
+# 侧栏品牌标识与启动页会按 Windows DPI 选择最接近的原生像素尺寸，
+# 避免 Tk 对位图做整数倍缩放而产生模糊或裁切。
+BRAND_MARK_PNG_SIZES = (26, 32, 39, 46, 52, 64, 78, 96, 112, 128, 144, 160, 192)
 ICO_BMP_SIZES = (16, 24, 32, 48, 64)
 ICO_PNG_SIZES = (256,)
-
-# 品牌绿渐变（上浅下深，中值即主界面的 COLOR_PRIMARY #007f5f）
-GRADIENT_TOP = (0, 148, 111)
-GRADIENT_BOTTOM = (0, 102, 76)
-LETTER_COLOR = (255, 255, 255)
-
-# 以下坐标均在 64x64 设计网格中
-CORNER_RADIUS = 14.0
-
-# 字标几何参数。小尺寸（任务栏 16px）单独做视觉修正：
-# 笔画更粗、字距更大，否则 H 和 R 会糊成一团。
-_GLYPHS_DEFAULT = {
-    "stroke": 3.3,  # 笔画半宽，总宽约 6.6
-    "h_left_x": 16.0,
-    "h_right_x": 27.5,
-    "h_top_y": 19.5,
-    "h_bottom_y": 44.5,
-    "h_bar_y": 31.5,
-    "r_stem_x": 38.5,
-    "r_bowl_radius": 6.2,
-    "r_leg_start": (40.5, 33.0),
-    "r_leg_end": (47.5, 44.5),
-}
-_GLYPHS_SMALL = {
-    "stroke": 3.6,
-    "h_left_x": 13.5,
-    "h_right_x": 25.0,
-    "h_top_y": 18.0,
-    "h_bottom_y": 46.0,
-    "h_bar_y": 32.0,
-    "r_stem_x": 41.0,
-    "r_bowl_radius": 7.6,
-    "r_leg_start": (43.5, 35.0),
-    "r_leg_end": (50.0, 46.0),
-}
-_SMALL_GLYPH_MAX_SIZE = 20
+MIN_SOURCE_COMPONENT_PIXELS = 1_000
 
 
-def _rounded_box_sdf(x: float, y: float, cx: float, cy: float, half_w: float, half_h: float, radius: float) -> float:
-    qx = abs(x - cx) - (half_w - radius)
-    qy = abs(y - cy) - (half_h - radius)
-    outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
-    inside = min(max(qx, qy), 0.0)
-    return outside + inside - radius
+def _paeth_predictor(left: int, above: int, upper_left: int) -> int:
+    estimate = left + above - upper_left
+    distance_left = abs(estimate - left)
+    distance_above = abs(estimate - above)
+    distance_upper_left = abs(estimate - upper_left)
+    if distance_left <= distance_above and distance_left <= distance_upper_left:
+        return left
+    if distance_above <= distance_upper_left:
+        return above
+    return upper_left
 
 
-def _capsule_sdf(x: float, y: float, ax: float, ay: float, bx: float, by: float, radius: float) -> float:
-    px, py = x - ax, y - ay
-    dx, dy = bx - ax, by - ay
-    t = max(0.0, min(1.0, (px * dx + py * dy) / (dx * dx + dy * dy)))
-    return math.hypot(px - dx * t, py - dy * t) - radius
+def _remove_isolated_fragments(
+    rows: tuple[bytes, ...],
+    width: int,
+    height: int,
+) -> tuple[bytes, ...]:
+    """去掉生成图周围与主体不相连的零散像素，不改变主体轮廓。"""
+    pending = bytearray(width * height)
+    for y, row in enumerate(rows):
+        row_offset = y * width
+        for x in range(width):
+            if row[x * 4 + 3] > 0:
+                pending[row_offset + x] = 1
 
-
-def _half_ring_sdf(x: float, y: float, cx: float, cy: float, radius: float, half_width: float) -> float:
-    """右半圆环（带圆头端点），用于 R 的弧。"""
-    if x >= cx:
-        return abs(math.hypot(x - cx, y - cy) - radius) - half_width
-    top = math.hypot(x - cx, y - (cy - radius))
-    bottom = math.hypot(x - cx, y - (cy + radius))
-    return min(top, bottom) - half_width
-
-
-def _letters_sdf(x: float, y: float, glyphs: dict) -> float:
-    stroke = glyphs["stroke"]
-    top, bottom = glyphs["h_top_y"], glyphs["h_bottom_y"]
-    h_left = _capsule_sdf(x, y, glyphs["h_left_x"], top, glyphs["h_left_x"], bottom, stroke)
-    h_right = _capsule_sdf(x, y, glyphs["h_right_x"], top, glyphs["h_right_x"], bottom, stroke)
-    h_bar = _capsule_sdf(x, y, glyphs["h_left_x"], glyphs["h_bar_y"], glyphs["h_right_x"], glyphs["h_bar_y"], stroke)
-    r_stem = _capsule_sdf(x, y, glyphs["r_stem_x"], top, glyphs["r_stem_x"], bottom, stroke)
-    r_bowl = _half_ring_sdf(x, y, glyphs["r_stem_x"], top + glyphs["r_bowl_radius"], glyphs["r_bowl_radius"], stroke)
-    r_leg = _capsule_sdf(x, y, *glyphs["r_leg_start"], *glyphs["r_leg_end"], stroke)
-    return min(h_left, h_right, h_bar, r_stem, r_bowl, r_leg)
-
-
-def _coverage(distance: float, pixel_size: float) -> float:
-    return max(0.0, min(1.0, 0.5 - distance / pixel_size))
-
-
-def render_icon(size: int) -> list[list[tuple[int, int, int, int]]]:
-    """在 64 单位设计网格中按 SDF 采样，返回 RGBA 像素行。"""
-    glyphs = _GLYPHS_SMALL if size <= _SMALL_GLYPH_MAX_SIZE else _GLYPHS_DEFAULT
-    # 小尺寸靠超采样保细节；大尺寸 SDF 自带抗锯齿已足够，降低采样省时间
-    supersample = 3 if size <= 64 else 1
-    scale = 64.0 / size
-    sample_step = scale / supersample
-    rows: list[list[tuple[int, int, int, int]]] = []
-    for py in range(size):
-        row: list[tuple[int, int, int, int]] = []
-        for px in range(size):
-            acc_r = acc_g = acc_b = acc_a = 0.0
-            for sy in range(supersample):
-                for sx in range(supersample):
-                    x = (px + (sx + 0.5) / supersample) * scale
-                    y = (py + (sy + 0.5) / supersample) * scale
-                    bg_alpha = _coverage(_rounded_box_sdf(x, y, 32.0, 32.0, 32.0, 32.0, CORNER_RADIUS), sample_step)
-                    if bg_alpha <= 0.0:
-                        continue
-                    t = y / 64.0
-                    r = GRADIENT_TOP[0] + (GRADIENT_BOTTOM[0] - GRADIENT_TOP[0]) * t
-                    g = GRADIENT_TOP[1] + (GRADIENT_BOTTOM[1] - GRADIENT_TOP[1]) * t
-                    b = GRADIENT_TOP[2] + (GRADIENT_BOTTOM[2] - GRADIENT_TOP[2]) * t
-                    letter_alpha = _coverage(_letters_sdf(x, y, glyphs), sample_step)
-                    if letter_alpha > 0.0:
-                        r += (LETTER_COLOR[0] - r) * letter_alpha
-                        g += (LETTER_COLOR[1] - g) * letter_alpha
-                        b += (LETTER_COLOR[2] - b) * letter_alpha
-                    acc_r += r * bg_alpha
-                    acc_g += g * bg_alpha
-                    acc_b += b * bg_alpha
-                    acc_a += bg_alpha
-            samples = supersample * supersample
-            alpha = acc_a / samples
-            if alpha <= 0.0:
-                row.append((0, 0, 0, 0))
-                continue
-            # acc_* 为 alpha 加权累计值，除以 acc_a 还原直通（非预乘）颜色
-            row.append(
-                (
-                    int(round(acc_r / acc_a)),
-                    int(round(acc_g / acc_a)),
-                    int(round(acc_b / acc_a)),
-                    int(round(alpha * 255)),
-                )
+    keep = bytearray(width * height)
+    for start, state in enumerate(pending):
+        if state != 1:
+            continue
+        pending[start] = 2
+        component = [start]
+        cursor = 0
+        while cursor < len(component):
+            position = component[cursor]
+            cursor += 1
+            y, x = divmod(position, width)
+            neighbours = (
+                position - 1 if x > 0 else -1,
+                position + 1 if x + 1 < width else -1,
+                position - width if y > 0 else -1,
+                position + width if y + 1 < height else -1,
             )
-        rows.append(row)
+            for neighbour in neighbours:
+                if neighbour >= 0 and pending[neighbour] == 1:
+                    pending[neighbour] = 2
+                    component.append(neighbour)
+        if len(component) >= MIN_SOURCE_COMPONENT_PIXELS:
+            for position in component:
+                keep[position] = 1
+
+    cleaned_rows: list[bytes] = []
+    for y, row in enumerate(rows):
+        cleaned = bytearray(row)
+        row_offset = y * width
+        for x in range(width):
+            if not keep[row_offset + x]:
+                pixel_offset = x * 4
+                cleaned[pixel_offset : pixel_offset + 4] = b"\x00\x00\x00\x00"
+        cleaned_rows.append(bytes(cleaned))
+    return tuple(cleaned_rows)
+
+
+@lru_cache(maxsize=1)
+def _load_source_icon() -> tuple[int, int, tuple[bytes, ...]]:
+    """读取固定的 8 位 RGBA、非隔行 PNG 品牌源图。"""
+    data = SOURCE_ICON_FILE.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != SOURCE_ICON_SHA256:
+        raise ValueError(f"品牌源图校验失败：{SOURCE_ICON_FILE}")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"品牌源图不是有效 PNG：{SOURCE_ICON_FILE}")
+
+    width = height = 0
+    idat_parts: list[bytes] = []
+    offset = 8
+    while offset + 12 <= len(data):
+        payload_size = struct.unpack(">I", data[offset : offset + 4])[0]
+        chunk_type = data[offset + 4 : offset + 8]
+        payload_start = offset + 8
+        payload_end = payload_start + payload_size
+        crc_end = payload_end + 4
+        if crc_end > len(data):
+            raise ValueError("品牌源图 PNG 数据不完整")
+        payload = data[payload_start:payload_end]
+        expected_crc = struct.unpack(">I", data[payload_end:crc_end])[0]
+        if zlib.crc32(chunk_type + payload) & 0xFFFFFFFF != expected_crc:
+            raise ValueError("品牌源图 PNG 分块校验失败")
+        if chunk_type == b"IHDR":
+            if len(payload) != 13:
+                raise ValueError("品牌源图 PNG 头长度异常")
+            width, height, bit_depth, color_type, compression, filter_method, interlace = struct.unpack(
+                ">IIBBBBB", payload
+            )
+            if (bit_depth, color_type, compression, filter_method, interlace) != (8, 6, 0, 0, 0):
+                raise ValueError("品牌源图必须是 8 位 RGBA 非隔行 PNG")
+        elif chunk_type == b"IDAT":
+            idat_parts.append(payload)
+        elif chunk_type == b"IEND":
+            break
+        offset = crc_end
+
+    if width <= 0 or height <= 0 or not idat_parts:
+        raise ValueError("品牌源图 PNG 缺少尺寸或像素数据")
+    inflated = zlib.decompress(b"".join(idat_parts))
+    row_width = width * 4
+    expected_size = (row_width + 1) * height
+    if len(inflated) != expected_size:
+        raise ValueError("品牌源图 PNG 解压尺寸异常")
+
+    rows: list[bytes] = []
+    previous = bytes(row_width)
+    cursor = 0
+    for _row_index in range(height):
+        filter_type = inflated[cursor]
+        cursor += 1
+        encoded_row = inflated[cursor : cursor + row_width]
+        cursor += row_width
+        decoded = bytearray(row_width)
+        for index, value in enumerate(encoded_row):
+            left = decoded[index - 4] if index >= 4 else 0
+            above = previous[index]
+            upper_left = previous[index - 4] if index >= 4 else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            elif filter_type == 4:
+                predictor = _paeth_predictor(left, above, upper_left)
+            else:
+                raise ValueError(f"品牌源图 PNG 使用了未知过滤器：{filter_type}")
+            decoded[index] = (value + predictor) & 0xFF
+        previous = bytes(decoded)
+        rows.append(previous)
+    return width, height, _remove_isolated_fragments(tuple(rows), width, height)
+
+
+def render_icon(size: int) -> list[bytes]:
+    """以预乘 Alpha 超采样缩放 F1 源图，返回 RGBA 像素行。"""
+    if size <= 0:
+        raise ValueError("图标尺寸必须大于 0")
+    source_width, source_height, source_rows = _load_source_icon()
+    scale_x = source_width / size
+    scale_y = source_height / size
+    # 输出越小，单个像素覆盖的源图区域越大；按面积比例增加采样，
+    # 但封顶 6×6，兼顾 16px 边缘质量和打包速度。
+    sample_grid = max(1, min(6, int(math.ceil(math.sqrt(max(scale_x, scale_y))))))
+    sample_count = sample_grid * sample_grid
+    rows: list[bytes] = []
+
+    for output_y in range(size):
+        output_row = bytearray(size * 4)
+        for output_x in range(size):
+            accumulated_r = accumulated_g = accumulated_b = accumulated_alpha = 0.0
+            for sample_y in range(sample_grid):
+                source_y = (output_y + (sample_y + 0.5) / sample_grid) * scale_y - 0.5
+                source_y = max(0.0, min(source_y, source_height - 1.0))
+                y0 = int(source_y)
+                y1 = min(y0 + 1, source_height - 1)
+                fy = source_y - y0
+                wy0, wy1 = 1.0 - fy, fy
+                row0, row1 = source_rows[y0], source_rows[y1]
+
+                for sample_x in range(sample_grid):
+                    source_x = (output_x + (sample_x + 0.5) / sample_grid) * scale_x - 0.5
+                    source_x = max(0.0, min(source_x, source_width - 1.0))
+                    x0 = int(source_x)
+                    x1 = min(x0 + 1, source_width - 1)
+                    fx = source_x - x0
+                    wx0, wx1 = 1.0 - fx, fx
+                    index0, index1 = x0 * 4, x1 * 4
+
+                    weights = (wy0 * wx0, wy0 * wx1, wy1 * wx0, wy1 * wx1)
+                    pixels = (
+                        (row0, index0),
+                        (row0, index1),
+                        (row1, index0),
+                        (row1, index1),
+                    )
+                    for weight, (pixel_row, pixel_index) in zip(weights, pixels):
+                        alpha = pixel_row[pixel_index + 3]
+                        accumulated_alpha += alpha * weight
+                        accumulated_r += pixel_row[pixel_index] * alpha * weight
+                        accumulated_g += pixel_row[pixel_index + 1] * alpha * weight
+                        accumulated_b += pixel_row[pixel_index + 2] * alpha * weight
+
+            output_index = output_x * 4
+            if accumulated_alpha <= 0.0:
+                continue
+            output_row[output_index] = max(0, min(255, int(round(accumulated_r / accumulated_alpha))))
+            output_row[output_index + 1] = max(0, min(255, int(round(accumulated_g / accumulated_alpha))))
+            output_row[output_index + 2] = max(0, min(255, int(round(accumulated_b / accumulated_alpha))))
+            output_row[output_index + 3] = max(
+                0,
+                min(255, int(round(accumulated_alpha / sample_count))),
+            )
+        rows.append(bytes(output_row))
     return rows
 
 
-def encode_png(rows: list[list[tuple[int, int, int, int]]]) -> bytes:
+def encode_png(rows: list[bytes]) -> bytes:
     size = len(rows)
+    if size <= 0 or any(len(row) != size * 4 for row in rows):
+        raise ValueError("RGBA 像素行必须组成正方形图标")
 
     def chunk(tag: bytes, payload: bytes) -> bytes:
         data = tag + payload
         return struct.pack(">I", len(payload)) + data + struct.pack(">I", zlib.crc32(data))
 
-    raw = b"".join(b"\x00" + bytes(channel for pixel in row for channel in pixel) for row in rows)
+    raw = b"".join(b"\x00" + row for row in rows)
     return b"".join(
         (
             b"\x89PNG\r\n\x1a\n",
@@ -205,17 +291,17 @@ def encode_ico(bmp_sizes: tuple[int, ...], png_sizes: tuple[int, ...]) -> bytes:
     return header + directory + b"".join(payload for _size, payload in entries)
 
 
-def _encode_ico_bmp(rows: list[list[tuple[int, int, int, int]]]) -> bytes:
+def _encode_ico_bmp(rows: list[bytes]) -> bytes:
     """32 位 BGRA DIB（老版本 Windows 对小尺寸 PNG 条目兼容性差）。"""
     size = len(rows)
     header = struct.pack("<IiiHHIIiiII", 40, size, size * 2, 1, 32, 0, size * size * 4, 0, 0, 0, 0)
-    xor_data = b"".join(
-        bytes(channel for r, g, b, a in row for channel in (b, g, r, a))
-        for row in reversed(rows)
-    )
+    xor_data = bytearray()
+    for row in reversed(rows):
+        for index in range(0, len(row), 4):
+            xor_data.extend((row[index + 2], row[index + 1], row[index], row[index + 3]))
     and_stride = ((size + 31) // 32) * 4
     and_mask = b"\x00" * (and_stride * size)
-    return header + xor_data + and_mask
+    return header + bytes(xor_data) + and_mask
 
 
 def write_icon_data_module(path: Path) -> None:
@@ -229,9 +315,20 @@ def write_icon_data_module(path: Path) -> None:
         "# fmt: off",
         "APP_ICON_PNGS_BASE64 = {",
     ]
+    encoded_icons: dict[int, str] = {}
+
+    def encoded_icon(size: int) -> str:
+        if size not in encoded_icons:
+            encoded_icons[size] = base64.b64encode(encode_png(render_icon(size))).decode("ascii")
+        return encoded_icons[size]
+
     for size in RUNTIME_PNG_SIZES:
-        encoded = base64.b64encode(encode_png(render_icon(size))).decode("ascii")
-        lines.append(f'    {size}: "{encoded}",')
+        lines.append(f'    {size}: "{encoded_icon(size)}",')
+    lines.append("}")
+    lines.append("")
+    lines.append("BRAND_MARK_PNGS_BASE64 = {")
+    for size in BRAND_MARK_PNG_SIZES:
+        lines.append(f'    {size}: "{encoded_icon(size)}",')
     lines.append("}")
     lines.append("# fmt: on")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
