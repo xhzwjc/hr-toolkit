@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 import unittest
+from unittest.mock import patch
 
+from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
 from hr_toolkit.gui.app import HRToolkitApp
 from hr_toolkit.gui.widgets import CodexButton, RoundedCard, SidebarItem
 
@@ -125,6 +128,70 @@ class GuiPerformanceTests(unittest.TestCase):
             app._select_tool(prev_tool)
             self.root.update_idletasks()
             self.assertEqual(app.current_tool, prev_tool)
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    def test_small_window_reflows_forms_and_uses_temporary_workspace_drawer(self) -> None:
+        app = None
+        try:
+            with patch.dict(os.environ, {FORCE_UI_SCALE_ENV: "1"}, clear=False):
+                app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.geometry("900x650")
+            self.root.update()
+
+            app._select_tool("material_collector")
+            self.root.update()
+            self.assertEqual(app._form_layout_mode, "compact")
+            self.assertTrue(app.workspace_title_button.winfo_ismapped())
+            self.assertEqual(app._workspace_panel.winfo_manager(), "")
+            material_columns = {
+                int(widget.grid_info()["column"])
+                for widget in app._material_check_widgets
+            }
+            self.assertLessEqual(max(material_columns, default=0), 1)
+
+            app._toggle_workspace_panel()
+            self.root.update()
+            self.assertEqual(app._workspace_panel.winfo_manager(), "place")
+            self.assertLessEqual(
+                app._workspace_panel.winfo_width(),
+                app._workspace_main_area.winfo_width(),
+            )
+            outside_click = tk.Event()
+            outside_click.widget = app.form
+            app._close_workspace_drawer_on_outside_click(outside_click)
+            self.root.update()
+            self.assertEqual(app._workspace_panel.winfo_manager(), "")
+
+            app._select_tool("data_statistics")
+            self.root.update()
+            self.assertLess(app.stats_unit_col.winfo_rooty(), app.stats_out_col.winfo_rooty())
+            self.assertLess(app.stats_out_col.winfo_rooty(), app.stats_trip_col.winfo_rooty())
+
+            self.root.minsize(1, 1)
+            self.root.geometry("700x650")
+            self.root.update()
+            app._select_tool("material_collector")
+            app.material_collect_all.set(False)
+            app._on_material_collect_all_changed()
+            self.root.update()
+            self.assertEqual(app._form_layout_mode, "narrow")
+            narrow_columns = {
+                int(widget.grid_info()["column"])
+                for widget in app._material_check_widgets
+            }
+            self.assertEqual(narrow_columns, {0})
+
+            app._select_tool("data_statistics")
+            self.root.update()
+            self.assertTrue(all(button.winfo_manager() == "grid" for button in app.stats_week_preset_buttons))
         finally:
             if app is not None:
                 app.destroy()

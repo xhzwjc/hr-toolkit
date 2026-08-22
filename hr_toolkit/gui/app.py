@@ -155,16 +155,23 @@ from .constants import (
     APP_SUBTITLE,
 )
 from .scaling import (
+    LAYOUT_MODE_NARROW,
+    LAYOUT_MODE_WIDE,
     _clamp_ui_scale,
     _configure_tk_font_scaling,
     _detect_ui_scale,
+    _fit_window_size,
     _font_size,
     _forced_ui_scale,
     _indeterminate_progress_segment,
+    _responsive_checkbox_columns,
+    _responsive_drawer_width,
+    _responsive_layout_mode,
     _scale_float,
     _scale_px,
     _widget_ui_scale,
     _windows_dpi_for_root,
+    _windows_work_area_for_root,
 )
 from .widgets import (
     CodexButton,
@@ -248,7 +255,7 @@ class HRToolkitApp:
 
         self.root.title(f"{APP_DISPLAY_NAME} v{__version__}")
         initial_width, initial_height = self._window_size(1400, 780)
-        min_width, min_height = self._window_size(1020, 680)
+        min_width, min_height = self._window_size(900, 600)
         self.root.geometry(f"{initial_width}x{initial_height}")
         self.root.minsize(min_width, min_height)
         self.root.configure(bg=COLOR_BG)
@@ -328,6 +335,8 @@ class HRToolkitApp:
         self._workspace_preferred_expanded = True
         self._workspace_small = False
         self._workspace_drawer_open = False
+        self._workspace_restore_focus = None
+        self._workspace_panel_was_temporary_open = False
         self._workspace_resize_origin: tuple[int, int] | None = None
         self._project_store_error: str | None = None
         self.project_store = self._initialize_project_store()
@@ -835,26 +844,51 @@ class HRToolkitApp:
     def _window_size(self, width: int, height: int) -> tuple[int, int]:
         scaled_width = self._px(width)
         scaled_height = self._px(height)
-        if self.ui_scale <= 1.0:
+        available_width, available_height, exact_work_area = self._usable_work_area_size()
+        if available_width <= 0 or available_height <= 0:
             return scaled_width, scaled_height
+        if exact_work_area:
+            return _fit_window_size(
+                scaled_width,
+                scaled_height,
+                available_width,
+                available_height,
+                horizontal_margin=self._px(16),
+                vertical_margin=self._px(16),
+            )
+        return _fit_window_size(
+            scaled_width,
+            scaled_height,
+            available_width,
+            available_height,
+            horizontal_margin=self._px(48),
+            vertical_margin=self._px(72),
+        )
+
+    def _usable_work_area_size(self) -> tuple[int, int, bool]:
+        work_area = _windows_work_area_for_root(self.root)
+        if work_area is not None:
+            left, top, right, bottom = work_area
+            return max(1, right - left), max(1, bottom - top), True
         try:
-            screen_width = self.root.winfo_screenwidth()
-            screen_height = self.root.winfo_screenheight()
-            max_width = max(1, screen_width - self._px(48))
-            max_height = max(1, screen_height - self._px(72))
+            return self.root.winfo_screenwidth(), self.root.winfo_screenheight(), False
         except Exception:
-            return scaled_width, scaled_height
-        return min(scaled_width, max_width), min(scaled_height, max_height)
+            return 0, 0, False
 
     def _update_dialog_size(self, width: int, height: int) -> tuple[int, int]:
         scaled_width = self._px(width)
         scaled_height = self._px(height)
-        try:
-            max_width = max(1, self.root.winfo_screenwidth() - self._px(48))
-            max_height = max(1, self.root.winfo_screenheight() - self._px(72))
-        except Exception:
+        available_width, available_height, exact_work_area = self._usable_work_area_size()
+        if available_width <= 0 or available_height <= 0:
             return scaled_width, scaled_height
-        return min(scaled_width, max_width), min(scaled_height, max_height)
+        return _fit_window_size(
+            scaled_width,
+            scaled_height,
+            available_width,
+            available_height,
+            horizontal_margin=self._px(16 if exact_work_area else 48),
+            vertical_margin=self._px(16 if exact_work_area else 72),
+        )
 
     def _logical_screen_width(self) -> float:
         try:
@@ -862,18 +896,24 @@ class HRToolkitApp:
         except Exception:
             return 1180.0
 
-    def _responsive_content_padding(self) -> tuple[int, int, int, int]:
-        logical_width = self._logical_screen_width()
-        if self.ui_scale >= 1.75 and logical_width < 900:
-            return self._pad(16, 24, 16, 20)
+    def _responsive_content_padding(self, logical_width: float | None = None) -> tuple[int, int, int, int]:
+        if logical_width is None:
+            logical_width = self._logical_screen_width()
+        if logical_width < 560:
+            return self._pad(12, 20, 12, 18)
+        if logical_width < 820:
+            return self._pad(18, 24, 18, 20)
         if logical_width < 1100:
             return self._pad(24, 28, 28, 24)
         return self._pad(42, 34, 58, 28)
 
-    def _responsive_form_padding_units(self) -> tuple[int, int, int, int]:
-        logical_width = self._logical_screen_width()
-        if self.ui_scale >= 1.75 and logical_width < 900:
-            return (12, 16, 12, 16)
+    def _responsive_form_padding_units(self, logical_width: float | None = None) -> tuple[int, int, int, int]:
+        if logical_width is None:
+            logical_width = self._logical_screen_width()
+        if logical_width < 560:
+            return (10, 14, 10, 14)
+        if logical_width < 820:
+            return (14, 16, 14, 16)
         if logical_width < 1100:
             return (16, 18, 16, 18)
         return (24, 22, 24, 22)
@@ -1468,7 +1508,7 @@ class HRToolkitApp:
         self._workspace_main_area = ttk.Frame(root_frame, style="Content.TFrame")
         self._workspace_main_area.pack(side=LEFT, fill=BOTH, expand=True)
         self._workspace_main_area.grid_rowconfigure(0, weight=1)
-        self._workspace_main_area.grid_columnconfigure(0, weight=1, minsize=self._px(470))
+        self._workspace_main_area.grid_columnconfigure(0, weight=1, minsize=0)
         self._main_view_host = ttk.Frame(self._workspace_main_area, style="Content.TFrame")
         self._main_view_host.grid(row=0, column=0, sticky="nsew")
         self._build_workspace_panel(self._workspace_main_area)
@@ -1721,6 +1761,14 @@ class HRToolkitApp:
             width=118,
         )
         self.check_update_button.pack(side=LEFT)
+        self.workspace_title_button = CodexButton(
+            title_actions,
+            text="项目文件",
+            command=self._toggle_workspace_panel,
+            width=92,
+            min_width=82,
+            variant="tonal",
+        )
         self.subtitle_label = Label(
             right_frame,
             textvariable=self.tool_description,
@@ -1738,8 +1786,8 @@ class HRToolkitApp:
             title_row_width = title_row.winfo_width()
             if title_row_width <= 1:
                 title_row_width = self._px(240)
-            actions_width = self._px(118)
-            tight_header = title_row_width < self._px(480)
+            actions_width = max(self._px(118), title_actions.winfo_reqwidth())
+            tight_header = title_row_width < actions_width + self._px(360)
             if tight_header:
                 title_wrap = title_row_width
             else:
@@ -1760,6 +1808,7 @@ class HRToolkitApp:
             self.title_label.configure(wraplength=title_wrap)
             self.subtitle_label.configure(wraplength=subtitle_wrap)
 
+        self._update_title_text_wraps = _update_text_wraps
         title_row.bind("<Configure>", _update_text_wraps, add="+")
         right_frame.bind("<Configure>", _update_text_wraps, add="+")
         self.root.after_idle(_update_text_wraps)
@@ -1792,7 +1841,9 @@ class HRToolkitApp:
         self.form_card.pack(fill="x", pady=self._pad(14, 0))
         form = self.form_card.inner
         self.form = form
+        self._form_layout_mode = LAYOUT_MODE_WIDE
         self._form_compact_layout = False
+        self._material_checkbox_columns = 4
         self._summary_row_visible = True
         self._output_row_visible = True
         self._rename_row_visible = True
@@ -1882,7 +1933,9 @@ class HRToolkitApp:
 
         self.rename_options_frame = ttk.LabelFrame(form, text="批量改名", padding=self._px(12), style="Rename.TLabelframe")
         self.rename_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
-        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(row=0, column=0, sticky="w", pady=self._px(5))
+        ttk.Label(self.rename_options_frame, text="操作", style="App.TLabel").grid(
+            row=0, column=0, sticky="w", pady=self._px(5)
+        )
         self.rename_mode_widget = ttk.Combobox(
             self.rename_options_frame,
             textvariable=self.rename_mode,
@@ -1926,11 +1979,14 @@ class HRToolkitApp:
         self.material_options_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=self._pad(10, 0))
 
         # ── 1. 资料库组织形式（与输出归类模式相互独立） ──
-        library_mode_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
-        library_mode_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(7)))
-        ttk.Label(library_mode_row, text="资料库形式", style="App.TLabel", width=8).pack(side=LEFT, anchor="center")
+        self.material_library_mode_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        self.material_library_mode_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(7)))
+        self.material_library_mode_label = ttk.Label(
+            self.material_library_mode_row, text="资料库形式", style="App.TLabel", width=8
+        )
+        self.material_library_mode_label.pack(side=LEFT, anchor="center")
         self.material_library_mode_combo = ttk.Combobox(
-            library_mode_row,
+            self.material_library_mode_row,
             textvariable=self.material_library_mode,
             values=list(LIBRARY_MODE_LABELS.keys()),
             state="readonly",
@@ -1940,30 +1996,33 @@ class HRToolkitApp:
         self.material_library_mode_combo.pack(side=LEFT, padx=(self._px(8), self._px(12)))
         self.material_library_mode_combo.bind("<<ComboboxSelected>>", self._on_material_library_mode_changed)
         self.material_library_mode_hint = ttk.Label(
-            library_mode_row,
+            self.material_library_mode_row,
             text="原模式按姓名文件夹查找",
             style="CardHint.TLabel",
         )
         self.material_library_mode_hint.pack(side=LEFT, fill="x", expand=True)
 
         # ── 2. 目标人员输入行（全宽拉伸） ──
-        target_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
-        target_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(4)))
+        self.material_target_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        self.material_target_row.pack(fill="x", expand=True, pady=(self._px(2), self._px(4)))
 
-        ttk.Label(target_row, text="目标人员", style="App.TLabel", width=8).pack(side=LEFT, anchor="center")
+        self.material_target_label = ttk.Label(
+            self.material_target_row, text="目标人员", style="App.TLabel", width=8
+        )
+        self.material_target_label.pack(side=LEFT, anchor="center")
 
-        target_wrap = ttk.Frame(target_row, style="InputWrap.TFrame")
-        target_wrap.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), 0))
+        self.material_target_wrap = ttk.Frame(self.material_target_row, style="InputWrap.TFrame")
+        self.material_target_wrap.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), 0))
 
         self.material_target_entry = ttk.Entry(
-            target_wrap,
+            self.material_target_wrap,
             textvariable=self.material_target_input,
             style="App.TEntry",
         )
         self.material_target_entry.pack(side=LEFT, fill="x", expand=True)
 
         self.material_target_clear_btn = CodexButton(
-            target_wrap,
+            self.material_target_wrap,
             text="✕ 清空",
             command=lambda: self.material_target_input.set(""),
             width=56,
@@ -1981,16 +2040,19 @@ class HRToolkitApp:
         self.material_input_hint.pack(fill="x", padx=(self._px(76), 0), pady=(0, self._px(8)))
 
         # ── 3. 打包与检索设置行 ──
-        opts_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
-        opts_row.pack(fill="x", pady=(self._px(4), self._px(4)))
+        self.material_opts_row = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
+        self.material_opts_row.pack(fill="x", pady=(self._px(4), self._px(4)))
 
-        ttk.Label(opts_row, text="打包设置", style="App.TLabel", width=8).pack(side=LEFT, anchor="center")
+        self.material_opts_label = ttk.Label(
+            self.material_opts_row, text="打包设置", style="App.TLabel", width=8
+        )
+        self.material_opts_label.pack(side=LEFT, anchor="center")
 
-        opts_checks_frame = ttk.Frame(opts_row, style="InputWrap.TFrame")
-        opts_checks_frame.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), 0))
+        self.material_opts_checks_frame = ttk.Frame(self.material_opts_row, style="InputWrap.TFrame")
+        self.material_opts_checks_frame.pack(side=LEFT, fill="x", expand=True, padx=(self._px(8), 0))
 
         self.material_collect_all_check = ttk.Checkbutton(
-            opts_checks_frame,
+            self.material_opts_checks_frame,
             text="全部（直接拷贝匹配到的人员整个文件夹）",
             variable=self.material_collect_all,
             command=self._on_material_collect_all_changed,
@@ -1999,7 +2061,7 @@ class HRToolkitApp:
         self.material_collect_all_check.pack(side=LEFT, padx=(0, self._px(16)))
 
         self.material_zip_check = ttk.Checkbutton(
-            opts_checks_frame,
+            self.material_opts_checks_frame,
             text="生成 ZIP 压缩包",
             variable=self.material_create_zip,
             style="App.TCheckbutton",
@@ -2008,7 +2070,7 @@ class HRToolkitApp:
 
         # OCR 缓存：精简文案并置于右侧不起眼位置
         self.material_use_ocr_cache_check = ttk.Checkbutton(
-            opts_checks_frame,
+            self.material_opts_checks_frame,
             text="启用缓存",
             variable=self.material_use_ocr_cache,
             style="App.TCheckbutton",
@@ -2027,13 +2089,13 @@ class HRToolkitApp:
         self.material_types_section = ttk.Frame(self.material_options_frame, style="InputWrap.TFrame")
         self.material_types_section.pack(fill="x", pady=(self._px(6), self._px(2)))
 
-        mat_header_row = ttk.Frame(self.material_types_section, style="InputWrap.TFrame")
-        mat_header_row.pack(side=LEFT, anchor="nw", padx=(0, self._px(8)))
+        self.material_header_row = ttk.Frame(self.material_types_section, style="InputWrap.TFrame")
+        self.material_header_row.pack(side=LEFT, anchor="nw", padx=(0, self._px(8)))
 
-        self.material_types_label = ttk.Label(mat_header_row, text="指定材料", style="App.TLabel", width=8)
+        self.material_types_label = ttk.Label(self.material_header_row, text="指定材料", style="App.TLabel", width=8)
         self.material_types_label.pack(side=TOP, anchor="w")
 
-        mat_actions_frame = ttk.Frame(mat_header_row, style="InputWrap.TFrame")
+        mat_actions_frame = ttk.Frame(self.material_header_row, style="InputWrap.TFrame")
         mat_actions_frame.pack(side=TOP, anchor="w", pady=(self._px(4), 0))
 
         CodexButton(
@@ -2162,22 +2224,28 @@ class HRToolkitApp:
         # 周报与月报日期范围用对称两行布局；每行 label 放左侧，右侧为「起始日 至 结束日」+ 快捷按钮
         self.stats_range_label = ttk.Label(form, text="周报", style="App.TLabel")
         self.stats_range_frame = ttk.Frame(form, style="InputWrap.TFrame")
-        week_inputs = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
-        week_inputs.pack(side="top", fill="x")
+        self.stats_week_inputs = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        self.stats_week_inputs.pack(side="top", fill="x")
+        self.stats_week_date_group = ttk.Frame(self.stats_week_inputs, style="InputWrap.TFrame")
+        self.stats_week_date_group.pack(side=LEFT)
         self.stats_week_start_entry = ttk.Entry(
-            week_inputs, textvariable=self.stats_week_start, width=12, style="App.TEntry"
+            self.stats_week_date_group, textvariable=self.stats_week_start, width=12, style="App.TEntry"
         )
         self.stats_week_start_entry.pack(side=LEFT)
-        ttk.Label(week_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
+        ttk.Label(self.stats_week_date_group, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
         self.stats_week_end_entry = ttk.Entry(
-            week_inputs, textvariable=self.stats_week_end, width=12, style="App.TEntry"
+            self.stats_week_date_group, textvariable=self.stats_week_end, width=12, style="App.TEntry"
         )
         self.stats_week_end_entry.pack(side=LEFT)
-        ttk.Label(week_inputs, text="如 2026-06-02，留空按整月统计", style="App.TLabel").pack(
+        self.stats_week_hint = ttk.Label(
+            self.stats_week_inputs, text="如 2026-06-02，留空按整月统计", style="CardHint.TLabel"
+        )
+        self.stats_week_hint.pack(
             side=LEFT, padx=self._pad(10, 0)
         )
-        week_presets = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
-        week_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        self.stats_week_presets = ttk.Frame(self.stats_range_frame, style="InputWrap.TFrame")
+        self.stats_week_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        self.stats_week_preset_buttons = []
         for preset_text, preset_key in (
             ("本月", "this_month"),
             ("上月", "last_month"),
@@ -2186,7 +2254,7 @@ class HRToolkitApp:
             ("清空", "clear"),
         ):
             button = CodexButton(
-                week_presets,
+                self.stats_week_presets,
                 text=preset_text,
                 command=lambda key=preset_key: self._fill_stats_week_range(key),
                 width=56,
@@ -2194,29 +2262,36 @@ class HRToolkitApp:
                 height=28,
             )
             button.pack(side=LEFT, padx=self._pad(0, 8))
+            self.stats_week_preset_buttons.append(button)
 
         # —— 月报日期行 ——
         self.stats_month_range_label = ttk.Label(form, text="月报", style="App.TLabel")
         self.stats_month_range_frame = ttk.Frame(form, style="InputWrap.TFrame")
-        month_inputs = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
-        month_inputs.pack(side="top", fill="x")
+        self.stats_month_inputs = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
+        self.stats_month_inputs.pack(side="top", fill="x")
+        self.stats_month_date_group = ttk.Frame(self.stats_month_inputs, style="InputWrap.TFrame")
+        self.stats_month_date_group.pack(side=LEFT)
         self.stats_month_start_entry = ttk.Entry(
-            month_inputs, textvariable=self.stats_month_start, width=12, style="App.TEntry"
+            self.stats_month_date_group, textvariable=self.stats_month_start, width=12, style="App.TEntry"
         )
         self.stats_month_start_entry.pack(side=LEFT)
-        ttk.Label(month_inputs, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
+        ttk.Label(self.stats_month_date_group, text="至", style="App.TLabel").pack(side=LEFT, padx=self._px(8))
         self.stats_month_end_entry = ttk.Entry(
-            month_inputs, textvariable=self.stats_month_end, width=12, style="App.TEntry"
+            self.stats_month_date_group, textvariable=self.stats_month_end, width=12, style="App.TEntry"
         )
         self.stats_month_end_entry.pack(side=LEFT)
-        ttk.Label(month_inputs, text="如 2026-06-01，留空不筛选月报", style="App.TLabel").pack(
+        self.stats_month_hint = ttk.Label(
+            self.stats_month_inputs, text="如 2026-06-01，留空不筛选月报", style="CardHint.TLabel"
+        )
+        self.stats_month_hint.pack(
             side=LEFT, padx=self._pad(10, 0)
         )
-        month_presets = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
-        month_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        self.stats_month_presets = ttk.Frame(self.stats_month_range_frame, style="InputWrap.TFrame")
+        self.stats_month_presets.pack(side="top", fill="x", pady=self._pad(6, 0))
+        self.stats_month_preset_buttons = []
         for preset_text, preset_key in (("本月", "this_month"), ("上月", "last_month"), ("清空", "clear")):
             button = CodexButton(
-                month_presets,
+                self.stats_month_presets,
                 text=preset_text,
                 command=lambda key=preset_key: self._fill_stats_month_range(key),
                 width=56,
@@ -2224,27 +2299,28 @@ class HRToolkitApp:
                 height=28,
             )
             button.pack(side=LEFT, padx=self._pad(0, 8))
+            self.stats_month_preset_buttons.append(button)
 
         # ──────── 区块 2：输出选项 ────────
         # 与上方日期范围独立分组；三个输出选项并列展示
         self.stats_options_label = ttk.Label(form, text="输出选项", style="App.TLabel")
         self.stats_options_frame = ttk.Frame(form, style="InputWrap.TFrame")
-        stats_options_grid = ttk.Frame(self.stats_options_frame, style="InputWrap.TFrame")
-        stats_options_grid.pack(side="top", fill="x")
+        self.stats_options_grid = ttk.Frame(self.stats_options_frame, style="InputWrap.TFrame")
+        self.stats_options_grid.pack(side="top", fill="x")
 
         # 第 1 列：加班/调休备注单位（单选）
-        unit_col = ttk.Frame(stats_options_grid, style="InputWrap.TFrame")
-        unit_col.pack(side=LEFT, fill="x", expand=True)
-        ttk.Label(unit_col, text="加班/调休备注", style="App.TLabel").pack(side=LEFT)
+        self.stats_unit_col = ttk.Frame(self.stats_options_grid, style="InputWrap.TFrame")
+        self.stats_unit_col.pack(side=LEFT, fill="x", expand=True)
+        ttk.Label(self.stats_unit_col, text="加班/调休备注", style="App.TLabel").pack(side=LEFT)
         ttk.Radiobutton(
-            unit_col, text="按天", value="day",
+            self.stats_unit_col, text="按天", value="day",
             variable=self.stats_remark_unit, style="App.TRadiobutton",
         ).pack(side=LEFT, padx=self._pad(12, 0))
         ttk.Radiobutton(
-            unit_col, text="按小时", value="hour",
+            self.stats_unit_col, text="按小时", value="hour",
             variable=self.stats_remark_unit, style="App.TRadiobutton",
         ).pack(side=LEFT, padx=self._pad(8, 0))
-        self._stats_unit_help = ttk.Label(unit_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
+        self._stats_unit_help = ttk.Label(self.stats_unit_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
         self._stats_unit_help.pack(side=LEFT, padx=self._pad(6, 0))
         self._stats_unit_help.bind(
             "<Enter>", lambda _e: self._show_tooltip(
@@ -2254,14 +2330,14 @@ class HRToolkitApp:
         self._stats_unit_help.bind("<Leave>", lambda _e: self._hide_tooltip())
 
         # 第 2 列：是否新增公出列（勾选）
-        out_col = ttk.Frame(stats_options_grid, style="InputWrap.TFrame")
-        out_col.pack(side=LEFT, fill="x", expand=True)
+        self.stats_out_col = ttk.Frame(self.stats_options_grid, style="InputWrap.TFrame")
+        self.stats_out_col.pack(side=LEFT, fill="x", expand=True)
         self.stats_business_trip_check = ttk.Checkbutton(
-            out_col, text="新增「公出」列",
+            self.stats_out_col, text="新增「公出」列",
             variable=self.stats_include_business_trip, style="App.TCheckbutton",
         )
         self.stats_business_trip_check.pack(side=LEFT)
-        self._stats_out_help = ttk.Label(out_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
+        self._stats_out_help = ttk.Label(self.stats_out_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
         self._stats_out_help.pack(side=LEFT, padx=self._pad(6, 0))
         self._stats_out_help.bind(
             "<Enter>", lambda _e: self._show_tooltip(
@@ -2272,14 +2348,14 @@ class HRToolkitApp:
         self._stats_out_help.bind("<Leave>", lambda _e: self._hide_tooltip())
 
         # 第 3 列：是否新增出差列（勾选）
-        trip_col = ttk.Frame(stats_options_grid, style="InputWrap.TFrame")
-        trip_col.pack(side=LEFT, fill="x", expand=True)
+        self.stats_trip_col = ttk.Frame(self.stats_options_grid, style="InputWrap.TFrame")
+        self.stats_trip_col.pack(side=LEFT, fill="x", expand=True)
         self.stats_workday_business_trip_check = ttk.Checkbutton(
-            trip_col, text="新增「出差」列",
+            self.stats_trip_col, text="新增「出差」列",
             variable=self.stats_include_workday_business_trip, style="App.TCheckbutton",
         )
         self.stats_workday_business_trip_check.pack(side=LEFT)
-        self._stats_trip_help = ttk.Label(trip_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
+        self._stats_trip_help = ttk.Label(self.stats_trip_col, text=" ⓘ ", style="App.TLabel", cursor="question_arrow")
         self._stats_trip_help.pack(side=LEFT, padx=self._pad(6, 0))
         self._stats_trip_help.bind(
             "<Enter>", lambda _e: self._show_tooltip(
@@ -2344,7 +2420,7 @@ class HRToolkitApp:
 
             material_vis = getattr(self, "_material_row_visible", False)
             layout_key = (
-                self._form_compact_layout,
+                self._form_layout_mode,
                 tuple(visible_keys),
                 self._rename_row_visible,
                 material_vis,
@@ -2446,14 +2522,20 @@ class HRToolkitApp:
                 self.stats_options_label.grid_remove()
                 self.stats_options_frame.grid_remove()
 
+            self._apply_tool_specific_responsive_layout()
             if hasattr(self, "_sync_right_canvas_window"):
                 self.root.after_idle(self._sync_right_canvas_window)
 
         def _update_form_responsive_layout(_event=None) -> None:
-            content_padding = self._responsive_content_padding()
-            form_padding = self._responsive_form_padding_units()
-            # 内容列限宽居中（对应设计稿 max-width:780 的主内容列）
             canvas_width = self._right_canvas.winfo_width()
+            logical_canvas_width = (
+                canvas_width / max(self.ui_scale, 1.0)
+                if canvas_width > 1
+                else self._logical_screen_width()
+            )
+            content_padding = self._responsive_content_padding(logical_canvas_width)
+            form_padding = self._responsive_form_padding_units(logical_canvas_width)
+            # 内容列限宽居中（对应设计稿 max-width:780 的主内容列）
             if canvas_width > 1:
                 base_left, pad_top, base_right, pad_bottom = content_padding
                 extra = max(0, (canvas_width - base_left - base_right - self._px(820)) // 2)
@@ -2467,8 +2549,20 @@ class HRToolkitApp:
                 self._form_padding = form_padding
                 self.form_card.set_padding(form_padding)
                 layout_changed = True
-            canvas_width = self._right_canvas.winfo_width()
-            compact = canvas_width > 1 and (canvas_width / max(self.ui_scale, 1.0)) < 700
+            if canvas_width > 1:
+                usable_width = (
+                    canvas_width
+                    - content_padding[0]
+                    - content_padding[2]
+                    - self._px(form_padding[0] + form_padding[2])
+                ) / max(self.ui_scale, 1.0)
+                layout_mode = _responsive_layout_mode(usable_width)
+            else:
+                layout_mode = LAYOUT_MODE_WIDE
+            compact = layout_mode != LAYOUT_MODE_WIDE
+            if layout_mode != self._form_layout_mode:
+                self._form_layout_mode = layout_mode
+                layout_changed = True
             if compact != self._form_compact_layout:
                 self._form_compact_layout = compact
                 layout_changed = True
@@ -2897,6 +2991,7 @@ class HRToolkitApp:
         self._workspace_expanded_body.bind("<Configure>", self._update_workspace_text_wraps, add="+")
         main_area.bind("<Configure>", self._on_workspace_area_resize, add="+")
         self.root.bind("<Escape>", self._close_workspace_drawer, add="+")
+        self.root.bind("<Button-1>", self._close_workspace_drawer_on_outside_click, add="+")
         self._set_workspace_detail(None)
         self.root.after_idle(self._apply_workspace_panel_mode)
 
@@ -2910,19 +3005,41 @@ class HRToolkitApp:
             self._workspace_small = small
             self._workspace_drawer_open = False
             self._apply_workspace_panel_mode()
-        # Width-only changes never need a teardown/rebuild — the existing
-        # grid/place stays valid and the panel handles its own resizing.
         elif hasattr(self, "_workspace_panel"):
-            self._update_workspace_text_wraps()
+            self._apply_workspace_panel_mode()
 
     def _apply_workspace_panel_mode(self) -> None:
         if not hasattr(self, "_workspace_panel"):
             return
-        # Only tear down when the mode actually changes (small vs. not, expanded
-        # vs. collapsed). Width-only resizes are handled by the existing layout.
         small = self._workspace_small
         expanded = self._workspace_drawer_open if small else self._workspace_preferred_expanded
-        mode_key = ("place" if small else "grid", "expanded" if expanded else "collapsed")
+        try:
+            available_units = self._workspace_main_area.winfo_width() / max(self.ui_scale, 1.0)
+        except Exception:
+            available_units = WORKSPACE_DRAWER_BREAKPOINT
+        drawer_width_units = _responsive_drawer_width(
+            available_units,
+            self._workspace_width_units,
+        )
+        mode_key = (
+            "place" if small else "grid",
+            "expanded" if expanded else "collapsed",
+            drawer_width_units if small and expanded else 0,
+        )
+        title_button = getattr(self, "workspace_title_button", None)
+        if title_button is not None:
+            if small:
+                if title_button.winfo_manager() != "pack":
+                    title_button.pack(
+                        side=LEFT,
+                        padx=self._pad(0, 8),
+                        before=self.check_update_button,
+                    )
+            else:
+                title_button.pack_forget()
+            if hasattr(self, "_update_title_text_wraps"):
+                self.root.after_idle(self._update_title_text_wraps)
+
         if getattr(self, "_workspace_panel_mode_key", None) == mode_key:
             self.root.after_idle(self._update_workspace_text_wraps)
             return
@@ -2935,18 +3052,23 @@ class HRToolkitApp:
         self._workspace_collapsed_body.pack_forget()
 
         if self._workspace_small and expanded:
-            self._workspace_panel.configure(width=self._px(self._workspace_width_units))
+            self.workspace_collapse_button.configure(text="关闭")
+            self._workspace_panel.configure(width=self._px(drawer_width_units))
             self._workspace_panel.place(
                 in_=self._workspace_main_area,
                 relx=1.0,
                 y=0,
                 relheight=1.0,
-                width=self._px(self._workspace_width_units),
+                width=self._px(drawer_width_units),
                 anchor="ne",
             )
             self._workspace_expanded_body.pack(fill=BOTH, expand=True)
             self._workspace_panel.lift()
+        elif self._workspace_small:
+            # 小屏关闭状态只保留标题区入口，不再用 46px 竖栏挤占工具内容。
+            self.workspace_collapse_button.configure(text="关闭")
         else:
+            self.workspace_collapse_button.configure(text="收起")
             width_units = self._workspace_width_units if expanded else WORKSPACE_COLLAPSED_WIDTH
             self._workspace_panel.configure(width=self._px(width_units))
             self._workspace_panel.grid(row=0, column=2, sticky="nsew")
@@ -2955,6 +3077,23 @@ class HRToolkitApp:
                 self._workspace_expanded_body.pack(fill=BOTH, expand=True)
             else:
                 self._workspace_collapsed_body.pack(fill=BOTH, expand=True)
+
+        temporary_open = small and expanded
+        if temporary_open and not self._workspace_panel_was_temporary_open:
+            try:
+                self._workspace_restore_focus = self.root.focus_get()
+            except Exception:
+                self._workspace_restore_focus = None
+            self.root.after_idle(self.workspace_search_entry.focus_set)
+        elif not temporary_open and self._workspace_panel_was_temporary_open:
+            restore_focus = self._workspace_restore_focus
+            self._workspace_restore_focus = None
+            if restore_focus is not None:
+                try:
+                    self.root.after_idle(restore_focus.focus_set)
+                except Exception:
+                    pass
+        self._workspace_panel_was_temporary_open = temporary_open
         self.root.after_idle(self._update_workspace_text_wraps)
 
     def _toggle_workspace_panel(self) -> None:
@@ -2969,6 +3108,16 @@ class HRToolkitApp:
         if self._workspace_small and self._workspace_drawer_open:
             self._workspace_drawer_open = False
             self._apply_workspace_panel_mode()
+
+    def _close_workspace_drawer_on_outside_click(self, event=None) -> None:
+        if not self._workspace_small or not self._workspace_drawer_open or event is None:
+            return
+        widget = getattr(event, "widget", None)
+        while widget is not None:
+            if widget is self._workspace_panel:
+                return
+            widget = getattr(widget, "master", None)
+        self._close_workspace_drawer()
 
     def _start_workspace_resize(self, event) -> None:
         if self._workspace_small or not self._workspace_preferred_expanded:
@@ -4006,6 +4155,13 @@ class HRToolkitApp:
 
     def _run_scheduled_workspace_search(self) -> None:
         self._workspace_search_job = None
+        if not getattr(self, "_is_alive", True):
+            return
+        try:
+            if not self.workspace_tree.winfo_exists():
+                return
+        except Exception:
+            return
         self._refresh_workspace_tree()
 
     def _search_workspace_files(self, generation: int, root_path: Path, query: str) -> None:
@@ -4192,6 +4348,7 @@ class HRToolkitApp:
             return
         try:
             open_path(path)
+            self._close_workspace_drawer()
         except Exception as exc:
             runlog.log_exception("打开项目文件失败", exc)
             messagebox.showerror("无法打开", f"这个项目文件无法打开。\n\n原因：{exc}", parent=self.root)
@@ -4209,6 +4366,7 @@ class HRToolkitApp:
                 subprocess.Popen(["open", "-R", str(path)])
             else:
                 open_path(path.parent)
+            self._close_workspace_drawer()
         except Exception as exc:
             runlog.log_exception("定位项目文件失败", exc)
             messagebox.showerror("无法定位", f"暂时无法在文件夹中定位这个文件。\n\n原因：{exc}", parent=self.root)
@@ -7904,6 +8062,134 @@ class HRToolkitApp:
         if apply_layout and hasattr(self, "_apply_form_layout"):
             self._apply_form_layout()
 
+    def _apply_tool_specific_responsive_layout(self) -> None:
+        mode = getattr(self, "_form_layout_mode", LAYOUT_MODE_WIDE)
+        stacked = mode != LAYOUT_MODE_WIDE
+        narrow = mode == LAYOUT_MODE_NARROW
+
+        if hasattr(self, "material_library_mode_row"):
+            for widget in (
+                self.material_library_mode_label,
+                self.material_library_mode_combo,
+                self.material_library_mode_hint,
+            ):
+                widget.pack_forget()
+            self.material_library_mode_label.configure(width=0 if stacked else 8)
+            self.material_library_mode_combo.configure(width=1 if stacked else 28)
+            if stacked:
+                self.material_library_mode_label.pack(side=TOP, anchor="w")
+                self.material_library_mode_combo.pack(side=TOP, fill="x", pady=self._pad(5, 0))
+                self.material_library_mode_hint.pack(side=TOP, fill="x", pady=self._pad(4, 0))
+            else:
+                self.material_library_mode_label.pack(side=LEFT, anchor="center")
+                self.material_library_mode_combo.pack(side=LEFT, padx=self._pad(8, 12))
+                self.material_library_mode_hint.pack(side=LEFT, fill="x", expand=True)
+
+            for widget in (self.material_target_label, self.material_target_wrap):
+                widget.pack_forget()
+            self.material_target_label.configure(width=0 if stacked else 8)
+            if stacked:
+                self.material_target_label.pack(side=TOP, anchor="w")
+                self.material_target_wrap.pack(side=TOP, fill="x", pady=self._pad(5, 0))
+            else:
+                self.material_target_label.pack(side=LEFT, anchor="center")
+                self.material_target_wrap.pack(side=LEFT, fill="x", expand=True, padx=self._pad(8, 0))
+
+            for widget in (self.material_opts_label, self.material_opts_checks_frame):
+                widget.pack_forget()
+            self.material_opts_label.configure(width=0 if stacked else 8)
+            if stacked:
+                self.material_opts_label.pack(side=TOP, anchor="w")
+                self.material_opts_checks_frame.pack(side=TOP, fill="x", pady=self._pad(4, 0))
+            else:
+                self.material_opts_label.pack(side=LEFT, anchor="center")
+                self.material_opts_checks_frame.pack(side=LEFT, fill="x", expand=True, padx=self._pad(8, 0))
+
+            for widget in (
+                self.material_collect_all_check,
+                self.material_zip_check,
+                self.material_use_ocr_cache_check,
+            ):
+                widget.pack_forget()
+            if stacked:
+                self.material_collect_all_check.pack(side=TOP, anchor="w")
+                self.material_zip_check.pack(side=TOP, anchor="w", pady=self._pad(4, 0))
+                self.material_use_ocr_cache_check.pack(side=TOP, anchor="w", pady=self._pad(4, 0))
+            else:
+                self.material_collect_all_check.pack(side=LEFT, padx=self._pad(0, 16))
+                self.material_zip_check.pack(side=LEFT, padx=self._pad(0, 16))
+                self.material_use_ocr_cache_check.pack(side=RIGHT, padx=self._pad(0, 4))
+
+            hint_pad = self._pad(0, 0) if stacked else self._pad(76, 0)
+            self.material_input_hint.pack_configure(padx=hint_pad)
+            self.material_types_hint.pack_configure(padx=hint_pad)
+
+            self.material_header_row.pack_forget()
+            self.mat_checks_frame.pack_forget()
+            if stacked:
+                self.material_header_row.pack(side=TOP, fill="x", anchor="w", padx=0)
+                self.mat_checks_frame.pack(side=TOP, fill="x", expand=True, pady=self._pad(6, 0))
+            else:
+                self.material_header_row.pack(side=LEFT, anchor="nw", padx=self._pad(0, 8))
+                self.mat_checks_frame.pack(side=LEFT, fill="x", expand=True)
+
+            checkbox_columns = _responsive_checkbox_columns(mode)
+            if checkbox_columns != self._material_checkbox_columns:
+                self._material_checkbox_columns = checkbox_columns
+                self._rebuild_material_checkboxes()
+
+        if hasattr(self, "stats_week_inputs"):
+            for date_group, hint in (
+                (self.stats_week_date_group, self.stats_week_hint),
+                (self.stats_month_date_group, self.stats_month_hint),
+            ):
+                date_group.pack_forget()
+                hint.pack_forget()
+                if stacked:
+                    date_group.pack(side=TOP, anchor="w")
+                    hint.pack(side=TOP, fill="x", anchor="w", pady=self._pad(4, 0))
+                else:
+                    date_group.pack(side=LEFT)
+                    hint.pack(side=LEFT, padx=self._pad(10, 0))
+
+            for column in (self.stats_unit_col, self.stats_out_col, self.stats_trip_col):
+                column.pack_forget()
+            if stacked:
+                self.stats_unit_col.pack(side=TOP, fill="x")
+                self.stats_out_col.pack(side=TOP, fill="x", pady=self._pad(7, 0))
+                self.stats_trip_col.pack(side=TOP, fill="x", pady=self._pad(7, 0))
+            else:
+                self.stats_unit_col.pack(side=LEFT, fill="x", expand=True)
+                self.stats_out_col.pack(side=LEFT, fill="x", expand=True)
+                self.stats_trip_col.pack(side=LEFT, fill="x", expand=True)
+
+            for frame, buttons in (
+                (self.stats_week_presets, self.stats_week_preset_buttons),
+                (self.stats_month_presets, self.stats_month_preset_buttons),
+            ):
+                for button in buttons:
+                    button.pack_forget()
+                    try:
+                        button.grid_forget()
+                    except Exception:
+                        pass
+                if narrow:
+                    for column in range(2):
+                        frame.columnconfigure(column, weight=1)
+                    for index, button in enumerate(buttons):
+                        button.grid(
+                            row=index // 2,
+                            column=index % 2,
+                            sticky="ew",
+                            padx=self._pad(0, 8),
+                            pady=self._pad(0, 6),
+                        )
+                else:
+                    for column in range(2):
+                        frame.columnconfigure(column, weight=0)
+                    for button in buttons:
+                        button.pack(side=LEFT, padx=self._pad(0, 8))
+
     def _selected_material_names(self) -> list[str]:
         return [
             material
@@ -7921,9 +8207,12 @@ class HRToolkitApp:
             except Exception:
                 pass
         self._material_check_widgets = []
+        columns = max(1, int(getattr(self, "_material_checkbox_columns", 4)))
+        for column in range(4):
+            grid.columnconfigure(column, weight=1 if column < columns else 0)
         for idx, (material, variable) in enumerate(self.material_types_selected.items()):
-            row = idx // 4
-            column = idx % 4
+            row = idx // columns
+            column = idx % columns
             checkbox = ttk.Checkbutton(
                 grid,
                 text=material,
@@ -10357,6 +10646,12 @@ class HRToolkitApp:
 
     def destroy(self) -> None:
         self._is_alive = False
+        if getattr(self, "_workspace_search_job", None) is not None:
+            try:
+                self.root.after_cancel(self._workspace_search_job)
+            except Exception:
+                pass
+            self._workspace_search_job = None
         if hasattr(self, "_startup_loading_timer") and self._startup_loading_timer:
             try:
                 self.root.after_cancel(self._startup_loading_timer)

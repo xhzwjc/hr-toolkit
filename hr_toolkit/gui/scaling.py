@@ -9,6 +9,106 @@ from tkinter import Tk, TkVersion
 from .constants import BASE_WINDOWS_DPI, FORCE_UI_SCALE_ENV, TK_POINTS_PER_INCH
 
 
+LAYOUT_MODE_WIDE = "wide"
+LAYOUT_MODE_COMPACT = "compact"
+LAYOUT_MODE_NARROW = "narrow"
+
+
+def _fit_window_size(
+    width: int | float,
+    height: int | float,
+    available_width: int | float,
+    available_height: int | float,
+    *,
+    horizontal_margin: int | float = 0,
+    vertical_margin: int | float = 0,
+) -> tuple[int, int]:
+    """Fit a requested window inside the usable desktop rectangle."""
+    requested_width = max(1, int(round(width)))
+    requested_height = max(1, int(round(height)))
+    max_width = max(1, int(round(available_width - max(0, horizontal_margin))))
+    max_height = max(1, int(round(available_height - max(0, vertical_margin))))
+    return min(requested_width, max_width), min(requested_height, max_height)
+
+
+def _responsive_layout_mode(viewport_width: int | float) -> str:
+    """Return the form layout mode for the actual usable logical width."""
+    width = max(0.0, float(viewport_width))
+    if width < 520:
+        return LAYOUT_MODE_NARROW
+    if width < 760:
+        return LAYOUT_MODE_COMPACT
+    return LAYOUT_MODE_WIDE
+
+
+def _responsive_checkbox_columns(layout_mode: str) -> int:
+    if layout_mode == LAYOUT_MODE_NARROW:
+        return 1
+    if layout_mode == LAYOUT_MODE_COMPACT:
+        return 2
+    return 4
+
+
+def _responsive_drawer_width(
+    available_width: int | float,
+    preferred_width: int | float,
+    *,
+    edge_gap: int | float = 12,
+) -> int:
+    """Keep a temporary drawer fully inside its current parent viewport."""
+    available = max(1, int(round(available_width)))
+    preferred = max(1, int(round(preferred_width)))
+    maximum = max(1, available - max(0, int(round(edge_gap))))
+    return min(preferred, maximum)
+
+
+def _windows_work_area_for_root(root: Tk) -> tuple[int, int, int, int] | None:
+    """Return the nearest Windows monitor work area, excluding the taskbar."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+
+    class _MonitorInfo(ctypes.Structure):
+        _fields_ = (
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        )
+
+    try:
+        hwnd = int(root.winfo_id())
+        monitor_from_window = ctypes.windll.user32.MonitorFromWindow
+        monitor_from_window.argtypes = (wintypes.HWND, wintypes.DWORD)
+        monitor_from_window.restype = wintypes.HANDLE
+        get_monitor_info = ctypes.windll.user32.GetMonitorInfoW
+        get_monitor_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(_MonitorInfo))
+        get_monitor_info.restype = wintypes.BOOL
+        monitor = monitor_from_window(wintypes.HWND(hwnd), 2)
+        if monitor:
+            info = _MonitorInfo()
+            info.cbSize = ctypes.sizeof(_MonitorInfo)
+            if get_monitor_info(monitor, ctypes.byref(info)):
+                work = info.rcWork
+                if work.right > work.left and work.bottom > work.top:
+                    return int(work.left), int(work.top), int(work.right), int(work.bottom)
+    except Exception:
+        pass
+
+    try:
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            if rect.right > rect.left and rect.bottom > rect.top:
+                return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+    except Exception:
+        pass
+    return None
+
+
 def _scale_px(value: int | float, scale: float) -> int:
     if value == 0:
         return 0
@@ -141,6 +241,14 @@ def _widget_ui_scale(widget) -> float:
 
 
 __all__ = [
+    "LAYOUT_MODE_WIDE",
+    "LAYOUT_MODE_COMPACT",
+    "LAYOUT_MODE_NARROW",
+    "_fit_window_size",
+    "_responsive_layout_mode",
+    "_responsive_checkbox_columns",
+    "_responsive_drawer_width",
+    "_windows_work_area_for_root",
     "_scale_px",
     "_scale_float",
     "_clamp_ui_scale",
