@@ -64,7 +64,6 @@ EXCLUDED_MODULES = (
     "tkinter.test",
     "sqlite3.test",
     "ctypes.test",
-    "distutils",
     "idlelib",
     "pydoc",
     "pdb",

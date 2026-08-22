@@ -50,6 +50,19 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertEqual(main[-1], str(build_windows.APP_ENTRYPOINT))
         self.assertEqual(updater[-1], str(build_windows.UPDATER_ENTRYPOINT))
 
+        # PyInstaller's setuptools hook aliases the vendored implementation to
+        # distutils. Excluding it first makes PyInstaller 6.21 fail while
+        # constructing the module graph on both Windows and macOS.
+        self.assertNotIn("distutils", build_windows.EXCLUDED_MODULES)
+        self.assertNotIn(
+            ["--exclude-module", "distutils"],
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
+        self.assertNotIn(
+            ["--exclude-module", "distutils"],
+            [updater[index : index + 2] for index in range(len(updater) - 1)],
+        )
+
         for excluded in build_windows.EXCLUDED_MODULES:
             self.assertIn(excluded, main)
             self.assertIn(excluded, updater)
@@ -87,6 +100,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('collect_all("unrar")', spec)
         self.assertIn("_sevenzip_binaries + _rar_binaries", spec)
         self.assertIn("_sevenzip_hidden + _rar_hidden", spec)
+        self.assertNotIn('"distutils"', spec)
 
     def test_windows_version_metadata_uses_requested_version(self) -> None:
         payload = build_windows.windows_version_info("0.2.1")
