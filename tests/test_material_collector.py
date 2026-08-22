@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from hr_toolkit.tools.material_collector import (
     LIBRARY_MODE_FLAT_OCR,
@@ -1086,6 +1088,86 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             self.assertGreater(self.engine_type.call_count, first_calls)
             self.assertEqual(result.matched_file_count, 0)
             self.assertGreaterEqual(result.ocr_cache_invalidated, 1)
+
+    def test_missing_change_token_hashes_before_reusing_flat_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            source = library / "000.png"
+            self._write_image(source, "zhang_id_card")
+            original_stat = source.stat()
+
+            with mock.patch.object(self.mc, "_file_change_token", return_value=None):
+                collect_employee_materials(
+                    library,
+                    root / "输出1",
+                    roster_source="张三",
+                    material_types=["身份证"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+                first_calls = self.engine_type.call_count
+
+                # 元数据变更标记不可用时，相同内容仍复用内容哈希缓存，不重复 OCR。
+                collect_employee_materials(
+                    library,
+                    root / "输出2",
+                    roster_source="张三",
+                    material_types=["身份证"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+                self.assertEqual(self.engine_type.call_count, first_calls)
+
+                self._write_image(source, "lisi__id_card")
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+                result = collect_employee_materials(
+                    library,
+                    root / "输出3",
+                    roster_source="张三",
+                    material_types=["身份证"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+
+            self.assertGreater(self.engine_type.call_count, first_calls)
+            self.assertEqual(result.matched_file_count, 0)
+            self.assertGreaterEqual(result.ocr_cache_invalidated, 1)
+
+    def test_version_two_path_metadata_migrates_without_reocr(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            source = library / "000.png"
+            self._write_image(source, "zhang_id_card")
+
+            collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            first_calls = self.engine_type.call_count
+            cache_path = library / _OCR_CACHE_FILE_NAME
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            path_entry = cache["paths"]["000.png"]
+            path_entry["source_ctime_ns"] = path_entry.pop("source_change_token")
+            cache["version"] = 2
+            cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+            collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三",
+                material_types=["身份证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+
+            self.assertEqual(self.engine_type.call_count, first_calls)
+            migrated = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(migrated["version"], 3)
+            self.assertIn("source_change_token", migrated["paths"]["000.png"])
+            self.assertNotIn("source_ctime_ns", migrated["paths"]["000.png"])
 
     def test_file_changed_after_index_is_not_copied_as_stale_match(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -54,7 +54,7 @@ def _get_ocr_engine():
 
 # OCR 智能索引缓存：写入资料库根目录的隐藏 JSON 文件
 _OCR_CACHE_FILE_NAME = ".hr_material_index_cache.json"
-_OCR_CACHE_VERSION = 2
+_OCR_CACHE_VERSION = 3
 _OCR_CACHE_TEXT_SNIPPET_MAX = 4096
 _OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
@@ -104,20 +104,96 @@ def _compute_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
     return (size, mtime, sha.hexdigest())
 
 
-def _compute_full_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
-    """TASK-8 无序索引专用完整指纹，保证大文件后半段变化也能失效。
+def _windows_file_change_time(file_path: Path) -> int | None:
+    """Return the Windows file change time, not ``stat().st_ctime``.
 
-    返回 None 表示文件无法访问。首次索引流式计算完整 SHA-256；后续同一路径
-    会先用 size/mtime/ctime 元数据命中路径索引，避免重复读取大文件。
+    Python 3.12 still exposes file creation time through ``st_ctime`` on
+    Windows.  Creation time does not change when an existing file is
+    overwritten, so it cannot safely guard the metadata-only cache fast path.
+    ``FILE_BASIC_INFO.ChangeTime`` is the NT file change token we need here.
     """
+    if os.name != "nt":
+        return None
     try:
-        stat = file_path.stat()
-    except (FileNotFoundError, OSError):
+        import ctypes
+        from ctypes import wintypes
+
+        class _FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        get_file_information = kernel32.GetFileInformationByHandleEx
+        get_file_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        get_file_information.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        file_read_attributes = 0x0080
+        file_share_all = 0x0001 | 0x0002 | 0x0004
+        open_existing = 3
+        file_attribute_normal = 0x0080
+        invalid_handle = wintypes.HANDLE(-1).value
+        handle = create_file(
+            os.path.abspath(os.fspath(file_path)),
+            file_read_attributes,
+            file_share_all,
+            None,
+            open_existing,
+            file_attribute_normal,
+            None,
+        )
+        if handle == invalid_handle:
+            return None
+        try:
+            info = _FileBasicInfo()
+            file_basic_info = 0
+            if not get_file_information(
+                handle,
+                file_basic_info,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+            ):
+                return None
+            change_time = int(info.ChangeTime)
+            return change_time if change_time > 0 else None
+        finally:
+            close_handle(handle)
+    except Exception:  # pragma: no cover - platform API failure must degrade safely
+        # FAT/network shares or restricted handles may not expose ChangeTime.
+        # Callers treat None as unsafe for metadata-only reuse and hash instead.
         return None
 
-    size = stat.st_size
-    mtime = stat.st_mtime
 
+def _file_change_token(file_path: Path, stat_result: os.stat_result) -> int | None:
+    if os.name == "nt":
+        return _windows_file_change_time(file_path)
+    return stat_result.st_ctime_ns
+
+
+def _stream_full_sha256(file_path: Path) -> str | None:
     sha = hashlib.sha256()
     try:
         with open(file_path, "rb") as fp:
@@ -128,19 +204,35 @@ def _compute_full_file_fingerprint(file_path: Path) -> tuple[int, float, str] | 
                 sha.update(chunk)
     except OSError:
         return None
+    return sha.hexdigest()
 
-    try:
-        final_stat = file_path.stat()
-    except OSError:
+
+def _compute_full_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
+    """TASK-8 无序索引专用完整指纹，保证大文件后半段变化也能失效。
+
+    返回 None 表示文件无法访问。首次索引流式计算完整 SHA-256；后续同一路径
+    会先用 size/mtime/可靠变更标记命中路径索引，避免重复读取大文件。
+    """
+    initial_metadata = _flat_path_metadata(file_path)
+    if initial_metadata is None:
         return None
-    if (
-        final_stat.st_size != stat.st_size
-        or final_stat.st_mtime_ns != stat.st_mtime_ns
-        or final_stat.st_ctime_ns != stat.st_ctime_ns
-    ):
+    size, mtime_ns, change_token = initial_metadata
+    sha = _stream_full_sha256(file_path)
+    if sha is None:
+        return None
+    final_metadata = _flat_path_metadata(file_path)
+    if final_metadata != initial_metadata:
         return None
 
-    return (size, mtime, sha.hexdigest())
+    if change_token is None:
+        # Without a reliable OS change token, verify the bytes twice.  This
+        # fallback is slower but prevents same-size, restored-mtime changes
+        # from producing a stable-looking fingerprint on unsupported volumes.
+        verified_sha = _stream_full_sha256(file_path)
+        if verified_sha != sha or _flat_path_metadata(file_path) != final_metadata:
+            return None
+
+    return (size, mtime_ns / 1_000_000_000, sha)
 
 
 def _compute_cache_key(
@@ -1522,12 +1614,12 @@ def _flat_cache_entry_usable(entry: Any) -> bool:
     return bool(entry.get("material_type") and entry.get("extracted_name"))
 
 
-def _flat_path_metadata(file_path: Path) -> tuple[int, int, int] | None:
+def _flat_path_metadata(file_path: Path) -> tuple[int, int, int | None] | None:
     try:
         stat = file_path.stat()
     except OSError:
         return None
-    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    return stat.st_size, stat.st_mtime_ns, _file_change_token(file_path, stat)
 
 
 def _lookup_flat_index_cache(
@@ -1542,13 +1634,14 @@ def _lookup_flat_index_cache(
     metadata = _flat_path_metadata(file_path)
     if metadata is None:
         return None, None, None
-    size, mtime_ns, ctime_ns = metadata
+    size, mtime_ns, change_token = metadata
 
     previous = paths.get(rel_path)
     if isinstance(previous, dict) and (
-        previous.get("source_size") == size
+        change_token is not None
+        and previous.get("source_size") == size
         and previous.get("source_mtime_ns") == mtime_ns
-        and previous.get("source_ctime_ns") == ctime_ns
+        and previous.get("source_change_token") == change_token
     ):
         previous_key = previous.get("cache_key")
         entry = entries.get(previous_key)
@@ -1580,7 +1673,7 @@ def _lookup_flat_index_cache(
         "cache_key": cache_key,
         "source_size": size,
         "source_mtime_ns": mtime_ns,
-        "source_ctime_ns": ctime_ns,
+        "source_change_token": change_token,
     }
     if _flat_cache_entry_usable(entry):
         entry["verified_at"] = _beijing_now_str()
