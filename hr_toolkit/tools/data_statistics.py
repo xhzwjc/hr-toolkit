@@ -265,7 +265,10 @@ def generate_data_statistics_reports(
             monthly_records.extend(file_monthly)
 
         if not attendance_rows and not weekly_records and not monthly_records:
-            raise ValueError("未识别到考勤结果、周报记录或月报记录，请确认文件格式。")
+            message = "未识别到考勤结果、周报记录或月报记录，请确认文件格式。"
+            if warnings:
+                message += "\n诊断信息：\n- " + "\n- ".join(warnings[-5:])
+            raise ValueError(message)
 
         attendance_summaries, attendance_exceptions = _summarize_attendance(
             attendance_rows,
@@ -422,6 +425,12 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
         for ws in workbook.worksheets:
             # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
             grid = SheetGrid(ws)
+            if grid.dimension_recovered:
+                warnings.append(
+                    f"{file_path.name} 工作表「{grid.title}」的导出范围 "
+                    f"{grid.declared_dimension or '未知'} 不完整，已自动扫描并恢复为 "
+                    f"{grid.actual_dimension}。"
+                )
             header_row = _find_header_row(grid)
             if header_row is None:
                 # 候选 sheet 表头（前 20 行内），便于排查「未识别」类问题
@@ -455,7 +464,60 @@ def _read_statistics_file(file_path: Path, warnings: list[str]) -> tuple[list[At
                 )
     finally:
         workbook.close()
+    if not attendance_rows and not weekly_records and not monthly_records:
+        warnings.extend(_missing_formula_cache_warnings(file_path))
     return attendance_rows, weekly_records, monthly_records
+
+
+def _missing_formula_cache_warnings(file_path: Path) -> list[str]:
+    """Best-effort diagnosis for exports whose formulas have no cached values.
+
+    openpyxl does not calculate Excel formulas. With ``data_only=True`` it can only
+    read the value cached by the application that created the workbook. Some export
+    systems write ``<f>`` without a corresponding cached ``<v>``; in that case the
+    required name/date cells look empty even though Excel displays a formula after
+    opening the file.
+    """
+    value_workbook = None
+    formula_workbook = None
+    diagnostics: list[str] = []
+    try:
+        value_workbook = load_workbook(file_path, data_only=True, read_only=True)
+        formula_workbook = load_workbook(file_path, data_only=False, read_only=True)
+        value_sheets = {
+            worksheet.title: SheetGrid(worksheet)
+            for worksheet in value_workbook.worksheets
+        }
+        for worksheet in formula_workbook.worksheets:
+            value_grid = value_sheets.get(worksheet.title)
+            if value_grid is None:
+                continue
+            formula_grid = SheetGrid(worksheet)
+            missing_count = 0
+            samples: list[str] = []
+            for row_index, row in enumerate(formula_grid.iter_rows(), start=1):
+                for col_index, value in enumerate(row, start=1):
+                    if not (isinstance(value, str) and value.startswith("=")):
+                        continue
+                    if value_grid.value(row_index, col_index) is not None:
+                        continue
+                    missing_count += 1
+                    if len(samples) < 5:
+                        samples.append(f"{get_column_letter(col_index)}{row_index}")
+            if missing_count:
+                diagnostics.append(
+                    f"{file_path.name} 工作表「{worksheet.title}」有 {missing_count} 个公式单元格"
+                    f"缺少缓存结果（如 {', '.join(samples)}）；导出系统未写入可直接读取的显示值。"
+                )
+    except Exception:
+        # 这是失败后的补充诊断，不能用诊断异常覆盖原始的“未识别”错误。
+        return []
+    finally:
+        if formula_workbook is not None:
+            formula_workbook.close()
+        if value_workbook is not None:
+            value_workbook.close()
+    return diagnostics
 
 
 def _collect_preview_headers(grid: SheetGrid) -> str:

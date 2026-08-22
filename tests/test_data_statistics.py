@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import tarfile
 import tempfile
 import unittest
@@ -526,6 +527,80 @@ class DataStatisticsTest(unittest.TestCase):
             self.assertEqual(result.attendance_source_count, 2000)
             self.assertLess(elapsed, 20, f"2000 行考勤耗时 {elapsed:.1f}s，疑似退化为逐格重复解析")
 
+    def test_incorrect_declared_dimension_is_recovered_without_output_changes(self) -> None:
+        """考勤、周报、月报导出范围过小时，输出仍须与规范文件完全一致。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "source"
+            normal_input = root / "normal_input"
+            broken_input = root / "broken_input"
+            source_dir.mkdir()
+            normal_input.mkdir()
+            broken_input.mkdir()
+            writers = {
+                "考勤结果.xlsx": _write_attendance_file,
+                "【汇报】唐人周报04.01-05.04.xlsx": _write_weekly_file,
+                "【汇报】唐人月报04.01-05.04.xlsx": _write_monthly_file,
+            }
+            source_hashes: dict[str, str] = {}
+            normal_hashes: dict[str, str] = {}
+            broken_hashes: dict[str, str] = {}
+            for file_name, writer in writers.items():
+                source_file = source_dir / file_name
+                normal_file = normal_input / file_name
+                broken_file = broken_input / file_name
+                writer(source_file)
+                normal_file.write_bytes(source_file.read_bytes())
+                broken_file.write_bytes(source_file.read_bytes())
+                _rewrite_first_sheet_dimension(broken_file, "A1:A1")
+                source_hashes[file_name] = hashlib.sha256(source_file.read_bytes()).hexdigest()
+                normal_hashes[file_name] = hashlib.sha256(normal_file.read_bytes()).hexdigest()
+                broken_hashes[file_name] = hashlib.sha256(broken_file.read_bytes()).hexdigest()
+
+            normal_result = generate_data_statistics_reports(normal_input, root / "normal_output")
+            broken_result = generate_data_statistics_reports(broken_input, root / "broken_output")
+
+            self.assertEqual(broken_result.attendance_source_count, 4)
+            self.assertEqual(broken_result.weekly_record_count, 8)
+            self.assertEqual(broken_result.monthly_record_count, 2)
+            recovered_warnings = [
+                warning
+                for warning in broken_result.warnings
+                if "导出范围 A1:A1 不完整" in warning
+            ]
+            self.assertEqual(len(recovered_warnings), 3)
+            self.assertTrue(any("A1:AE5" in warning for warning in recovered_warnings))
+            self.assertTrue(any("A1:E9" in warning for warning in recovered_warnings))
+            self.assertTrue(any("A1:F3" in warning for warning in recovered_warnings))
+            self.assertEqual(
+                _xlsx_business_manifest(broken_result.output_file),
+                _xlsx_business_manifest(normal_result.output_file),
+            )
+            for file_name in writers:
+                self.assertEqual(
+                    hashlib.sha256((source_dir / file_name).read_bytes()).hexdigest(),
+                    source_hashes[file_name],
+                )
+                self.assertEqual(
+                    hashlib.sha256((normal_input / file_name).read_bytes()).hexdigest(),
+                    normal_hashes[file_name],
+                )
+                self.assertEqual(
+                    hashlib.sha256((broken_input / file_name).read_bytes()).hexdigest(),
+                    broken_hashes[file_name],
+                )
+
+    def test_missing_formula_cache_is_reported_precisely(self) -> None:
+        """无法计算公式时，不再只给出泛化的“格式不识别”提示。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            _write_formula_cache_missing_attendance(input_dir / "考勤结果.xlsx")
+
+            with self.assertRaisesRegex(ValueError, "2 个公式单元格缺少缓存结果"):
+                generate_data_statistics_reports(input_dir, root / "output")
+
     def test_remark_unit_hour_only_changes_overtime_and_rest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -873,6 +948,37 @@ def _write_summary_attendance_file_with_remark(path: Path) -> None:
     ws.cell(3, 35).value = "迟到：5.18迟到11分钟\n补卡：5.21/5.26补下班卡"
     wb.save(path)
     wb.close()
+
+
+def _rewrite_first_sheet_dimension(path: Path, dimension: str) -> None:
+    rewritten = path.with_name(f"{path.stem}.rewritten.xlsx")
+    with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(
+        rewritten, "w", zipfile.ZIP_DEFLATED
+    ) as target:
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                payload, count = re.subn(
+                    br'<dimension ref="[^"]+"',
+                    f'<dimension ref="{dimension}"'.encode(),
+                    payload,
+                    count=1,
+                )
+                if count != 1:
+                    raise AssertionError("测试工作簿缺少 dimension")
+            target.writestr(info, payload)
+    rewritten.replace(path)
+
+
+def _write_formula_cache_missing_attendance(path: Path) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "日结果"
+    worksheet.append(["姓名", "日期", "漏打卡次数", "应出勤小时数"])
+    # openpyxl 只写公式本身，不计算并写入缓存结果，用来模拟系统直出的不完整公式。
+    worksheet.append(['="王小丽"', "=DATE(2026,4,1)", 0, 7])
+    workbook.save(path)
+    workbook.close()
 
 
 def _write_attendance_file(path: Path) -> None:

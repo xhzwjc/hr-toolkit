@@ -4,7 +4,7 @@ import re
 import weakref
 from copy import copy
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any, Iterator, NamedTuple
 
 from openpyxl.formula.translate import Translator
 from openpyxl.styles.cell_style import StyleArray
@@ -274,13 +274,53 @@ class SheetGrid:
     Worksheet 编写的读取函数直接换用。
     """
 
-    __slots__ = ("title", "max_row", "max_column", "_rows")
+    __slots__ = (
+        "title",
+        "max_row",
+        "max_column",
+        "declared_dimension",
+        "actual_dimension",
+        "dimension_recovered",
+        "_rows",
+    )
 
     def __init__(self, ws: Any) -> None:
         self.title: str = ws.title
+        self.declared_dimension: str | None = None
+        declared_max_row = getattr(ws, "max_row", None)
+        declared_max_column = getattr(ws, "max_column", None)
+
+        # ReadOnlyWorksheet 默认信任源文件 sheet XML 的 <dimension ref="...">。
+        # 部分业务系统导出的 XLSX 会把它错误写成 A1:A1 或只包含表头行，
+        # 导致 iter_rows() 静默截断真实数据。SheetGrid 本来就会顺序扫描整张表，
+        # 因此在只读工作表上先撤销这个不可信的上限，不增加额外扫描次数。
+        reset_dimensions = getattr(ws, "reset_dimensions", None)
+        if callable(reset_dimensions):
+            try:
+                self.declared_dimension = ws.calculate_dimension()
+            except (TypeError, ValueError):
+                self.declared_dimension = None
+            reset_dimensions()
+
         self._rows: list[tuple[Any, ...]] = [tuple(row) for row in ws.iter_rows(values_only=True)]
         self.max_row: int = len(self._rows)
         self.max_column: int = max((len(row) for row in self._rows), default=0)
+        self.actual_dimension: str = (
+            f"A1:{get_column_letter(self.max_column)}{self.max_row}"
+            if self.max_row and self.max_column
+            else "空表"
+        )
+        self.dimension_recovered: bool = bool(
+            declared_max_row is not None
+            and declared_max_column is not None
+            and (
+                self.max_row > declared_max_row
+                or self.max_column > declared_max_column
+            )
+        )
+
+    def iter_rows(self) -> Iterator[tuple[Any, ...]]:
+        return iter(self._rows)
 
     def value(self, row_index: int, col_index: int) -> Any:
         if not 1 <= row_index <= self.max_row or col_index < 1:
