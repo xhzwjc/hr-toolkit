@@ -111,7 +111,7 @@ class WindowsPackagingTests(unittest.TestCase):
             encoding="utf-8"
         )
         windows_job = workflow.split("\n  build-windows:", 1)[1].split(
-            "\n  build-macos-universal:", 1
+            "\n  build-macos:", 1
         )[0]
         job_configuration = windows_job.split("\n    steps:", 1)[0]
         self.assertIn('PYTHONUTF8: "1"', job_configuration)
@@ -144,6 +144,14 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("pip==26.2", constraints)
         self.assertIn("rapidocr_onnxruntime==1.4.4", constraints)
         self.assertIn("pyinstaller==6.21.0", constraints)
+        self.assertIn(
+            'onnxruntime==1.23.2; platform_system == "Darwin" and platform_machine == "x86_64"',
+            constraints,
+        )
+        self.assertIn(
+            'onnxruntime==1.29.0; platform_system != "Darwin" or platform_machine != "x86_64"',
+            constraints,
+        )
         for constraint in constraints:
             with self.subTest(constraint=constraint):
                 requirement = constraint.split(";", 1)[0].strip()
@@ -163,6 +171,24 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('RUN_TESTS="true"', workflow)
         self.assertIn("ocr_runtime_smoke_test", workflow)
         self.assertIn("scripts/release_windows.py", workflow)
+
+    def test_release_and_test_build_use_real_parallel_macos_architectures(self) -> None:
+        workflow_dir = build_windows.REPO_ROOT / ".github" / "workflows"
+        release = (workflow_dir / "release.yml").read_text(encoding="utf-8")
+        test_build = (workflow_dir / "test-build.yml").read_text(encoding="utf-8")
+
+        for workflow in (release, test_build):
+            with self.subTest(workflow=workflow[:30]):
+                self.assertIn("runner: macos-15-intel", workflow)
+                self.assertIn("architecture: x86_64", workflow)
+                self.assertIn("runner: macos-15", workflow)
+                self.assertIn("architecture: arm64", workflow)
+                self.assertIn('test "$(uname -m)" = "${{ matrix.architecture }}"', workflow)
+
+        self.assertIn("needs.build-macos.result == 'success'", release)
+        self.assertNotIn("build-macos-universal", release)
+        self.assertNotIn("build-macos-fallback", release)
+        self.assertNotIn("--architecture universal2", release)
 
     def test_payload_verification_accepts_only_readme_and_builtin_excel_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -484,28 +484,22 @@ npm run release -- 0.3.5 --dry-run
 
 ### GitHub Actions 产物
 
-普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查，并在 Windows Python 3.12 上实际加载本地 OCR 模型完成一次推理。`.github/workflows/test-build.yml` 每周一北京时间 02:00 自动执行完整 Windows 测试、EXE/MSI/便携包构建及安装运行检查，也可继续手动选择 Windows、macOS 或全部平台。所有 Python 3.12 CI 和打包任务使用 `constraints/python312-production.txt`，避免上游依赖更新造成构建结果无预警漂移。
+普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查，并在 Windows Python 3.12 上实际加载本地 OCR 模型完成一次推理。`.github/workflows/test-build.yml` 每周一北京时间 02:00 自动执行完整 Windows 测试、EXE/MSI/便携包构建及安装运行检查，也可手动选择 Windows、macOS 或全部平台；选择 macOS 时会在真实 Intel 与 Apple Silicon runner 上分别构建和验收。所有 Python 3.12 CI 和打包任务使用 `constraints/python312-production.txt`，避免上游依赖更新造成构建结果无预警漂移。
 
 只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag 和直接下载资产同步到 Gitee，并生成“Gitee 主地址 + GitHub 备用地址”的 `latest.json`。
 
 每个版本的直接下载资产为（以下用 `<version>` 表示版本号）：
 
 ```text
-HRToolkit_<version>_universal.dmg
+HRToolkit_<version>_arm64.dmg
+HRToolkit_<version>_x64.dmg
 HRToolkit_<version>_x64-setup.exe
 HRToolkit_<version>_x64.msi
 latest.json
 SHA256SUMS.txt
 ```
 
-macOS 优先构建 universal2，并对 Bundle 中的 Mach-O 使用 `file`/`lipo` 验证 `arm64` 与 `x86_64`。如果 universal2 遇到架构专属 C++ 二进制，发布资产会自动降级拆分为两个真实架构文件：
-
-```text
-HRToolkit_<version>_arm64.dmg
-HRToolkit_<version>_x64.dmg
-```
-
-不会把单架构程序改名伪装成 `universal`。DMG 内包含标准 `HRToolkit.app` 和指向 `/Applications` 的快捷方式。
+当前 OCR 运行时包含架构专属原生二进制，因此正式发布直接并行构建上表中的两个真实架构文件。构建脚本仍保留经 `file`/`lipo` 严格验证的 universal2 能力，但发布流水线不会先执行注定失败的跨架构尝试，也不会把单架构程序改名伪装成 `universal`。DMG 内包含标准 `HRToolkit.app` 和指向 `/Applications` 的快捷方式。
 
 ### Windows 安装与自动更新架构
 

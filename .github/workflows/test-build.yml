@@ -138,10 +138,20 @@ jobs:
           retention-days: 14
 
   build-macos:
-    name: Build macOS DMG
+    name: Build macOS ${{ matrix.asset_suffix }} DMG
     needs: prepare
     if: needs.prepare.outputs.target_platform == 'macos' || needs.prepare.outputs.target_platform == 'all'
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            architecture: x86_64
+            asset_suffix: x64
+          - runner: macos-15
+            architecture: arm64
+            asset_suffix: arm64
+    runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
@@ -154,12 +164,21 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+            constraints/python312-production.txt
+
+      - name: Confirm native runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.architecture }}"
 
       - name: Install macOS build dependencies
         run: |
           python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
-          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
-          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements.txt -r requirements-build.txt -c constraints/python312-production.txt
           python -m pip check
 
       - name: Exercise local OCR models and inference
@@ -179,14 +198,14 @@ jobs:
           set -euo pipefail
           python scripts/build_macos.py \
             --version "${VERSION}" \
-            --architecture arm64 \
+            --architecture "${{ matrix.architecture }}" \
             --output-dir artifacts/macos
 
       - name: Upload macOS test artifacts
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          name: HRToolkit-macOS-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
-          path: |
-            artifacts/macos/HRToolkit_${{ env.VERSION }}_arm64.dmg
+          name: HRToolkit-macOS-${{ matrix.asset_suffix }}-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
+          path: artifacts/macos/HRToolkit_${{ env.VERSION }}_${{ matrix.asset_suffix }}.dmg
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
