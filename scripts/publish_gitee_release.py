@@ -386,7 +386,7 @@ def validate_mirror_assets(
             raise GiteeReleaseError(f"latest.json 平台 {key} 指向非白名单资产：{filename}")
         asset_is_mirrored = (
             filename == gitee_windows_installer
-            and (assets_dir / filename).stat().st_size <= max_asset_bytes
+            and (assets_dir / filename).stat().st_size < max_asset_bytes
         )
         if asset_is_mirrored:
             if file_url != gitee_prefix + filename:
