@@ -74,7 +74,7 @@ jobs:
           fi
 
   build-windows:
-    name: Build Windows EXE, MSI, and update ZIP
+    name: Build Windows EXE and MSI
     needs: validate
     runs-on: windows-latest
     env:
@@ -90,12 +90,15 @@ jobs:
           python-version: "3.12"
           architecture: x64
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+            constraints/python312-production.txt
 
       - name: Install Python build dependencies
         run: |
           python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
-          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
-          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements.txt -r requirements-build.txt -c constraints/python312-production.txt
           python -m pip check
 
       - name: Exercise local OCR models and inference
@@ -147,6 +150,7 @@ jobs:
             artifacts/windows/HRToolkit_${{ env.VERSION }}_x64.msi
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
 
       - name: Upload legacy server bridge manifest for operations
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5

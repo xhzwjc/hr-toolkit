@@ -45,7 +45,7 @@ ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="从 Windows onedir 纯生成 ZIP 自更新资产和旧服务器桥接清单。"
+        description="校验 Windows onedir 并生成旧服务器桥接更新清单。"
     )
     parser.add_argument("--version", required=True, help="必须与 hr_toolkit.__version__ 一致")
     parser.add_argument("--app-dir", required=True, type=Path, help="PyInstaller HRToolkit onedir")
@@ -56,12 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-runtime-smoke",
         action="store_true",
-        help="仅供诊断；跳过 staging payload 的无界面启动检查",
+        help="已完成等价构建/安装验收时，跳过重复 staging 和无界面启动检查",
     )
     args = parser.parse_args(argv)
 
     version = validate_build_version(args.version)
-    zip_path, manifest_path = build_update_assets(
+    setup_path, manifest_path = build_update_assets(
         version=version,
         app_dir=args.app_dir.resolve(),
         updater=args.updater.resolve(),
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         mandatory=not args.optional,
         runtime_smoke=not args.skip_runtime_smoke,
     )
-    print(f"Windows 自更新包：{zip_path}")
+    print(f"Windows 安装更新包：{setup_path}")
     print(f"旧服务器桥接清单：{manifest_path}")
     return 0
 
@@ -91,14 +91,16 @@ def build_update_assets(
     setup_path = output_dir / setup_name
     manifest_path = output_dir / LEGACY_MANIFEST_NAME
 
-    with tempfile.TemporaryDirectory(prefix="hr_toolkit_windows_payload_") as tmp:
-        payload_dir = Path(tmp) / APP_NAME
-        stage_windows_payload(app_dir=app_dir, updater=updater, target_dir=payload_dir)
-        if runtime_smoke:
+    if runtime_smoke:
+        with tempfile.TemporaryDirectory(prefix="hr_toolkit_windows_payload_") as tmp:
+            payload_dir = Path(tmp) / APP_NAME
+            stage_windows_payload(app_dir=app_dir, updater=updater, target_dir=payload_dir)
             run_runtime_smoke(
                 payload_dir / f"{APP_NAME}.exe",
                 payload_dir / f"{UPDATER_NAME}.exe",
             )
+    else:
+        verify_windows_update_sources(app_dir=app_dir, updater=updater)
 
     digest = sha256_file(setup_path) if setup_path.exists() else ("0" * 64)
     manifest = legacy_server_manifest(
@@ -113,11 +115,7 @@ def build_update_assets(
 
 
 def stage_windows_payload(*, app_dir: Path, updater: Path, target_dir: Path) -> Path:
-    verify_windows_payload(app_dir)
-    verify_pe_x64(app_dir / f"{APP_NAME}.exe")
-    verify_pe_x64(updater)
-    if updater.name.lower() != f"{UPDATER_NAME}.exe".lower():
-        raise RuntimeError(f"更新程序名称必须为 {UPDATER_NAME}.exe：{updater}")
+    verify_windows_update_sources(app_dir=app_dir, updater=updater)
     if target_dir.exists():
         raise RuntimeError(f"staging 目录必须不存在：{target_dir}")
 
@@ -129,6 +127,14 @@ def stage_windows_payload(*, app_dir: Path, updater: Path, target_dir: Path) -> 
     )
     verify_staged_payload(target_dir)
     return target_dir
+
+
+def verify_windows_update_sources(*, app_dir: Path, updater: Path) -> None:
+    verify_windows_payload(app_dir)
+    verify_pe_x64(app_dir / f"{APP_NAME}.exe")
+    verify_pe_x64(updater)
+    if updater.name.lower() != f"{UPDATER_NAME}.exe".lower():
+        raise RuntimeError(f"更新程序名称必须为 {UPDATER_NAME}.exe：{updater}")
 
 
 def verify_staged_payload(payload_dir: Path) -> None:

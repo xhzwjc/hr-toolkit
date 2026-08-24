@@ -504,15 +504,15 @@ SHA256SUMS.txt
 ### Windows 安装与自动更新架构
 
 Windows 构建输出：
-- `HRToolkit_<version>_x64-setup.exe`：Inno Setup 极限固实压缩安装包（约 60MB），使用当前用户权限目录 `%LOCALAPPDATA%\Programs\HRToolkit`，普通用户双击安装无需管理员提权；
+- `HRToolkit_<version>_x64-setup.exe`：Inno Setup 平衡固实压缩安装包，使用当前用户权限目录 `%LOCALAPPDATA%\Programs\HRToolkit`，普通用户双击安装无需管理员提权；
 - `HRToolkit_<version>_x64.msi`：WiX v4 生成的 per-user MSI 安装器，供企业 IT 批量分发；
 - `HRToolkitUpdater.exe`：内置独立更新器。
 
 **自动更新机制**：
-- Windows 客户端在检测到新版本后，直接在后台下载 60MB 的 `setup.exe` 安装包；
+- Windows 客户端在检测到新版本后，直接在后台下载 `setup.exe` 安装包；
 - 下载完成后唤起 `HRToolkitUpdater.exe` 并退出主程序；
 - 更新器在后台通过静默指令 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` 秒级完成程序目录覆盖并自动重新打开新版本；
-- 体积远低于 Gitee 100MB 附件限制，彻底解除国内分发瓶颈，并保留对旧版 ZIP 解压更新的向后兼容。
+- 保留对旧版 ZIP 解压更新的向后兼容。
 
 ### 国内更新源、GitHub 回退与容灾
 

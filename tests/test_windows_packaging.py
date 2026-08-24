@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import build_update_assets
 from scripts import build_macos
@@ -312,14 +313,26 @@ class WindowsPackagingTests(unittest.TestCase):
             fake_setup = output_dir / setup_name
             output_dir.mkdir(parents=True, exist_ok=True)
             fake_setup.write_bytes(b"MZ" + b"\0" * 32)
-            setup_path, manifest_path = build_update_assets.build_update_assets(
-                version=self.version,
-                app_dir=app_dir,
-                updater=updater,
-                output_dir=output_dir,
-                notes=["桥接 GitHub Release"],
-                runtime_smoke=False,
-            )
+            with (
+                patch.object(
+                    build_update_assets,
+                    "stage_windows_payload",
+                    side_effect=AssertionError("skip 模式不应重复复制 payload"),
+                ),
+                patch.object(
+                    build_update_assets,
+                    "run_runtime_smoke",
+                    side_effect=AssertionError("skip 模式不应重复启动程序"),
+                ),
+            ):
+                setup_path, manifest_path = build_update_assets.build_update_assets(
+                    version=self.version,
+                    app_dir=app_dir,
+                    updater=updater,
+                    output_dir=output_dir,
+                    notes=["桥接 GitHub Release"],
+                    runtime_smoke=False,
+                )
             first_digest = build_update_assets.sha256_file(setup_path)
 
             self.assertEqual(setup_path.name, f"HRToolkit_{self.version}_x64-setup.exe")
@@ -359,6 +372,8 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('DestDir: "{app}\\app"', iss)
         self.assertIn('Type: filesandordirs; Name: "{app}\\app"', iss)
         self.assertIn("SignTool={#SignToolName}", iss)
+        self.assertIn("Compression=lzma2/max", iss)
+        self.assertNotIn("Compression=lzma2/ultra64", iss)
         self.assertIn(
             'MessagesFile: "compiler:Default.isl,ChineseSimplified.isl"',
             iss,
@@ -371,6 +386,10 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIsNotNone(package)
         assert package is not None
         self.assertEqual(package.attrib["Scope"], "perUser")
+        media_template = root.find(".//w:MediaTemplate", namespace)
+        self.assertIsNotNone(media_template)
+        assert media_template is not None
+        self.assertEqual(media_template.attrib["CompressionLevel"], "medium")
         app_directory = root.find(".//w:Directory[@Id='APPDIR']", namespace)
         self.assertIsNotNone(app_directory)
         self.assertEqual(app_directory.attrib["Name"], "app")
@@ -437,6 +456,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("build_windows.py", flat)
         self.assertIn("build_windows_installers.py", flat)
         self.assertIn("build_update_assets.py", flat)
+        self.assertIn("--skip-runtime-smoke", commands[2][1])
         self.assertNotIn("bump_version", flat)
         self.assertNotIn("prepare_gitee_release", flat)
         self.assertNotIn("git add", flat)

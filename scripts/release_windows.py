@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -20,7 +21,7 @@ from versioning import read_project_version
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Windows 三阶段发布产物编排器：纯构建、纯安装器、纯更新资产。"
+            "Windows 三阶段发布产物编排器：纯构建、纯安装器、桥接更新清单。"
             "不修改版本、不提交、不创建 Tag、不推送。"
         )
     )
@@ -41,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         "--output-dir",
         type=Path,
         default=REPO_ROOT / "dist" / "release-windows",
-        help="EXE/MSI/ZIP/桥接清单输出目录",
+        help="EXE/MSI/桥接清单输出目录",
     )
     parser.add_argument("--notes", nargs="*", default=None, help="旧服务器桥接更新说明")
     parser.add_argument("--optional", action="store_true", help="旧服务器桥接清单标记为可选更新")
@@ -67,8 +68,11 @@ def main(argv: list[str] | None = None) -> int:
         skip_install_smoke=args.skip_install_smoke,
     )
     for label, command in commands:
-        print(f"\n=== {label} ===")
+        started_at = time.perf_counter()
+        print(f"\n=== {label} ===", flush=True)
         _run(command)
+        elapsed = time.perf_counter() - started_at
+        print(f"=== {label} 完成，用时 {elapsed:.1f} 秒 ===", flush=True)
 
     exe_name, msi_name = installer_asset_names(version)
     expected = (
@@ -142,6 +146,7 @@ def stage_commands(
         str(updater),
         "--output-dir",
         str(output_dir),
+        "--skip-runtime-smoke",
     ]
     if notes:
         update_assets.extend(["--notes", *notes])
@@ -151,12 +156,12 @@ def stage_commands(
     return (
         ("1/3 PyInstaller 纯构建", build),
         ("2/3 EXE/MSI 安装器", installers),
-        ("3/3 Windows ZIP 更新资产", update_assets),
+        ("3/3 旧服务器桥接更新资产", update_assets),
     )
 
 
 def _run(command: list[str]) -> None:
-    print("执行：" + subprocess.list2cmdline(command))
+    print("执行：" + subprocess.list2cmdline(command), flush=True)
     subprocess.run(command, cwd=REPO_ROOT, check=True)
 
 

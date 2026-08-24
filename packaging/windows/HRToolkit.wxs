@@ -16,7 +16,7 @@
     Compressed="yes">
     <SummaryInformation Description="HRToolkit 人事 Excel 自动化工具箱" />
     <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 HRToolkit。" />
-    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="medium" />
 
     <Feature Id="MainFeature" Title="HRToolkit" Level="1">
       <ComponentGroupRef Id="PayloadComponents" />
