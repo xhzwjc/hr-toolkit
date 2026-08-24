@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tkinter as tk
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
 from hr_toolkit.gui.app import HRToolkitApp
@@ -48,6 +48,48 @@ class GuiPerformanceTests(unittest.TestCase):
         # Zero radius fallback
         rect_pts = _tessellate_round_rect(0, 0, 100, 50, 0)
         self.assertEqual(rect_pts, [0, 0, 100, 0, 100, 50, 0, 50])
+
+    def test_collapsed_workspace_defers_tree_read(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.workspace_tree = Mock()
+        app._workspace_small = False
+        app._workspace_preferred_expanded = False
+        app._workspace_drawer_open = False
+        app._workspace_search_generation = 0
+
+        app._refresh_workspace_tree()
+
+        app.workspace_tree.get_children.assert_not_called()
+
+    def test_workspace_mode_transition_to_expanded_refreshes_tree_once(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.root = Mock()
+        app.ui_scale = 1.0
+        app._workspace_small = False
+        app._workspace_preferred_expanded = True
+        app._workspace_width_units = 320
+        app._workspace_panel_was_temporary_open = False
+        app._workspace_panel_mode_key = ("place", "collapsed", 0)
+        app._workspace_panel = Mock()
+        app._workspace_main_area = Mock()
+        app._workspace_main_area.winfo_width.return_value = 1400
+        app._workspace_resize_handle = Mock()
+        app._workspace_expanded_body = Mock()
+        app._workspace_collapsed_body = Mock()
+        app.workspace_collapse_button = Mock()
+        app._update_workspace_text_wraps = Mock()
+        app._refresh_workspace_tree = Mock()
+
+        app._apply_workspace_panel_mode()
+
+        scheduled = [call.args[0] for call in app.root.after_idle.call_args_list]
+        self.assertIn(app._refresh_workspace_tree, scheduled)
+
+        app.root.after_idle.reset_mock()
+        app._apply_workspace_panel_mode()
+
+        scheduled = [call.args[0] for call in app.root.after_idle.call_args_list]
+        self.assertNotIn(app._refresh_workspace_tree, scheduled)
 
     def test_codex_button_idempotent_redraw_and_item_reuse(self) -> None:
         btn = CodexButton(self.root, text="测试按钮", variant="primary")

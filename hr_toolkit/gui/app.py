@@ -214,6 +214,7 @@ EXCEL_ARCHIVE_FILETYPES = (
     ("所有文件", "*.*"),
 )
 EXCEL_ARCHIVE_FORMAT_TEXT = f".xlsx、.xls 以及 {ARCHIVE_FORMAT_DESCRIPTION} 压缩包"
+WORKSPACE_UI_SETTINGS_VERSION = 2
 
 
 def _is_excel_or_archive_file(path: Path) -> bool:
@@ -332,7 +333,7 @@ class HRToolkitApp:
         self._workspace_close_requested = False
         self._workspace_recent_projects: list[tuple[str, Path]] = []
         self._workspace_width_units = WORKSPACE_DEFAULT_WIDTH
-        self._workspace_preferred_expanded = True
+        self._workspace_preferred_expanded = False
         self._workspace_small = False
         self._workspace_drawer_open = False
         self._workspace_restore_focus = None
@@ -607,9 +608,18 @@ class HRToolkitApp:
             width = WORKSPACE_DEFAULT_WIDTH
         self._workspace_width_units = max(WORKSPACE_MIN_WIDTH, min(WORKSPACE_MAX_WIDTH, width))
         try:
-            self._workspace_preferred_expanded = bool(state.get("project_panel_expanded", True))
-        except AttributeError:
-            self._workspace_preferred_expanded = True
+            settings_version = int(state.get("version", 0))
+        except (AttributeError, TypeError, ValueError):
+            settings_version = 0
+        if settings_version >= WORKSPACE_UI_SETTINGS_VERSION:
+            try:
+                self._workspace_preferred_expanded = bool(state.get("project_panel_expanded", False))
+            except AttributeError:
+                self._workspace_preferred_expanded = False
+        else:
+            # v1 会在保存其他设置时顺带写入旧默认值 True，无法区分用户选择。
+            # 升级时统一迁移到新默认值；此后仍记住用户主动展开或收起的选择。
+            self._workspace_preferred_expanded = False
         recent: list[tuple[str, Path]] = []
         raw_recent = state.get("recent_projects", [])
         if isinstance(raw_recent, list):
@@ -642,7 +652,7 @@ class HRToolkitApp:
         settings_path = self._workspace_settings_path()
         material_preferences = getattr(self, "_material_preferences", MaterialPreferences())
         payload = {
-            "version": 1,
+            "version": WORKSPACE_UI_SETTINGS_VERSION,
             "project_panel_width": int(self._workspace_width_units),
             "project_panel_expanded": bool(self._workspace_preferred_expanded),
             "current_project": str(self.current_project_path) if self.current_project_path is not None else None,
@@ -3090,10 +3100,12 @@ class HRToolkitApp:
             if hasattr(self, "_update_title_text_wraps"):
                 self.root.after_idle(self._update_title_text_wraps)
 
-        if getattr(self, "_workspace_panel_mode_key", None) == mode_key:
+        previous_mode_key = getattr(self, "_workspace_panel_mode_key", None)
+        if previous_mode_key == mode_key:
             self.root.after_idle(self._update_workspace_text_wraps)
             return
         self._workspace_panel_mode_key = mode_key
+        was_expanded = bool(previous_mode_key and previous_mode_key[1] == "expanded")
 
         self._workspace_panel.place_forget()
         self._workspace_panel.grid_remove()
@@ -3145,6 +3157,9 @@ class HRToolkitApp:
                     pass
         self._workspace_panel_was_temporary_open = temporary_open
         self.root.after_idle(self._update_workspace_text_wraps)
+        if expanded and not was_expanded:
+            # 点击展开和窗口从小屏恢复为宽屏都走这里，避免显示折叠期间的旧目录。
+            self.root.after_idle(self._refresh_workspace_tree)
 
     def _toggle_workspace_panel(self) -> None:
         if self._workspace_small:
@@ -3153,6 +3168,11 @@ class HRToolkitApp:
             self._workspace_preferred_expanded = not self._workspace_preferred_expanded
             self._save_workspace_preferences()
         self._apply_workspace_panel_mode()
+
+    def _workspace_panel_is_expanded(self) -> bool:
+        if getattr(self, "_workspace_small", False):
+            return bool(getattr(self, "_workspace_drawer_open", False))
+        return bool(getattr(self, "_workspace_preferred_expanded", False))
 
     def _close_workspace_drawer(self, _event=None) -> None:
         if self._workspace_small and self._workspace_drawer_open:
@@ -4016,6 +4036,8 @@ class HRToolkitApp:
 
     def _refresh_workspace_tree(self) -> None:
         if not hasattr(self, "workspace_tree"):
+            return
+        if not self._workspace_panel_is_expanded():
             return
         self._workspace_search_generation += 1
         generation = self._workspace_search_generation
