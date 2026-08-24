@@ -25,6 +25,7 @@ jobs:
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITEE_REPOSITORY: optimistic-little-sunspot/hr-toolkit
       GITEE_USERNAME: optimistic-little-sunspot
+      GITEE_MAX_ASSET_BYTES: "100000000"
     steps:
       - name: Check out latest release tooling from main
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -93,13 +94,16 @@ jobs:
             --notes "HR Toolkit v${VERSION}" \
             --download-base-url "https://gitee.com/${GITEE_REPOSITORY}/releases/download" \
             --release-url "https://gitee.com/${GITEE_REPOSITORY}/releases/tag/${TAG}" \
-            --fallback-download-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download"
+            --fallback-download-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download" \
+            --primary-download-max-bytes "${GITEE_MAX_ASSET_BYTES}" \
+            --primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe"
           python scripts/publish_gitee_release.py \
             --version "${VERSION}" \
             --tag "${TAG}" \
             --repository "${GITEE_REPOSITORY}" \
             --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
             --assets-dir gitee-release-assets \
+            --max-asset-bytes "${GITEE_MAX_ASSET_BYTES}" \
             --dry-run
 
       - name: Fast-forward source and annotated tag to Gitee
@@ -154,5 +158,6 @@ jobs:
             --repository "${GITEE_REPOSITORY}" \
             --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
             --assets-dir gitee-release-assets \
+            --max-asset-bytes "${GITEE_MAX_ASSET_BYTES}" \
             --upload-transport curl \
             --timeout 600

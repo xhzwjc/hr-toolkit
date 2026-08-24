@@ -96,6 +96,7 @@ class GiteeMirrorTests(unittest.TestCase):
     def _build_assets(self, assets_dir: Path) -> None:
         for name in release_metadata.release_asset_names(self.VERSION, mac_variant="universal2"):
             (assets_dir / name).write_bytes(("payload:" + name).encode("utf-8"))
+        windows_installer = f"HRToolkit_{self.VERSION}_x64-setup.exe"
         release_metadata.generate_release_metadata(
             assets_dir,
             version=self.VERSION,
@@ -109,6 +110,8 @@ class GiteeMirrorTests(unittest.TestCase):
             fallback_download_base_url=(
                 f"https://github.com/{self.GITHUB_REPOSITORY}/releases/download"
             ),
+            primary_download_max_bytes=release_metadata.GITEE_ATTACHMENT_SAFE_MAX_BYTES,
+            primary_download_asset_names=(windows_installer,),
         )
 
     def test_validates_exact_gitee_assets_and_github_fallback(self) -> None:
@@ -123,7 +126,22 @@ class GiteeMirrorTests(unittest.TestCase):
                 repository=self.GITEE_REPOSITORY,
             )
 
-            self.assertEqual(set(names), {path.name for path in assets_dir.iterdir()})
+            self.assertEqual(
+                set(names),
+                {
+                    f"HRToolkit_{self.VERSION}_x64-setup.exe",
+                    "latest.json",
+                    "SHA256SUMS.txt",
+                },
+            )
+            manifest = json.loads((assets_dir / "latest.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                manifest["platforms"]["windows"]["file_url"].startswith("https://gitee.com/")
+            )
+            self.assertTrue(
+                manifest["platforms"]["macos"]["file_url"].startswith("https://github.com/")
+            )
+            self.assertNotIn("fallback_urls", manifest["platforms"]["macos"])
 
     def test_rejects_manifest_without_github_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -141,6 +159,38 @@ class GiteeMirrorTests(unittest.TestCase):
                     tag=self.TAG,
                     repository=self.GITEE_REPOSITORY,
                 )
+
+    def test_capacity_limit_keeps_only_metadata_when_exe_is_too_large(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            self._build_assets(assets_dir)
+            windows_installer = f"HRToolkit_{self.VERSION}_x64-setup.exe"
+            release_metadata.generate_release_metadata(
+                assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.GITHUB_REPOSITORY,
+                project_version=self.VERSION,
+                download_base_url=(
+                    f"https://gitee.com/{self.GITEE_REPOSITORY}/releases/download"
+                ),
+                release_url=f"https://gitee.com/{self.GITEE_REPOSITORY}/releases/tag/{self.TAG}",
+                fallback_download_base_url=(
+                    f"https://github.com/{self.GITHUB_REPOSITORY}/releases/download"
+                ),
+                primary_download_max_bytes=1,
+                primary_download_asset_names=(windows_installer,),
+            )
+
+            names = gitee_publish.validate_mirror_assets(
+                assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.GITEE_REPOSITORY,
+                max_asset_bytes=1,
+            )
+
+            self.assertEqual(set(names), {"latest.json", "SHA256SUMS.txt"})
 
     def test_publish_is_idempotent_and_uploads_latest_json_last(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -191,7 +241,12 @@ class GiteeMirrorTests(unittest.TestCase):
             client = FakeGiteeClient(assets_dir, self.TAG)
             first_asset = sorted(
                 name
-                for name in gitee_publish.expected_asset_names(assets_dir, self.VERSION)
+                for name in gitee_publish.validate_mirror_assets(
+                    assets_dir,
+                    version=self.VERSION,
+                    tag=self.TAG,
+                    repository=self.GITEE_REPOSITORY,
+                )
                 if name != "latest.json"
             )[0]
             client.timeout_after_accepting.add(first_asset)
@@ -274,7 +329,12 @@ class GiteeMirrorTests(unittest.TestCase):
             assets_dir = Path(temporary)
             self._build_assets(assets_dir)
             client = FakeGiteeClient(assets_dir, self.TAG)
-            names = gitee_publish.expected_asset_names(assets_dir, self.VERSION)
+            names = gitee_publish.validate_mirror_assets(
+                assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.GITEE_REPOSITORY,
+            )
             completed_name = next(name for name in names if name not in {"latest.json", "SHA256SUMS.txt"})
             completed_path = assets_dir / completed_name
             client.attachments = [

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from generate_release_metadata import (
+    GITEE_ATTACHMENT_SAFE_MAX_BYTES,
     REPOSITORY_PATTERN,
     detect_mac_variant,
     release_asset_names,
@@ -311,6 +312,21 @@ def expected_asset_names(assets_dir: Path, version: str) -> tuple[str, ...]:
     return release_asset_names(version, mac_variant=mac_variant) + METADATA_NAMES
 
 
+def mirror_asset_names(
+    assets_dir: Path,
+    version: str,
+    *,
+    max_asset_bytes: int = GITEE_ATTACHMENT_SAFE_MAX_BYTES,
+) -> tuple[str, ...]:
+    if max_asset_bytes < 1:
+        raise GiteeReleaseError("Gitee 单附件上限必须是正整数。")
+    windows_installer = f"HRToolkit_{version}_x64-setup.exe"
+    names = ["SHA256SUMS.txt", "latest.json"]
+    if (assets_dir / windows_installer).stat().st_size <= max_asset_bytes:
+        names.insert(0, windows_installer)
+    return tuple(names)
+
+
 def validate_mirror_assets(
     assets_dir: Path,
     *,
@@ -318,17 +334,27 @@ def validate_mirror_assets(
     tag: str,
     repository: str,
     github_repository: str = DEFAULT_GITHUB_REPOSITORY,
+    max_asset_bytes: int = GITEE_ATTACHMENT_SAFE_MAX_BYTES,
 ) -> tuple[str, ...]:
-    names = expected_asset_names(assets_dir, version)
-    actual = {path.name for path in assets_dir.iterdir() if path.is_file()} if assets_dir.is_dir() else set()
-    if actual != set(names):
+    all_names = expected_asset_names(assets_dir, version)
+    actual = (
+        {path.name for path in assets_dir.iterdir() if path.is_file()}
+        if assets_dir.is_dir()
+        else set()
+    )
+    if actual != set(all_names):
         raise GiteeReleaseError(
-            f"Gitee 镜像资产必须严格匹配白名单：期望={sorted(names)}，实际={sorted(actual)}"
+            f"Gitee 镜像资产必须严格匹配白名单：期望={sorted(all_names)}，实际={sorted(actual)}"
         )
-    for name in names:
+    for name in all_names:
         path = assets_dir / name
         if not path.is_file() or path.stat().st_size <= 0:
             raise GiteeReleaseError(f"Gitee 镜像资产为空或不存在：{path}")
+    names = mirror_asset_names(
+        assets_dir,
+        version,
+        max_asset_bytes=max_asset_bytes,
+    )
 
     latest = _read_json_file(assets_dir / "latest.json")
     if latest.get("version") != version:
@@ -342,23 +368,38 @@ def validate_mirror_assets(
         raise GiteeReleaseError("latest.json 缺少 platforms。")
     gitee_prefix = f"https://gitee.com/{repository}/releases/download/{tag}/"
     github_prefix = f"https://github.com/{github_repository}/releases/download/{tag}/"
-    binary_names = set(names) - set(METADATA_NAMES)
+    binary_names = set(all_names) - set(METADATA_NAMES)
+    gitee_windows_installer = f"HRToolkit_{version}_x64-setup.exe"
     for key, payload in platforms.items():
         if not isinstance(payload, dict):
             raise GiteeReleaseError(f"latest.json 平台 {key} 格式不正确。")
         file_url = str(payload.get("file_url") or "")
         fallback_urls = payload.get("fallback_urls")
-        if not file_url.startswith(gitee_prefix):
-            raise GiteeReleaseError(f"latest.json 平台 {key} 未优先使用 Gitee。")
         filename = urllib.parse.unquote(urllib.parse.urlparse(file_url).path.rsplit("/", 1)[-1])
         if filename not in binary_names:
             raise GiteeReleaseError(f"latest.json 平台 {key} 指向非白名单资产：{filename}")
-        if fallback_urls != [github_prefix + filename]:
-            raise GiteeReleaseError(f"latest.json 平台 {key} 未配置 GitHub 备用地址。")
+        asset_is_mirrored = (
+            filename == gitee_windows_installer
+            and (assets_dir / filename).stat().st_size <= max_asset_bytes
+        )
+        if asset_is_mirrored:
+            if file_url != gitee_prefix + filename:
+                raise GiteeReleaseError(f"latest.json 平台 {key} 未优先使用 Gitee。")
+            if fallback_urls != [github_prefix + filename]:
+                raise GiteeReleaseError(f"latest.json 平台 {key} 未配置 GitHub 备用地址。")
+        else:
+            if file_url != github_prefix + filename:
+                raise GiteeReleaseError(
+                    f"latest.json 平台 {key} 的非镜像资产未直接使用 GitHub。"
+                )
+            if fallback_urls not in (None, [], ()):
+                raise GiteeReleaseError(
+                    f"latest.json 平台 {key} 的非镜像资产不应配置不可用备用地址。"
+                )
         if str(payload.get("sha256") or "").lower() != sha256_file(assets_dir / filename):
             raise GiteeReleaseError(f"latest.json 平台 {key} 的 SHA256 不正确。")
 
-    _verify_checksum_file(assets_dir, names)
+    _verify_checksum_file(assets_dir, all_names)
     return names
 
 
@@ -374,12 +415,14 @@ def publish_gitee_release(
     body: str,
     upload_attempts: int = DEFAULT_UPLOAD_ATTEMPTS,
     retry_delay: float = DEFAULT_RETRY_DELAY,
+    max_asset_bytes: int = GITEE_ATTACHMENT_SAFE_MAX_BYTES,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     names = validate_mirror_assets(
         assets_dir,
         version=version,
         tag=tag,
         repository=repository,
+        max_asset_bytes=max_asset_bytes,
     )
     release = client.get_release_by_tag(repository, tag)
     if release is None:
@@ -622,6 +665,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token-env", default="GITEE_TOKEN")
     parser.add_argument("--timeout", type=_positive_int, default=DEFAULT_TIMEOUT)
     parser.add_argument(
+        "--max-asset-bytes",
+        type=_positive_int,
+        default=GITEE_ATTACHMENT_SAFE_MAX_BYTES,
+        help="Gitee 允许上传的单附件安全字节上限",
+    )
+    parser.add_argument(
         "--upload-transport",
         choices=UPLOAD_TRANSPORTS,
         default="curl",
@@ -650,6 +699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         version=version,
         tag=tag,
         repository=args.repository,
+        max_asset_bytes=args.max_asset_bytes,
     )
     if args.dry_run:
         print(f"Gitee 镜像 dry-run 通过：{tag}")
@@ -679,6 +729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         body=body,
         upload_attempts=args.upload_attempts,
         retry_delay=args.retry_delay,
+        max_asset_bytes=args.max_asset_bytes,
     )
     verify_public_release(
         client,

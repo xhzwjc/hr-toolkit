@@ -15,6 +15,7 @@ VERSION_FILE = REPO_ROOT / "hr_toolkit" / "__init__.py"
 SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_ASSIGNMENT_PATTERN = re.compile(r'^__version__\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
+GITEE_ATTACHMENT_SAFE_MAX_BYTES = 100_000_000
 
 
 class ReleaseMetadataError(RuntimeError):
@@ -110,16 +111,36 @@ def _asset_payload(
     update_mode: str,
     download_base_url: str,
     fallback_download_base_url: str | None,
+    primary_download_max_bytes: int | None,
+    primary_download_asset_names: frozenset[str] | None,
 ) -> dict:
+    asset_path = assets_dir / name
+    primary_base_url = download_base_url
+    secondary_base_url = fallback_download_base_url
+    exceeds_primary_limit = (
+        primary_download_max_bytes is not None
+        and asset_path.stat().st_size > primary_download_max_bytes
+    )
+    excluded_from_primary = (
+        primary_download_asset_names is not None
+        and name not in primary_download_asset_names
+    )
+    if exceeds_primary_limit or excluded_from_primary:
+        if not fallback_download_base_url:
+            raise ReleaseMetadataError(
+                f"资产 {name} 不使用主下载源，但未配置备用下载基础地址。"
+            )
+        primary_base_url = fallback_download_base_url
+        secondary_base_url = None
     payload = {
         "version": version,
-        "file_url": _asset_url(download_base_url, tag, name),
-        "sha256": sha256_file(assets_dir / name),
+        "file_url": _asset_url(primary_base_url, tag, name),
+        "sha256": sha256_file(asset_path),
         "update_mode": update_mode,
     }
-    if fallback_download_base_url:
+    if secondary_base_url:
         payload["fallback_urls"] = [
-            _asset_url(fallback_download_base_url, tag, name)
+            _asset_url(secondary_base_url, tag, name)
         ]
     return payload
 
@@ -136,7 +157,11 @@ def build_latest_manifest(
     download_base_url: str | None = None,
     release_url: str | None = None,
     fallback_download_base_url: str | None = None,
+    primary_download_max_bytes: int | None = None,
+    primary_download_asset_names: Sequence[str] | None = None,
 ) -> dict:
+    if primary_download_max_bytes is not None and primary_download_max_bytes < 1:
+        raise ReleaseMetadataError("主下载源单文件上限必须是正整数。")
     download_base_url = _validated_url(
         download_base_url or f"https://github.com/{repository}/releases/download",
         label="下载基础地址",
@@ -152,6 +177,11 @@ def build_latest_manifest(
             label="备用下载基础地址",
             strip_trailing_slash=True,
         )
+    primary_asset_names = (
+        frozenset(primary_download_asset_names)
+        if primary_download_asset_names is not None
+        else None
+    )
     windows_installer = f"HRToolkit_{version}_x64-setup.exe"
     platforms = {
         "windows": _asset_payload(
@@ -162,6 +192,8 @@ def build_latest_manifest(
             update_mode="auto",
             download_base_url=download_base_url,
             fallback_download_base_url=fallback_download_base_url,
+            primary_download_max_bytes=primary_download_max_bytes,
+            primary_download_asset_names=primary_asset_names,
         )
     }
     if mac_variant == "universal2":
@@ -174,6 +206,8 @@ def build_latest_manifest(
             update_mode="manual",
             download_base_url=download_base_url,
             fallback_download_base_url=fallback_download_base_url,
+            primary_download_max_bytes=primary_download_max_bytes,
+            primary_download_asset_names=primary_asset_names,
         )
     else:
         for platform_key, suffix in (("macos-arm64", "arm64"), ("macos-x64", "x64")):
@@ -186,6 +220,8 @@ def build_latest_manifest(
                 update_mode="manual",
                 download_base_url=download_base_url,
                 fallback_download_base_url=fallback_download_base_url,
+                primary_download_max_bytes=primary_download_max_bytes,
+                primary_download_asset_names=primary_asset_names,
             )
 
     return {
@@ -233,6 +269,8 @@ def generate_release_metadata(
     download_base_url: str | None = None,
     release_url: str | None = None,
     fallback_download_base_url: str | None = None,
+    primary_download_max_bytes: int | None = None,
+    primary_download_asset_names: Sequence[str] | None = None,
 ) -> tuple[Path, Path, tuple[str, ...]]:
     validate_release_identity(version, tag, project_version)
     if not REPOSITORY_PATTERN.fullmatch(repository):
@@ -256,6 +294,8 @@ def generate_release_metadata(
         download_base_url=download_base_url,
         release_url=release_url,
         fallback_download_base_url=fallback_download_base_url,
+        primary_download_max_bytes=primary_download_max_bytes,
+        primary_download_asset_names=primary_download_asset_names,
     )
     latest_path = assets_dir / "latest.json"
     _atomic_write_text(latest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
@@ -288,6 +328,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--fallback-download-base-url",
         help="资产备用下载基础地址；Gitee 镜像使用 GitHub 作为备用",
     )
+    parser.add_argument(
+        "--primary-download-max-bytes",
+        type=_positive_int,
+        help="主下载源允许的单文件字节上限；超限资产改用备用源作为主地址",
+    )
+    parser.add_argument(
+        "--primary-download-asset",
+        action="append",
+        dest="primary_download_assets",
+        help="允许使用主下载源的平台资产名；可重复指定",
+    )
     parser.add_argument("--optional", action="store_true", help="将更新标记为非强制")
     parser.add_argument("--check-only", action="store_true", help="只检查 Tag 与项目版本，不读取资产")
     return parser
@@ -314,6 +365,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         download_base_url=args.download_base_url,
         release_url=args.release_url,
         fallback_download_base_url=args.fallback_download_base_url,
+        primary_download_max_bytes=args.primary_download_max_bytes,
+        primary_download_asset_names=args.primary_download_assets,
     )
     print(f"已生成：{latest_path}")
     print(f"已生成：{checksums_path}")
@@ -321,6 +374,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for name in sorted(asset_names):
         print(f"- {name}")
     return 0
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
 
 
 if __name__ == "__main__":

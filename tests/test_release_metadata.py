@@ -130,6 +130,65 @@ class ReleaseMetadataTests(unittest.TestCase):
                 "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/tag/v0.2.1",
             )
 
+    def test_limits_gitee_primary_to_explicit_installer_and_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            self._write_assets(assets_dir, "universal2")
+            windows_installer = f"HRToolkit_{self.VERSION}_x64-setup.exe"
+
+            latest_path, _checksums_path, _names = release_metadata.generate_release_metadata(
+                assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.REPOSITORY,
+                project_version=self.VERSION,
+                download_base_url=(
+                    "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download"
+                ),
+                release_url=(
+                    "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/tag/v0.2.1"
+                ),
+                fallback_download_base_url=(
+                    "https://github.com/xhzwjc/hr-toolkit/releases/download"
+                ),
+                primary_download_max_bytes=100_000_000,
+                primary_download_asset_names=(windows_installer,),
+            )
+
+            platforms = json.loads(latest_path.read_text(encoding="utf-8"))["platforms"]
+            self.assertTrue(
+                platforms["windows"]["file_url"].startswith("https://gitee.com/")
+            )
+            self.assertEqual(len(platforms["windows"]["fallback_urls"]), 1)
+            self.assertTrue(
+                platforms["macos"]["file_url"].startswith("https://github.com/")
+            )
+            self.assertNotIn("fallback_urls", platforms["macos"])
+
+            latest_path, _checksums_path, _names = release_metadata.generate_release_metadata(
+                assets_dir,
+                version=self.VERSION,
+                tag=self.TAG,
+                repository=self.REPOSITORY,
+                project_version=self.VERSION,
+                download_base_url=(
+                    "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download"
+                ),
+                release_url=(
+                    "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/tag/v0.2.1"
+                ),
+                fallback_download_base_url=(
+                    "https://github.com/xhzwjc/hr-toolkit/releases/download"
+                ),
+                primary_download_max_bytes=1,
+                primary_download_asset_names=(windows_installer,),
+            )
+            windows = json.loads(latest_path.read_text(encoding="utf-8"))["platforms"][
+                "windows"
+            ]
+            self.assertTrue(windows["file_url"].startswith("https://github.com/"))
+            self.assertNotIn("fallback_urls", windows)
+
     def test_rejects_incomplete_or_mixed_macos_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             assets_dir = Path(temporary)
