@@ -115,6 +115,7 @@ FORBIDDEN_DATA_FILENAMES = {
     ".project.lock",
     "project-write.lock",
 }
+OPENCV_VIDEOIO_FFMPEG_PATTERN = "opencv_videoio_ffmpeg*.dll"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -231,10 +232,31 @@ def build_windows_binaries(version: str, output_dir: Path, work_dir: Path) -> tu
         updater_version_file=updater_version_file,
     )
     _run(main_command)
+    if not app_dir.is_dir():
+        raise RuntimeError("PyInstaller 未生成预期的 HRToolkit onedir。")
+    removed_bytes = remove_unused_opencv_videoio_ffmpeg(app_dir)
+    if removed_bytes:
+        print(f"已移除未使用的 OpenCV 视频后端：{removed_bytes} 字节")
     _run(updater_command)
     if not app_dir.is_dir() or not updater_path.is_file():
         raise RuntimeError("PyInstaller 未生成预期的 HRToolkit onedir 和 Updater。")
     return app_dir, updater_path
+
+
+def remove_unused_opencv_videoio_ffmpeg(app_dir: Path) -> int:
+    """Remove only OpenCV's optional FFmpeg video I/O runtime from a Windows payload."""
+    cv2_dir = app_dir / "_internal" / "cv2"
+    matches = sorted(cv2_dir.glob(OPENCV_VIDEOIO_FFMPEG_PATTERN))
+    removed_bytes = 0
+    for path in matches:
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"拒绝移除非普通 OpenCV 视频后端文件：{path}")
+        removed_bytes += path.stat().st_size
+        path.unlink()
+    leftovers = sorted(cv2_dir.glob(OPENCV_VIDEOIO_FFMPEG_PATTERN))
+    if leftovers:
+        raise RuntimeError(f"OpenCV 视频后端未完全移除：{leftovers}")
+    return removed_bytes
 
 
 def pyinstaller_commands(
@@ -377,6 +399,12 @@ def verify_windows_payload(app_dir: Path) -> None:
         raise RuntimeError(f"程序目录缺少 {launcher.name}：{app_dir}")
     if not internal.is_dir():
         raise RuntimeError(f"程序目录缺少 _internal：{app_dir}")
+
+    video_backends = sorted(
+        (internal / "cv2").glob(OPENCV_VIDEOIO_FFMPEG_PATTERN)
+    )
+    if video_backends:
+        raise RuntimeError(f"程序包仍包含未使用的 OpenCV 视频后端：{video_backends}")
 
     files = sorted((path for path in app_dir.rglob("*") if path.is_file()), key=lambda path: path.as_posix())
     for path in files:

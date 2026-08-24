@@ -486,7 +486,7 @@ npm run release -- 0.3.5 --dry-run
 
 普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查，并在 Windows Python 3.12 上实际加载本地 OCR 模型完成一次推理。`.github/workflows/test-build.yml` 每周一北京时间 02:00 自动执行完整 Windows 测试、EXE/MSI/便携包构建及安装运行检查，也可手动选择 Windows、macOS 或全部平台；选择 macOS 时会在真实 Intel 与 Apple Silicon runner 上分别构建和验收。所有 Python 3.12 CI 和打包任务使用 `constraints/python312-production.txt`，避免上游依赖更新造成构建结果无预警漂移。
 
-只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag，以及 `SHA256SUMS.txt`、`latest.json` 和 Windows `setup.exe` 同步到 Gitee。MSI 与两个 DMG 仅保留在 GitHub，避免触发 Gitee 社区版 100 MB 单附件上限。
+只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag，以及 `SHA256SUMS.txt`、`latest.json` 和 Windows `setup.exe` 同步到 Gitee。MSI 与两个 DMG 按镜像精简策略仅保留在 GitHub；四个正式二进制资产发布前都必须严格小于 100,000,000 字节。
 
 每个版本的直接下载资产为（以下用 `<version>` 表示版本号）：
 
@@ -526,7 +526,7 @@ Windows 构建输出：
 - Gitee 最新 Release 接口会返回公开附件列表，客户端从中找到 `latest.json`。只要 Gitee 能返回有效配置，就不会访问 GitHub；
 - Gitee 连接失败、超时或配置异常时，自动回退尝试 GitHub；
 - `latest.json` 中 Windows 平台的 `file_url` 优先指向 Gitee 国内 CDN，`fallback_urls` 配置 GitHub 镜像，下载失败时自动重试备用源；
-- macOS 的 DMG 超过 Gitee 单附件配额，清单直接使用 GitHub 下载地址；Gitee Release 严格只保留校验文件、更新清单和 Windows EXE；
+- macOS 的 DMG 清单使用 GitHub 下载地址；Gitee Release 按镜像精简策略严格只保留校验文件、更新清单和 Windows EXE；
 - 下载弹窗实时显示进度与速率，支持点击右上角 `×` 或按 `Esc` 随时安全取消，并自动清理未完成的临时文件。
 
 ---

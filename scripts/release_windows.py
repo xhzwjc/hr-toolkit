@@ -15,6 +15,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from build_update_assets import LEGACY_MANIFEST_NAME
 from build_windows import APP_NAME, UPDATER_NAME, validate_build_version
 from build_windows_installers import installer_asset_names
+from generate_release_metadata import require_release_assets_under_limit
 from versioning import read_project_version
 
 
@@ -83,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     missing = [path for path in expected if not path.is_file()]
     if missing:
         raise RuntimeError(f"Windows 三阶段完成后缺少产物：{missing}")
+    require_release_assets_under_limit(expected[:2])
     print("\nWindows 发布资产已完成：")
     for path in expected:
         print(f"- {path}")

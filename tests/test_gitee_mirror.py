@@ -160,7 +160,7 @@ class GiteeMirrorTests(unittest.TestCase):
                     repository=self.GITEE_REPOSITORY,
                 )
 
-    def test_capacity_limit_keeps_only_metadata_when_exe_is_too_large(self) -> None:
+    def test_capacity_limit_rejects_release_when_required_exe_is_too_large(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             assets_dir = Path(temporary)
             self._build_assets(assets_dir)
@@ -182,15 +182,17 @@ class GiteeMirrorTests(unittest.TestCase):
                 primary_download_asset_names=(windows_installer,),
             )
 
-            names = gitee_publish.validate_mirror_assets(
-                assets_dir,
-                version=self.VERSION,
-                tag=self.TAG,
-                repository=self.GITEE_REPOSITORY,
-                max_asset_bytes=1,
-            )
-
-            self.assertEqual(set(names), {"latest.json", "SHA256SUMS.txt"})
+            with self.assertRaisesRegex(
+                gitee_publish.GiteeReleaseError,
+                "Gitee 必需的 Windows EXE 不可发布",
+            ):
+                gitee_publish.validate_mirror_assets(
+                    assets_dir,
+                    version=self.VERSION,
+                    tag=self.TAG,
+                    repository=self.GITEE_REPOSITORY,
+                    max_asset_bytes=1,
+                )
 
     def test_publish_is_idempotent_and_uploads_latest_json_last(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

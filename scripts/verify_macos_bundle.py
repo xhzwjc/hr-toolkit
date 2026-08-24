@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEMPLATE_DIR = REPO_ROOT / "hr_toolkit" / "templates"
 DEFAULT_README = REPO_ROOT / "README.md"
 EXPECTED_BUNDLE_IDENTIFIER = "com.xhzwjc.hrtoolkit"
+EXPECTED_DMG_FORMAT = "ULMO"
 ARCHITECTURES = {"universal2", "x86_64", "arm64"}
 SPREADSHEET_SUFFIXES = {".csv", ".tsv", ".xls", ".xlsb", ".xlsm", ".xlsx"}
 PROHIBITED_DATA_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
@@ -321,6 +322,19 @@ def verify_dmg(
         )
     if not dmg_path.is_file() or dmg_path.stat().st_size <= 0:
         raise MacBundleVerificationError(f"DMG 不存在或为空：{dmg_path}")
+    image_info_result = _run(
+        ["hdiutil", "imageinfo", "-plist", str(dmg_path)],
+        capture=True,
+    )
+    try:
+        image_info = plistlib.loads(image_info_result.stdout.encode("utf-8"))
+    except (ValueError, plistlib.InvalidFileException) as exc:
+        raise MacBundleVerificationError(f"无法读取 DMG 格式：{dmg_path}") from exc
+    actual_format = image_info.get("Format")
+    if actual_format != EXPECTED_DMG_FORMAT:
+        raise MacBundleVerificationError(
+            f"DMG 压缩格式不一致：期望 {EXPECTED_DMG_FORMAT}，实际 {actual_format!r}"
+        )
     _run(["hdiutil", "verify", str(dmg_path)])
 
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_dmg_verify_") as temporary:

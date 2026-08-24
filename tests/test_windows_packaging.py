@@ -102,6 +102,52 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("_sevenzip_hidden + _rar_hidden", spec)
         self.assertNotIn('"distutils"', spec)
 
+    def test_macos_dmg_uses_two_stage_ulmo_compression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit.app"
+            app_dir.mkdir()
+            dmg_path = tmp_dir / "output" / f"HRToolkit_{self.version}_arm64.dmg"
+            staging_dir = tmp_dir / "work" / "dmg-staging"
+            with patch.object(build_macos, "_run") as mocked_run:
+                build_macos._create_dmg(
+                    app_dir,
+                    dmg_path,
+                    staging_dir,
+                    self.version,
+                )
+
+            commands = [call.args[0] for call in mocked_run.call_args_list]
+            self.assertEqual(commands[0][0], "ditto")
+            self.assertEqual(commands[1][0:2], ["hdiutil", "create"])
+            self.assertEqual(commands[1][commands[1].index("-format") + 1], "UDRO")
+            self.assertEqual(commands[2][0:2], ["hdiutil", "convert"])
+            self.assertEqual(
+                commands[2][commands[2].index("-format") + 1],
+                verify_macos_bundle.EXPECTED_DMG_FORMAT,
+            )
+            self.assertNotIn("UDZO", " ".join(" ".join(command) for command in commands))
+
+    def test_windows_payload_prunes_only_optional_opencv_video_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir, _updater = self._fake_app(Path(tmp))
+            cv2_dir = app_dir / "_internal" / "cv2"
+            cv2_dir.mkdir()
+            ffmpeg = cv2_dir / "opencv_videoio_ffmpeg500_64.dll"
+            retained = cv2_dir / "opencv_imgcodecs.pyd"
+            ffmpeg.write_bytes(b"optional video backend")
+            self._write_fake_pe(retained, build_windows.PE_MACHINE_AMD64)
+            retained_payload = retained.read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "OpenCV 视频后端"):
+                build_windows.verify_windows_payload(app_dir)
+            removed = build_windows.remove_unused_opencv_videoio_ffmpeg(app_dir)
+
+            self.assertEqual(removed, len(b"optional video backend"))
+            self.assertFalse(ffmpeg.exists())
+            self.assertEqual(retained.read_bytes(), retained_payload)
+            build_windows.verify_windows_payload(app_dir)
+
     def test_windows_version_metadata_uses_requested_version(self) -> None:
         payload = build_windows.windows_version_info("0.2.1")
         self.assertIn("filevers=(0, 2, 1, 0)", payload)

@@ -18,8 +18,10 @@ from typing import Any, Mapping, Sequence
 from generate_release_metadata import (
     GITEE_ATTACHMENT_SAFE_MAX_BYTES,
     REPOSITORY_PATTERN,
+    ReleaseMetadataError,
     detect_mac_variant,
     release_asset_names,
+    require_release_asset_under_limit,
     sha256_file,
     validate_release_identity,
     validate_version,
@@ -321,10 +323,14 @@ def mirror_asset_names(
     if max_asset_bytes < 1:
         raise GiteeReleaseError("Gitee 单附件上限必须是正整数。")
     windows_installer = f"HRToolkit_{version}_x64-setup.exe"
-    names = ["SHA256SUMS.txt", "latest.json"]
-    if (assets_dir / windows_installer).stat().st_size <= max_asset_bytes:
-        names.insert(0, windows_installer)
-    return tuple(names)
+    try:
+        require_release_asset_under_limit(
+            assets_dir / windows_installer,
+            max_bytes=max_asset_bytes,
+        )
+    except ReleaseMetadataError as exc:
+        raise GiteeReleaseError(f"Gitee 必需的 Windows EXE 不可发布：{exc}") from None
+    return windows_installer, "SHA256SUMS.txt", "latest.json"
 
 
 def validate_mirror_assets(

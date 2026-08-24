@@ -14,8 +14,12 @@ REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from generate_app_icons import encode_png, render_icon  # noqa: E402
-from generate_release_metadata import read_project_version, validate_version  # noqa: E402
-from verify_macos_bundle import verify_app_bundle, verify_dmg  # noqa: E402
+from generate_release_metadata import (  # noqa: E402
+    read_project_version,
+    require_release_asset_under_limit,
+    validate_version,
+)
+from verify_macos_bundle import EXPECTED_DMG_FORMAT, verify_app_bundle, verify_dmg  # noqa: E402
 
 
 ARCHITECTURES = ("universal2", "x86_64", "arm64")
@@ -194,20 +198,36 @@ def _create_dmg(app_path: Path, dmg_path: Path, staging_dir: Path, version: str)
     dmg_path.parent.mkdir(parents=True, exist_ok=True)
     if dmg_path.exists():
         dmg_path.unlink()
-    _run(
-        [
-            "hdiutil",
-            "create",
-            "-ov",
-            "-format",
-            "UDZO",
-            "-volname",
-            f"HR Toolkit {version}",
-            "-srcfolder",
-            str(staging_dir),
-            str(dmg_path),
-        ]
-    )
+    uncompressed_dmg = staging_dir.parent / f"{dmg_path.stem}.uncompressed.dmg"
+    uncompressed_dmg.unlink(missing_ok=True)
+    try:
+        _run(
+            [
+                "hdiutil",
+                "create",
+                "-ov",
+                "-format",
+                "UDRO",
+                "-volname",
+                f"HR Toolkit {version}",
+                "-srcfolder",
+                str(staging_dir),
+                str(uncompressed_dmg),
+            ]
+        )
+        _run(
+            [
+                "hdiutil",
+                "convert",
+                str(uncompressed_dmg),
+                "-format",
+                EXPECTED_DMG_FORMAT,
+                "-o",
+                str(dmg_path),
+            ]
+        )
+    finally:
+        uncompressed_dmg.unlink(missing_ok=True)
 
 
 def build_macos(
@@ -294,6 +314,8 @@ def build_macos(
         smoke_test=True,
     )
     print(f"DMG 验证通过：{dmg_mach_o_count} 个 Mach-O")
+    dmg_size = require_release_asset_under_limit(dmg_path)
+    print(f"DMG 体积门禁通过：{dmg_size} 字节")
     if codesign_identity:
         _run(["codesign", "--verify", "--deep", "--strict", str(app_path)])
     return dmg_path

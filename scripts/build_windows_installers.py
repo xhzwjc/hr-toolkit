@@ -25,6 +25,7 @@ from build_windows import (
     run_runtime_smoke,
     validate_build_version,
 )
+from generate_release_metadata import require_release_assets_under_limit
 
 
 INNO_SCRIPT = REPO_ROOT / "packaging" / "windows" / "HRToolkit.iss"
@@ -136,6 +137,7 @@ def build_windows_installers(
         )
 
     verify_installer_outputs(exe_path, msi_path)
+    require_release_assets_under_limit((exe_path, msi_path))
     if install_smoke:
         smoke_test_installers(exe_path, msi_path)
     return exe_path, msi_path

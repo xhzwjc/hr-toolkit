@@ -30,6 +30,23 @@ class ReleaseMetadataTests(unittest.TestCase):
                 with self.assertRaises(release_metadata.ReleaseMetadataError):
                     release_metadata.validate_version(version)
 
+    def test_release_asset_size_gate_is_strict_at_decimal_100_mb(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "asset.bin"
+            asset.write_bytes(b"small")
+            self.assertEqual(
+                release_metadata.require_release_asset_under_limit(asset),
+                len(b"small"),
+            )
+
+            with asset.open("r+b") as handle:
+                handle.truncate(release_metadata.MAX_RELEASE_ASSET_BYTES)
+            with self.assertRaisesRegex(
+                release_metadata.ReleaseMetadataError,
+                "必须严格小于 100000000 字节",
+            ):
+                release_metadata.require_release_asset_under_limit(asset)
+
     def test_release_identity_requires_exact_tag_and_project_version(self) -> None:
         release_metadata.validate_release_identity(self.VERSION, self.TAG, self.VERSION)
         with self.assertRaisesRegex(release_metadata.ReleaseMetadataError, "Tag 与版本不一致"):

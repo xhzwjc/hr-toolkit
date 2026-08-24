@@ -15,11 +15,43 @@ VERSION_FILE = REPO_ROOT / "hr_toolkit" / "__init__.py"
 SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_ASSIGNMENT_PATTERN = re.compile(r'^__version__\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
-GITEE_ATTACHMENT_SAFE_MAX_BYTES = 100_000_000
+MAX_RELEASE_ASSET_BYTES = 100_000_000
+# Backward-compatible public name used by the Gitee release scripts.
+GITEE_ATTACHMENT_SAFE_MAX_BYTES = MAX_RELEASE_ASSET_BYTES
 
 
 class ReleaseMetadataError(RuntimeError):
     """Raised when release assets or version metadata are inconsistent."""
+
+
+def require_release_asset_under_limit(
+    path: Path,
+    *,
+    max_bytes: int = MAX_RELEASE_ASSET_BYTES,
+) -> int:
+    """Require one direct release asset to stay strictly below its byte limit."""
+    if max_bytes < 1:
+        raise ReleaseMetadataError("发布资产单文件上限必须是正整数。")
+    if not path.is_file():
+        raise ReleaseMetadataError(f"发布资产不存在或不是普通文件：{path}")
+    size = path.stat().st_size
+    if size >= max_bytes:
+        raise ReleaseMetadataError(
+            f"发布资产 {path.name} 体积超限：{size} 字节，必须严格小于 {max_bytes} 字节。"
+        )
+    return size
+
+
+def require_release_assets_under_limit(
+    paths: Iterable[Path],
+    *,
+    max_bytes: int = MAX_RELEASE_ASSET_BYTES,
+) -> tuple[tuple[Path, int], ...]:
+    """Apply the same strict size gate to every supplied direct release asset."""
+    return tuple(
+        (path, require_release_asset_under_limit(path, max_bytes=max_bytes))
+        for path in paths
+    )
 
 
 def validate_version(version: str) -> str:
@@ -119,7 +151,7 @@ def _asset_payload(
     secondary_base_url = fallback_download_base_url
     exceeds_primary_limit = (
         primary_download_max_bytes is not None
-        and asset_path.stat().st_size > primary_download_max_bytes
+        and asset_path.stat().st_size >= primary_download_max_bytes
     )
     excluded_from_primary = (
         primary_download_asset_names is not None
@@ -278,6 +310,7 @@ def generate_release_metadata(
     mac_variant = detect_mac_variant(assets_dir, version)
     asset_names = release_asset_names(version, mac_variant=mac_variant)
     _validate_asset_directory(assets_dir, asset_names)
+    require_release_assets_under_limit(assets_dir / name for name in asset_names)
 
     normalized_notes = tuple(note.strip() for note in (notes or (f"HR Toolkit v{version}",)) if note.strip())
     if not normalized_notes:
