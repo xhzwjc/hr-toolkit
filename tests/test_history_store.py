@@ -12,6 +12,7 @@ import unittest
 import uuid
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -455,7 +456,12 @@ class HistoryStoreTests(unittest.TestCase):
 
     def test_task_directory_collision_never_deletes_existing_task(self) -> None:
         fixed_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
-        with patch("hr_toolkit.history_store.uuid.uuid4", return_value=fixed_id):
+        fixed_now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+        with (
+            patch("hr_toolkit.history_store.uuid.uuid4", return_value=fixed_id),
+            patch("hr_toolkit.history_store.datetime", wraps=datetime) as mocked_datetime,
+        ):
+            mocked_datetime.now.return_value = fixed_now
             task_id = self._start()
             detail = self.store.get_task(task_id)
             assert detail is not None

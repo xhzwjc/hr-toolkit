@@ -130,7 +130,7 @@ class WindowsPackagingTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertRegex(
                     line,
-                    r"^uses: actions/[a-z-]+@[0-9a-f]{40} # v\d+$",
+                    r"^uses: actions/[a-z-]+@[0-9a-f]{40} # v\d+(?:\.\d+){0,2}$",
                 )
 
         constraint_path = (
