@@ -232,35 +232,41 @@ def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) ->
 def _read_salary_file(file_path: Path, month: str) -> tuple[list[SalaryRecord], list[str]]:
     warnings: list[str] = []
     formula_wb = load_workbook(file_path, data_only=False)
-    value_wb = load_workbook(file_path, data_only=True)
-    layout = _detect_source_layout(formula_wb)
-    formula_ws = formula_wb[layout.detail_sheet_name]
-    value_ws = value_wb[layout.detail_sheet_name]
+    try:
+        value_wb = load_workbook(file_path, data_only=True)
+        try:
+            layout = _detect_source_layout(formula_wb)
+            formula_ws = formula_wb[layout.detail_sheet_name]
+            value_ws = value_wb[layout.detail_sheet_name]
 
-    records: list[SalaryRecord] = []
-    for row_index in range(layout.data_start_row, formula_ws.max_row + 1):
-        id_card = _cell_text(value_ws, row_index, layout.id_card_col)
-        name = _cell_text(value_ws, row_index, layout.name_col)
-        if not id_card and not name:
-            continue
-        if not id_card:
-            warnings.append(f"{file_path.name} 第 {row_index} 行缺少身份证号码，已跳过")
-            continue
-        amount = _amount_value(value_ws, formula_ws, row_index, layout)
-        if amount is None:
-            warnings.append(f"{file_path.name} 第 {row_index} 行未识别到应发工资，按 0 处理")
-            amount = 0
-        records.append(
-            SalaryRecord(
-                month=month,
-                name=name,
-                id_card=id_card,
-                amount=amount,
-                source_file=file_path.name,
-                source_row=row_index,
-            )
-        )
-    return records, warnings
+            records: list[SalaryRecord] = []
+            for row_index in range(layout.data_start_row, formula_ws.max_row + 1):
+                id_card = _cell_text(value_ws, row_index, layout.id_card_col)
+                name = _cell_text(value_ws, row_index, layout.name_col)
+                if not id_card and not name:
+                    continue
+                if not id_card:
+                    warnings.append(f"{file_path.name} 第 {row_index} 行缺少身份证号码，已跳过")
+                    continue
+                amount = _amount_value(value_ws, formula_ws, row_index, layout)
+                if amount is None:
+                    warnings.append(f"{file_path.name} 第 {row_index} 行未识别到应发工资，按 0 处理")
+                    amount = 0
+                records.append(
+                    SalaryRecord(
+                        month=month,
+                        name=name,
+                        id_card=id_card,
+                        amount=amount,
+                        source_file=file_path.name,
+                        source_row=row_index,
+                    )
+                )
+            return records, warnings
+        finally:
+            value_wb.close()
+    finally:
+        formula_wb.close()
 
 
 def _detect_source_layout(workbook) -> SalarySourceLayout:
@@ -451,35 +457,38 @@ def _read_existing_summary(
 ) -> tuple[list[str], list[MergedEmployee], list[str]]:
     warnings: list[str] = []
     workbook = load_workbook(summary_path, data_only=True)
-    sheet_name = _find_sheet_name_or_active(workbook.sheetnames, SUMMARY_SHEET_KEYWORD)
-    ws = workbook[sheet_name]
-    header_row = _find_header_row_any(ws, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
-    headers = _read_headers(ws, header_row)
-    name_col = _first_header_col(headers, (HEADER_NAME,), sheet_label="汇总表")
-    id_card_col = _first_header_col(headers, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
-    month_columns = _read_month_columns(ws, header_row)
-    if not month_columns:
-        raise ValueError("已有汇总表未找到月份列，请确认表头包含 202601 这类月份")
+    try:
+        sheet_name = _find_sheet_name_or_active(workbook.sheetnames, SUMMARY_SHEET_KEYWORD)
+        ws = workbook[sheet_name]
+        header_row = _find_header_row_any(ws, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
+        headers = _read_headers(ws, header_row)
+        name_col = _first_header_col(headers, (HEADER_NAME,), sheet_label="汇总表")
+        id_card_col = _first_header_col(headers, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
+        month_columns = _read_month_columns(ws, header_row)
+        if not month_columns:
+            raise ValueError("已有汇总表未找到月份列，请确认表头包含 202601 这类月份")
 
-    data_start_row = _find_data_start_row(ws, header_row)
-    employees: OrderedDict[str, MergedEmployee] = OrderedDict()
-    for row_index in range(data_start_row, ws.max_row + 1):
-        id_card = _cell_text(ws, row_index, id_card_col)
-        name = _cell_text(ws, row_index, name_col)
-        if not id_card and not name:
-            continue
-        if not id_card:
-            warnings.append(f"{summary_path.name} 第 {row_index} 行缺少身份证号码，已跳过")
-            continue
-        amounts = OrderedDict(
-            (month, _number(ws.cell(row_index, col_index).value) or 0.0)
-            for month, col_index in month_columns.items()
-        )
-        if id_card in employees:
-            warnings.append(f"已有汇总表中身份证 {id_card} 出现重复行，仅保留第一行")
-            continue
-        employees[id_card] = MergedEmployee(name=name, id_card=id_card, amounts=amounts)
-    return list(month_columns.keys()), list(employees.values()), warnings
+        data_start_row = _find_data_start_row(ws, header_row)
+        employees: OrderedDict[str, MergedEmployee] = OrderedDict()
+        for row_index in range(data_start_row, ws.max_row + 1):
+            id_card = _cell_text(ws, row_index, id_card_col)
+            name = _cell_text(ws, row_index, name_col)
+            if not id_card and not name:
+                continue
+            if not id_card:
+                warnings.append(f"{summary_path.name} 第 {row_index} 行缺少身份证号码，已跳过")
+                continue
+            amounts = OrderedDict(
+                (month, _number(ws.cell(row_index, col_index).value) or 0.0)
+                for month, col_index in month_columns.items()
+            )
+            if id_card in employees:
+                warnings.append(f"已有汇总表中身份证 {id_card} 出现重复行，仅保留第一行")
+                continue
+            employees[id_card] = MergedEmployee(name=name, id_card=id_card, amounts=amounts)
+        return list(month_columns.keys()), list(employees.values()), warnings
+    finally:
+        workbook.close()
 
 
 def _find_sheet_name_or_active(sheetnames: list[str], keyword: str) -> str:
@@ -576,37 +585,40 @@ def _has_existing_amount(value: Any) -> bool:
 
 def _write_output_workbook(output_file: Path, employees: list[MergedEmployee], months: list[str]) -> None:
     workbook = Workbook()
-    ws = workbook.active
-    ws.title = "汇总"
+    try:
+        ws = workbook.active
+        ws.title = "汇总"
 
-    max_col = 3 + len(months)
-    ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=max_col)
-    ws["A1"] = SUMMARY_TITLE
-    ws["A1"].font = Font(name="宋体", size=20, bold=True)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        max_col = 3 + len(months)
+        ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=max_col)
+        ws["A1"] = SUMMARY_TITLE
+        ws["A1"].font = Font(name="宋体", size=20, bold=True)
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
-    headers: list[Any] = ["序号", "姓名", "身份证号码", *(int(month) for month in months)]
-    subheaders = ["", "", "", *(["应发工资"] * len(months))]
-    for col_index, value in enumerate(headers, start=1):
-        ws.cell(3, col_index).value = value
-    for col_index, value in enumerate(subheaders, start=1):
-        ws.cell(4, col_index).value = value
-    ws.merge_cells(start_row=3, start_column=1, end_row=4, end_column=1)
-    ws.merge_cells(start_row=3, start_column=2, end_row=4, end_column=2)
-    ws.merge_cells(start_row=3, start_column=3, end_row=4, end_column=3)
-    ws.row_dimensions[1].height = 28
-    ws.row_dimensions[2].height = 28
-    ws.row_dimensions[3].height = 22
-    ws.row_dimensions[4].height = 22
-    ws.freeze_panes = "D5"
+        headers: list[Any] = ["序号", "姓名", "身份证号码", *(int(month) for month in months)]
+        subheaders = ["", "", "", *(["应发工资"] * len(months))]
+        for col_index, value in enumerate(headers, start=1):
+            ws.cell(3, col_index).value = value
+        for col_index, value in enumerate(subheaders, start=1):
+            ws.cell(4, col_index).value = value
+        ws.merge_cells(start_row=3, start_column=1, end_row=4, end_column=1)
+        ws.merge_cells(start_row=3, start_column=2, end_row=4, end_column=2)
+        ws.merge_cells(start_row=3, start_column=3, end_row=4, end_column=3)
+        ws.row_dimensions[1].height = 28
+        ws.row_dimensions[2].height = 28
+        ws.row_dimensions[3].height = 22
+        ws.row_dimensions[4].height = 22
+        ws.freeze_panes = "D5"
 
-    for row_index, employee in enumerate(employees, start=5):
-        values: list[Any] = [row_index - 4, employee.name, employee.id_card]
-        values.extend(employee.amounts[month] for month in months)
-        ws.append(values)
+        for row_index, employee in enumerate(employees, start=5):
+            values: list[Any] = [row_index - 4, employee.name, employee.id_card]
+            values.extend(employee.amounts[month] for month in months)
+            ws.append(values)
 
-    _format_output_sheet(ws, max_col, len(employees))
-    workbook.save(output_file)
+        _format_output_sheet(ws, max_col, len(employees))
+        workbook.save(output_file)
+    finally:
+        workbook.close()
 
 
 _OUTPUT_SIDE = Side(style="thin", color="000000")

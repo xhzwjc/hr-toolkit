@@ -329,6 +329,29 @@ class GiteeMirrorTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
 
+    def test_large_upload_defaults_to_streaming_curl(self) -> None:
+        args = gitee_publish.build_parser().parse_args(
+            [
+                "--version", self.VERSION,
+                "--target-commitish", "a" * 40,
+                "--assets-dir", ".",
+            ]
+        )
+
+        self.assertEqual(args.upload_transport, "curl")
+
+    def test_urllib_multipart_rejects_large_asset_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            asset = Path(temporary) / "large.zip"
+            asset.write_bytes(b"12")
+
+            with (
+                mock.patch.object(gitee_publish, "URLLIB_MAX_UPLOAD_BYTES", 1),
+                mock.patch.object(Path, "read_bytes", side_effect=AssertionError("must not read")),
+                self.assertRaisesRegex(gitee_publish.GiteeReleaseError, "curl"),
+            ):
+                gitee_publish._multipart_body({}, asset)
+
 
 if __name__ == "__main__":
     unittest.main()

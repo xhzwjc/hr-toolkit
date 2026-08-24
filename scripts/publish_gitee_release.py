@@ -34,6 +34,7 @@ DEFAULT_RETRY_DELAY = 5.0
 UPLOAD_TRANSPORTS = ("urllib", "curl")
 METADATA_NAMES = ("latest.json", "SHA256SUMS.txt")
 USER_AGENT = "HRToolkit-Gitee-Publisher/1.0"
+URLLIB_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
 class GiteeReleaseError(RuntimeError):
@@ -47,7 +48,7 @@ class GiteeClient:
         *,
         api_base: str = DEFAULT_API_BASE,
         timeout: int = DEFAULT_TIMEOUT,
-        upload_transport: str = "urllib",
+        upload_transport: str = "curl",
         curl_executable: str | None = None,
     ) -> None:
         if not token.strip():
@@ -139,6 +140,10 @@ class GiteeClient:
     ) -> dict[str, Any]:
         if self.upload_transport == "curl":
             return self._upload_attachment_with_curl(repository, release_id, file_path)
+        if file_path.stat().st_size > URLLIB_MAX_UPLOAD_BYTES:
+            raise GiteeReleaseError(
+                "urllib 上传会把整个附件载入内存；大文件请改用 --upload-transport curl。"
+            )
         result = self._request_json(
             "POST",
             f"/repos/{_quoted_repository(repository)}/releases/{urllib.parse.quote(release_id, safe='')}/attach_files",
@@ -619,7 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--upload-transport",
         choices=UPLOAD_TRANSPORTS,
-        default="urllib",
+        default="curl",
     )
     parser.add_argument(
         "--upload-attempts",
@@ -712,6 +717,10 @@ def _curl_config_escape(value: str) -> str:
 
 
 def _multipart_body(fields: Mapping[str, str], file_path: Path) -> tuple[bytes, str]:
+    if file_path.stat().st_size > URLLIB_MAX_UPLOAD_BYTES:
+        raise GiteeReleaseError(
+            "urllib 上传会把整个附件载入内存；大文件请改用 --upload-transport curl。"
+        )
     boundary = "----HRToolkit" + uuid.uuid4().hex
     chunks: list[bytes] = []
     for key, value in fields.items():

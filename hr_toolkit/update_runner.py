@@ -5,6 +5,7 @@ import ctypes
 import os
 import queue
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,10 @@ from typing import Callable
 UPDATE_LOG_FILE = "HRToolkit_update.log"
 LOG_MAX_BYTES = 1024 * 1024
 LOG_KEEP_BYTES = 256 * 1024
+ZIP_MAX_MEMBERS = 100_000
+ZIP_MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+ZIP_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+ZIP_MAX_COMPRESSION_RATIO = 1000
 
 StatusCallback = Callable[[str], None]
 
@@ -173,6 +178,8 @@ class _UpdaterUI:
 def _run_update(args: argparse.Namespace, log_file: Path, status: StatusCallback | None = None) -> None:
     app_dir = args.app_dir.resolve()
     package_path = (args.installer or args.zip or Path("")).resolve()
+    _validate_app_dir(app_dir)
+    _validate_launcher_name(args.launcher)
     _append_log(log_file, f"系统平台：{sys.platform}")
     _append_log(log_file, f"更新程序：{Path(sys.argv[0]).resolve()}")
     _append_log(log_file, f"更新包路径：{package_path}")
@@ -214,13 +221,18 @@ def _run_update(args: argparse.Namespace, log_file: Path, status: StatusCallback
         _notify(status, "正在解压更新包…")
         extract_dir = Path(tempfile.mkdtemp(prefix="hr_toolkit_extract_"))
         _append_log(log_file, f"解压目录：{extract_dir}")
-        _safe_extract_zip(package_path, extract_dir, log_file)
-        payload_root = _find_payload_root(extract_dir, log_file)
-        _append_log(log_file, f"更新包根目录：{payload_root}")
-        _validate_payload_root(payload_root, args.launcher)
-        _append_log(log_file, "更新包校验通过。")
-        _notify(status, "正在替换程序文件，可能需要几十秒…")
-        _replace_app_dir(payload_root, app_dir, log_file)
+        try:
+            _safe_extract_zip(package_path, extract_dir, log_file)
+            payload_root = _find_payload_root(extract_dir, log_file)
+            _append_log(log_file, f"更新包根目录：{payload_root}")
+            _validate_payload_root(payload_root, args.launcher)
+            _append_log(log_file, "更新包校验通过。")
+            _notify(status, "正在替换程序文件，可能需要几十秒…")
+            _replace_app_dir(payload_root, app_dir, log_file)
+        except Exception:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            _append_log(log_file, f"更新失败，已清理解压目录：{extract_dir}")
+            raise
 
         _notify(status, "正在清理临时文件…")
         _cleanup_after_success(package_path, extract_dir, log_file)
@@ -251,15 +263,99 @@ def _safe_extract_zip(package_path: Path, extract_dir: Path, log_file: Path) -> 
     extract_root = extract_dir.resolve()
     with zipfile.ZipFile(package_path) as archive:
         members = archive.infolist()
+        if len(members) > ZIP_MAX_MEMBERS:
+            raise RuntimeError("更新包文件数量异常，已拒绝解压。")
         _append_log(log_file, f"zip 文件数量：{len(members)}")
         for member in members[:20]:
             _append_log(log_file, f"zip 条目：{member.filename}")
-        for member in archive.infolist():
-            target = (extract_dir / member.filename).resolve()
+        total_size = 0
+        seen_targets: set[str] = set()
+        planned: list[tuple[zipfile.ZipInfo, Path]] = []
+        for member in members:
+            normalized_name = member.filename.replace("\\", "/")
+            parts = Path(normalized_name).parts
+            if (
+                not normalized_name
+                or "\x00" in normalized_name
+                or normalized_name.startswith("/")
+                or (len(normalized_name) >= 2 and normalized_name[1] == ":")
+                or ".." in parts
+            ):
+                raise RuntimeError("更新包包含非法路径。")
+            target = (extract_dir / normalized_name).resolve()
             if extract_root not in target.parents and target != extract_root:
                 raise RuntimeError("更新包包含非法路径。")
-        archive.extractall(extract_dir)
+            target_key = str(target).casefold()
+            if target_key in seen_targets:
+                raise RuntimeError("更新包包含重复或大小写冲突的路径。")
+            seen_targets.add(target_key)
+            unix_mode = (member.external_attr >> 16) & 0xFFFF
+            file_type = stat.S_IFMT(unix_mode)
+            if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise RuntimeError("更新包包含链接或特殊文件，已拒绝解压。")
+            if member.file_size > ZIP_MAX_MEMBER_BYTES:
+                raise RuntimeError("更新包中单个文件体积异常，已拒绝解压。")
+            if _zip_compression_ratio(member) > ZIP_MAX_COMPRESSION_RATIO:
+                raise RuntimeError("更新包中存在异常压缩条目，已拒绝解压。")
+            total_size += member.file_size
+            if total_size > ZIP_MAX_TOTAL_BYTES:
+                raise RuntimeError("更新包解压后总体积异常，已拒绝解压。")
+            planned.append((member, target))
+
+        _ensure_extraction_space(extract_dir, total_size)
+        for member, target in planned:
+            unix_mode = (member.external_attr >> 16) & 0xFFFF
+            if stat.S_IFMT(unix_mode) == stat.S_IFDIR or member.is_dir() or member.filename.endswith(("/", "\\")):
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copied = 0
+            with archive.open(member) as source, target.open("xb") as output:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > member.file_size or copied > ZIP_MAX_MEMBER_BYTES:
+                        raise RuntimeError("更新包条目实际体积与声明不一致。")
+                    output.write(chunk)
+            if copied != member.file_size:
+                raise RuntimeError("更新包条目数据不完整。")
     _append_log(log_file, "更新包解压完成。")
+
+
+def _zip_compression_ratio(member: zipfile.ZipInfo) -> float:
+    if member.file_size <= 0:
+        return 0.0
+    if member.compress_size <= 0:
+        return float("inf")
+    return member.file_size / member.compress_size
+
+
+def _ensure_extraction_space(extract_dir: Path, total_size: int) -> None:
+    try:
+        free = shutil.disk_usage(extract_dir).free
+    except OSError:
+        return
+    if total_size > free:
+        raise RuntimeError("磁盘空间不足，无法安全解压更新包。")
+
+
+def _validate_launcher_name(launcher: str) -> None:
+    if (
+        not launcher
+        or launcher in {".", ".."}
+        or "\x00" in launcher
+        or "/" in launcher
+        or "\\" in launcher
+        or Path(launcher).name != launcher
+    ):
+        raise RuntimeError("主程序文件名不合法。")
+
+
+def _validate_app_dir(app_dir: Path) -> None:
+    if app_dir == Path(app_dir.anchor) or app_dir == Path.home().resolve() or not app_dir.name:
+        raise RuntimeError("程序目录范围过大，已拒绝执行更新。")
 
 
 def _find_payload_root(extract_dir: Path, log_file: Path) -> Path:
@@ -446,9 +542,14 @@ def _append_log(log_file: Path, text: str) -> None:
 
 def _trim_log(log_file: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KEEP_BYTES) -> None:
     try:
-        if not log_file.exists() or log_file.stat().st_size <= max_bytes:
+        if not log_file.exists():
             return
-        data = log_file.read_bytes()[-keep_bytes:]
+        size = log_file.stat().st_size
+        if size <= max_bytes:
+            return
+        with log_file.open("rb") as source:
+            source.seek(max(size - keep_bytes, 0))
+            data = source.read()
         newline = data.find(b"\n")
         if newline >= 0:
             data = data[newline + 1 :]

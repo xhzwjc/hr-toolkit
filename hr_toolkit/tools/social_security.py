@@ -935,8 +935,11 @@ def _write_summary_workbook(records: list[DetailRecord], output_file: Path, temp
         for sheet_name in list(workbook.sheetnames):
             workbook.remove(workbook[sheet_name])
         _create_summary_sheet(workbook, "社保汇总表", "社保汇总表", records)
-        for company in sorted({record.company for record in records if record.company}):
-            company_records = [record for record in records if record.company == company]
+        records_by_company: dict[str, list[DetailRecord]] = {}
+        for record in records:
+            if record.company:
+                records_by_company.setdefault(record.company, []).append(record)
+        for company, company_records in sorted(records_by_company.items()):
             _create_summary_sheet(workbook, company, f"{company}社保汇总表", company_records)
         _create_analysis_sheet(workbook, records)
         _create_warning_sheet(workbook, warnings)
@@ -970,8 +973,11 @@ def _create_summary_sheet(workbook, sheet_name: str, title: str, records: list[D
         ws.cell(row_offset, 3).value = len({record.id_card for record in group_records})
         ws.cell(row_offset, 4).value = 0
         ws.cell(row_offset, 5).value = round(sum(record.total_fee for record in group_records), 2)
+        group_records_by_account: dict[str, list[DetailRecord]] = {}
+        for record in group_records:
+            group_records_by_account.setdefault(record.account_display, []).append(record)
         for index, account in enumerate(accounts):
-            account_records = [record for record in group_records if record.account_display == account]
+            account_records = group_records_by_account.get(account, [])
             start_col = 6 + index * 3
             ws.cell(row_offset, start_col).value = len({record.id_card for record in account_records})
             ws.cell(row_offset, start_col + 1).value = round(sum(record.personal_total for record in account_records), 2)

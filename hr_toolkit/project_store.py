@@ -923,10 +923,10 @@ class ProjectStore:
                         source_item.path,
                         staging_path,
                         cancelled=cancelled,
-                        on_chunk=lambda size, name=display_name, completed=index: _report_copy_callbacks(
+                        on_chunk=lambda size, name=display_name, completed=index, base_copied=copied_bytes: _report_copy_callbacks(
                             progress,
                             on_progress,
-                            copied_bytes + size,
+                            base_copied + size,
                             required_bytes,
                             name,
                             files_scanned=len(source_items),
@@ -1348,10 +1348,10 @@ class ProjectStore:
                         item.path,
                         staging_path,
                         cancelled=cancelled,
-                        on_chunk=lambda size, name=item.path.name, completed=index: _report_copy_callbacks(
+                        on_chunk=lambda size, name=item.path.name, completed=index, base_copied=copied_bytes: _report_copy_callbacks(
                             progress,
                             on_progress,
-                            copied_bytes + size,
+                            base_copied + size,
                             required_bytes,
                             name,
                             files_scanned=len(source_items),

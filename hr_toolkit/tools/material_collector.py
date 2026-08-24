@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
 import os
 import re
 import shutil
@@ -58,9 +59,15 @@ _OCR_CACHE_VERSION = 3
 _OCR_CACHE_TEXT_SNIPPET_MAX = 4096
 _OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
+_OCR_CACHE_FILE_LOAD_MAX_BYTES = 256 * 1024 * 1024
 _OCR_CACHE_ENTRY_MAX_AGE_DAYS = 90
 _OCR_CACHE_HASH_WINDOW = 1 * 1024 * 1024
 _OCR_CACHE_HASH_TRIGGER_SIZE = 10 * 1024 * 1024
+_OFFICE_ARCHIVE_MAX_MEMBERS = 20_000
+_OFFICE_XML_MEMBER_MAX_BYTES = 16 * 1024 * 1024
+_OFFICE_XML_TOTAL_MAX_BYTES = 64 * 1024 * 1024
+_OFFICE_XML_MAX_COMPRESSION_RATIO = 500
+_PDF_EMBEDDED_IMAGE_MAX_BYTES = 64 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +297,8 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         return _new_ocr_cache()
 
     try:
+        if cache_path.stat().st_size > _OCR_CACHE_FILE_LOAD_MAX_BYTES:
+            return _new_ocr_cache()
         raw = cache_path.read_text(encoding="utf-8")
     except OSError:
         return _new_ocr_cache()
@@ -332,7 +341,8 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
         if cache_path.parent.is_symlink():
             return False
         with tmp_path.open("x", encoding="utf-8") as temp_file:
-            temp_file.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            json.dump(data, temp_file, ensure_ascii=False, indent=2)
+            temp_file.write("\n")
         try:
             tmp_path.chmod(0o600)
         except OSError:
@@ -542,13 +552,16 @@ def _is_path_nested(child: Path, parent: Path) -> bool:
 
 
 def _get_file_signature(path: Path) -> tuple[int, str]:
-    """计算文件大小和前 64KB 哈希，作为同员工去重特征。"""
+    """计算文件大小及首尾采样哈希，作为同员工去重特征。"""
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
-            chunk = f.read(65536)
-        h = hashlib.md5(chunk).hexdigest()
-        return size, h
+            digest = hashlib.sha256()
+            digest.update(f.read(65536))
+            if size > 65536:
+                f.seek(max(size - 65536, 0))
+                digest.update(f.read(65536))
+        return size, digest.hexdigest()
     except Exception:
         return -1, str(path)
 
@@ -951,7 +964,7 @@ def _match_folder_to_employee(folder_name: str, emp: TargetEmployee) -> str | No
     if f_name == emp_name:
         return "exact_name"
 
-    pattern = rf"(?:^|[\d_\s\-\(\)（）\[\]【】#])" + re.escape(emp_name) + rf"(?:[\d_\s\-\(\)（）\[\]【】#]|$)"
+    pattern = r"(?:^|[\d_\s\-\(\)（）\[\]【】#])" + re.escape(emp_name) + r"(?:[\d_\s\-\(\)（）\[\]【】#]|$)"
     if re.search(pattern, f_name):
         return "name"
 
@@ -965,6 +978,31 @@ def _match_folder_to_employee(folder_name: str, emp: TargetEmployee) -> str | No
 # 文档正文提取 & 本地离线 OCR 识图引擎
 # ---------------------------------------------------------------------------
 
+def _read_office_xml_member(
+    archive: zipfile.ZipFile,
+    member_name: str,
+    *,
+    remaining_bytes: int = _OFFICE_XML_TOTAL_MAX_BYTES,
+) -> bytes:
+    if len(archive.infolist()) > _OFFICE_ARCHIVE_MAX_MEMBERS:
+        raise ValueError("Office 文档包含过多压缩条目")
+    member = archive.getinfo(member_name)
+    limit = min(_OFFICE_XML_MEMBER_MAX_BYTES, remaining_bytes)
+    if member.file_size > limit:
+        raise ValueError("Office XML 条目体积异常")
+    if member.file_size and (
+        member.compress_size <= 0
+        or member.file_size / member.compress_size > _OFFICE_XML_MAX_COMPRESSION_RATIO
+    ):
+        raise ValueError("Office XML 条目压缩比异常")
+    with archive.open(member) as source:
+        payload = source.read(limit + 1)
+    if len(payload) > limit or len(payload) != member.file_size:
+        raise ValueError("Office XML 条目实际体积异常")
+    if re.search(br"<!\s*(?:DOCTYPE|ENTITY)", payload, flags=re.IGNORECASE):
+        raise ValueError("Office XML 包含不支持的实体声明")
+    return payload
+
 def _extract_document_text(file_path: Path) -> str:
     """提取文档内部文本（支持 .docx, .txt, .pdf, .doc 纯文本搜索）。"""
     ext = file_path.suffix.lower()
@@ -972,7 +1010,7 @@ def _extract_document_text(file_path: Path) -> str:
         try:
             with zipfile.ZipFile(file_path) as zf:
                 if "word/document.xml" in zf.namelist():
-                    xml_content = zf.read("word/document.xml")
+                    xml_content = _read_office_xml_member(zf, "word/document.xml")
                     tree = ET.fromstring(xml_content)
                     return "".join(tree.itertext())
         except Exception:
@@ -1005,25 +1043,28 @@ def _extract_document_text(file_path: Path) -> str:
 def _extract_pdf_image_bytes(file_path: Path) -> bytes | None:
     """如果 PDF 为纯图片扫描版，从二进制流中提取首张内嵌图片（JPEG/PNG）用于 OCR。"""
     try:
-        data = file_path.read_bytes()
-        idx = 0
-        while True:
-            s_idx = data.find(b"stream", idx)
-            if s_idx == -1:
-                break
-            start = s_idx + 6
-            if data[start:start+2] == b"\r\n":
-                start += 2
-            elif data[start:start+1] == b"\n":
-                start += 1
-            e_idx = data.find(b"endstream", start)
-            if e_idx == -1:
-                break
-            chunk = data[start:e_idx]
-            # JPEG 魔数 \xff\xd8\xff 或 PNG 魔数 \x89PNG
-            if chunk.startswith(b"\xff\xd8\xff") or chunk.startswith(b"\x89PNG\r\n\x1a\n"):
-                return chunk
-            idx = e_idx + 9
+        with file_path.open("rb") as source:
+            if os.fstat(source.fileno()).st_size == 0:
+                return None
+            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                idx = 0
+                while True:
+                    s_idx = data.find(b"stream", idx)
+                    if s_idx == -1:
+                        break
+                    start = s_idx + 6
+                    if data[start:start + 2] == b"\r\n":
+                        start += 2
+                    elif data[start:start + 1] == b"\n":
+                        start += 1
+                    e_idx = data.find(b"endstream", start)
+                    if e_idx == -1:
+                        break
+                    # 先检查映射区中的魔数，仅在真正命中时复制图片内容。
+                    if data[start:start + 3] == b"\xff\xd8\xff" or data[start:start + 8] == b"\x89PNG\r\n\x1a\n":
+                        if e_idx - start <= _PDF_EMBEDDED_IMAGE_MAX_BYTES:
+                            return bytes(data[start:e_idx])
+                    idx = e_idx + 9
     except Exception:
         pass
     return None
@@ -1524,7 +1565,7 @@ def _extract_flat_document_text(file_path: Path) -> str:
     if ext == ".docx":
         try:
             with zipfile.ZipFile(file_path) as archive:
-                tree = ET.fromstring(archive.read("word/document.xml"))
+                tree = ET.fromstring(_read_office_xml_member(archive, "word/document.xml"))
                 return " ".join(text for text in tree.itertext() if text)
         except Exception:
             return ""
@@ -1575,13 +1616,25 @@ def _extract_flat_document_text(file_path: Path) -> str:
     if ext == ".pptx":
         try:
             with zipfile.ZipFile(file_path) as archive:
+                if len(archive.infolist()) > _OFFICE_ARCHIVE_MAX_MEMBERS:
+                    return ""
                 xml_names = [
                     name for name in archive.namelist()
                     if name.endswith(".xml") and (name.startswith("ppt/slides/") or name == "word/document.xml")
                 ]
+                total_xml_bytes = sum(archive.getinfo(name).file_size for name in xml_names)
+                if total_xml_bytes > _OFFICE_XML_TOTAL_MAX_BYTES:
+                    return ""
                 chunks: list[str] = []
+                remaining_bytes = _OFFICE_XML_TOTAL_MAX_BYTES
                 for name in xml_names:
-                    tree = ET.fromstring(archive.read(name))
+                    payload = _read_office_xml_member(
+                        archive,
+                        name,
+                        remaining_bytes=remaining_bytes,
+                    )
+                    remaining_bytes -= len(payload)
+                    tree = ET.fromstring(payload)
                     chunks.extend(text for text in tree.itertext() if text)
                 return " ".join(chunks)
         except Exception:
@@ -2618,7 +2671,7 @@ def _collect_specific_materials(
     scored_candidates.sort(key=lambda item: item[0], reverse=True)
 
     # 3. 按优先级顺序逐个进行精准识别（支持短路早停）
-    for idx_cand, (cand_score, f_path, rel_p, folder_reason) in enumerate(scored_candidates):
+    for idx_cand, (_cand_score, f_path, rel_p, folder_reason) in enumerate(scored_candidates):
         sig = _get_file_signature(f_path)
         if sig in seen_hashes:
             continue
@@ -2688,7 +2741,8 @@ def _collect_specific_materials(
                 dest_dir = out_path
 
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_file = dest_dir / target_name
+            dest_file = _unique_destination(dest_dir / target_name)
+            target_name = dest_file.name
 
             try:
                 shutil.copy2(src_path, dest_file)
@@ -2771,6 +2825,7 @@ def _write_excel_report(
     emp_file_counts: dict[str, int] = {}
     emp_cache_hits: dict[str, int] = {}
     emp_mismatch_warnings: dict[str, list[str]] = {}
+    emp_material_counts: dict[str, dict[str, int]] = {}
     uses_identity_keys = any(match.employee_identity_key for match in all_matches)
 
     def _report_match_key(match: MaterialFileMatch) -> str:
@@ -2788,6 +2843,9 @@ def _write_excel_report(
             emp_cache_hits[match_key] = emp_cache_hits.get(match_key, 0) + 1
         if m.mismatch_warning:
             emp_mismatch_warnings.setdefault(match_key, []).append(m.mismatch_warning)
+        if m.material_type in requested_materials:
+            material_counts = emp_material_counts.setdefault(match_key, {})
+            material_counts[m.material_type] = material_counts.get(m.material_type, 0) + 1
 
     total_emp = len(employees)
     total_files = len(all_matches)
@@ -2800,12 +2858,6 @@ def _write_excel_report(
     hits = cache_stats.get("hits", 0) if cache_stats else 0
     misses = cache_stats.get("misses", 0) if cache_stats else 0
     cache_total = hits + misses
-    cache_summary = (
-        f"{hits}/{cache_total}"
-        if cache_total > 0
-        else "-"
-    )
-
     ws_summary["A3"] = "统计概要"
     ws_summary["A3"].font = Font(name="微软雅黑", size=11, bold=True)
 
@@ -2891,10 +2943,7 @@ def _write_excel_report(
                 warn_cell.font = ok_font if file_count > 0 else normal_font
             warn_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
         else:
-            emp_matches_by_type: dict[str, int] = {}
-            for m in all_matches:
-                if _report_match_key(m) == employee_report_key and m.material_type in requested_materials:
-                    emp_matches_by_type[m.material_type] = emp_matches_by_type.get(m.material_type, 0) + 1
+            emp_matches_by_type = emp_material_counts.get(employee_report_key, {})
 
             found_count = sum(1 for m in requested_materials if emp_matches_by_type.get(m, 0) > 0)
             total_req = len(requested_materials)
@@ -3056,5 +3105,7 @@ def _write_excel_report(
         ws_cache.column_dimensions["B"].width = 60
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(report_path)
-    wb.close()
+    try:
+        wb.save(report_path)
+    finally:
+        wb.close()

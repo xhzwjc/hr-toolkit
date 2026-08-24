@@ -8,7 +8,6 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from hr_toolkit.common.excel import SheetGrid
 from hr_toolkit.common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 
 
@@ -224,17 +223,34 @@ def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) 
         working_path = ensure_xlsx_workbook(excel_path, Path(temp_dir))
         wb = load_workbook(working_path, data_only=True, read_only=True)
         try:
-            # read_only 工作表随机访问是 O(行数²)，先单遍读入内存再处理
-            ws = SheetGrid(wb.active)
+            ws = wb.active
+            # 部分第三方工作簿会错误声明 A1:A1；让 read_only 模式按 XML
+            # 实际内容迭代。表头只缓存有限单元格，姓名列则流式读取，避免
+            # 大花名册被完整复制进内存。
+            reset_dimensions = getattr(ws, "reset_dimensions", None)
+            if callable(reset_dimensions):
+                reset_dimensions()
             name_col = None
             matched_header_row = header_row
-            max_col = min(ws.max_column or 0, 50)
             normalized_name_column = _normalize_text(name_column)
-            max_header_row = min(ws.max_row or 0, 20)
-            candidate_rows = [header_row, *(row for row in range(1, max_header_row + 1) if row != header_row)]
+            max_header_row = max(20, header_row)
+            header_values = {
+                row_index: values
+                for row_index, values in enumerate(
+                    ws.iter_rows(
+                        min_row=1,
+                        max_row=max_header_row,
+                        min_col=1,
+                        max_col=50,
+                        values_only=True,
+                    ),
+                    start=1,
+                )
+            }
+            candidate_rows = [header_row, *(row for row in range(1, 21) if row != header_row)]
             for candidate_row in candidate_rows:
-                for col in range(1, max_col + 1):
-                    header = _normalize_text(ws.cell(candidate_row, col).value)
+                for col, value in enumerate(header_values.get(candidate_row, ()), start=1):
+                    header = _normalize_text(value)
                     if header == normalized_name_column:
                         name_col = col
                         matched_header_row = candidate_row
@@ -243,8 +259,8 @@ def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) 
                     break
             if name_col is None:
                 for candidate_row in candidate_rows:
-                    for col in range(1, max_col + 1):
-                        header = _normalize_text(ws.cell(candidate_row, col).value)
+                    for col, value in enumerate(header_values.get(candidate_row, ()), start=1):
+                        header = _normalize_text(value)
                         if normalized_name_column in header or header in ("姓名", "名字", "名称"):
                             name_col = col
                             matched_header_row = candidate_row
@@ -254,8 +270,12 @@ def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) 
             if name_col is None:
                 return []
             names: list[str] = []
-            for row in range(matched_header_row + 1, (ws.max_row or 0) + 1):
-                value = ws.cell(row, name_col).value
+            for (value,) in ws.iter_rows(
+                min_row=matched_header_row + 1,
+                min_col=name_col,
+                max_col=name_col,
+                values_only=True,
+            ):
                 if value is not None:
                     name = str(value).strip()
                     if name:
@@ -409,6 +429,9 @@ def _plan_operations(
     replacement_name = replacement_name.strip()
     warnings: list[str] = []
 
+    if target_name:
+        _validate_folder_name(target_name)
+
     if mode == MODE_APPEND:
         if not text:
             raise ValueError("请填写要追加的文字，建议以 - 或 _ 开头，例如：-劳动合同")
@@ -524,16 +547,16 @@ def _validate_folder_name(name: str) -> None:
         raise ValueError(f"文件夹名称不合法：{name}")
     if any(char in WINDOWS_INVALID_CHARS for char in name):
         raise ValueError(f"文件夹名称包含 Windows 不支持的字符：{name}")
-
-
-def _validate_excel_target_name(name: str) -> None:
-    _validate_folder_name(name)
     if any(ord(char) < 32 for char in name):
         raise ValueError(f"文件夹名称包含 Windows 不支持的控制字符：{name}")
     if name.endswith((" ", ".")):
         raise ValueError(f"文件夹名称不能以空格或句点结尾：{name}")
     if name.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
         raise ValueError(f"文件夹名称是 Windows 保留名称：{name}")
+
+
+def _validate_excel_target_name(name: str) -> None:
+    _validate_folder_name(name)
 
 
 def _filter_invalid_operations(

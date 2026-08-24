@@ -134,8 +134,7 @@ class CodexButton(Canvas):
             bd=0,
             cursor="hand2",
         )
-        if textvariable is not None:
-            self._variable_trace = textvariable.trace_add("write", lambda *_args: self._redraw())
+        self._set_textvariable(textvariable)
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_click)
@@ -159,7 +158,7 @@ class CodexButton(Canvas):
             self._state = kwargs.pop("state")
             super().configure(cursor="" if self._state == "disabled" else "hand2")
         if "textvariable" in kwargs:
-            self._textvariable = kwargs.pop("textvariable")
+            self._set_textvariable(kwargs.pop("textvariable"))
         if "icon" in kwargs:
             self._icon = kwargs.pop("icon")
         if "variant" in kwargs:
@@ -169,6 +168,21 @@ class CodexButton(Canvas):
         self._redraw()
 
     config = configure
+
+    def _set_textvariable(self, variable: StringVar | None) -> None:
+        if self._textvariable is not None and self._variable_trace is not None:
+            try:
+                self._textvariable.trace_remove("write", self._variable_trace)
+            except Exception:
+                pass
+        self._textvariable = variable
+        self._variable_trace = None
+        if variable is not None:
+            self._variable_trace = variable.trace_add("write", lambda *_args: self._redraw())
+
+    def destroy(self) -> None:
+        self._set_textvariable(None)
+        super().destroy()
 
     @staticmethod
     def _resolve_parent_bg(master) -> str:

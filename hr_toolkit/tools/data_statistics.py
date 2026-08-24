@@ -1210,7 +1210,6 @@ def _attendance_row_exceptions(
     remark_unit: str = REMARK_UNIT_DAY,
     include_business_trip: bool = False,
 ) -> list[tuple[str, str, str]]:
-    by_hour = remark_unit == REMARK_UNIT_HOUR
     exceptions: list[tuple[str, str, str]] = []
     if row.missing_punch_count:
         exceptions.append(("漏打卡", str(row.missing_punch_count), _missing_punch_remark(row)))

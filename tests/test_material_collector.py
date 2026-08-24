@@ -24,6 +24,8 @@ from hr_toolkit.tools.material_collector import (
     _classify_material_type,
     _compute_cache_key,
     _compute_file_fingerprint,
+    _extract_pdf_image_bytes,
+    _extract_document_text,
     _get_engine_signature,
     _hash_id_card,
     _is_junk_or_temp_file,
@@ -339,6 +341,90 @@ class TestSafetyAndRobustness(unittest.TestCase):
             # 完全重复的文件只提取 1 份，不去重会导致复制 2 份
             self.assertEqual(result.matched_file_count, 1)
 
+    def test_same_size_and_prefix_but_different_tail_are_not_deduped(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            person_dir = root / "资料库" / "张三"
+            person_dir.mkdir(parents=True)
+            shared_prefix = b"A" * 65536
+            (person_dir / "张三_身份证_A.jpg").write_bytes(shared_prefix + b"X" * 65536)
+            (person_dir / "张三_身份证_B.jpg").write_bytes(shared_prefix + b"Y" * 65536)
+
+            result = collect_employee_materials(
+                root / "资料库",
+                root / "输出",
+                roster_source="张三",
+                material_types=["身份证"],
+            )
+
+            self.assertEqual(result.matched_file_count, 2)
+
+    def test_same_subtype_files_are_preserved_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "资料库"
+            person_dir = library / "张三"
+            person_dir.mkdir(parents=True)
+            first = person_dir / "张三_身份证正面_A.jpg"
+            second = person_dir / "张三_身份证正面_B.jpg"
+            first.write_bytes(b"first-front-image")
+            second.write_bytes(b"second-front-image-with-different-size")
+
+            output = root / "输出"
+            result = collect_employee_materials(
+                library,
+                output,
+                roster_source="张三",
+                material_types=["身份证"],
+            )
+
+            copied = sorted((output / "张三").glob("张三_身份证_正面*.jpg"))
+            self.assertEqual(result.matched_file_count, 2)
+            self.assertEqual(len(copied), 2)
+            self.assertEqual(
+                {path.read_bytes() for path in copied},
+                {first.read_bytes(), second.read_bytes()},
+            )
+
+    def test_pdf_image_scan_does_not_change_extracted_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pdf = Path(td) / "scan.pdf"
+            jpeg = b"\xff\xd8\xffimage-payload\xff\xd9"
+            pdf.write_bytes(
+                b"%PDF-1.4\nstream\nnot-an-image\nendstream\n"
+                b"stream\r\n" + jpeg + b"endstream\n%%EOF"
+            )
+
+            self.assertEqual(_extract_pdf_image_bytes(pdf), jpeg)
+
+    def test_oversized_embedded_pdf_image_is_not_copied_into_memory(self) -> None:
+        import hr_toolkit.tools.material_collector as material_collector
+
+        with tempfile.TemporaryDirectory() as td:
+            pdf = Path(td) / "large-scan.pdf"
+            pdf.write_bytes(b"stream\n\xff\xd8\xffpayloadendstream")
+            with mock.patch.object(material_collector, "_PDF_EMBEDDED_IMAGE_MAX_BYTES", 4):
+                self.assertIsNone(_extract_pdf_image_bytes(pdf))
+
+    def test_office_xml_bombs_and_entity_declarations_are_ignored(self) -> None:
+        import hr_toolkit.tools.material_collector as material_collector
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            oversized = root / "oversized.docx"
+            with zipfile.ZipFile(oversized, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("word/document.xml", b"<w>" + b"x" * 256 + b"</w>")
+            with mock.patch.object(material_collector, "_OFFICE_XML_MEMBER_MAX_BYTES", 64):
+                self.assertEqual(_extract_document_text(oversized), "")
+
+            entity_doc = root / "entity.docx"
+            with zipfile.ZipFile(entity_doc, "w") as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    b'<!DOCTYPE x [<!ENTITY a "boom">]><x>&a;</x>',
+                )
+            self.assertEqual(_extract_document_text(entity_doc), "")
+
     def test_junk_files_filtered_out(self) -> None:
         """测试 .DS_Store, Thumbs.db, ~$临时文件被全局过滤。"""
         self.assertTrue(_is_junk_or_temp_file(".DS_Store"))
@@ -354,6 +440,18 @@ class TestOCRCacheHelpers(unittest.TestCase):
         sig = _get_engine_signature()
         self.assertTrue(sig)
         self.assertIn("rapidocr_onnxruntime", sig)
+
+    def test_oversized_cache_is_ignored_before_reading(self) -> None:
+        import hr_toolkit.tools.material_collector as material_collector
+
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = Path(td) / _OCR_CACHE_FILE_NAME
+            cache_path.write_bytes(b"{" + b" " * 1024 + b"}")
+            with mock.patch.object(material_collector, "_OCR_CACHE_FILE_LOAD_MAX_BYTES", 128):
+                loaded = _load_ocr_cache(cache_path)
+
+            self.assertEqual(loaded["entries"], {})
+            self.assertEqual(loaded["paths"], {})
 
     def test_compute_cache_key_stable(self) -> None:
         with tempfile.TemporaryDirectory() as td:

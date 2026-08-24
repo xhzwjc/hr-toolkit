@@ -554,15 +554,18 @@ def _write_company_workbook(
     output_path: Path,
 ) -> None:
     workbook = load_workbook(input_path, data_only=False)
-    workbook.calculation.fullCalcOnLoad = True
-    workbook.calculation.forceFullCalc = True
+    try:
+        workbook.calculation.fullCalcOnLoad = True
+        workbook.calculation.forceFullCalc = True
 
-    detail_ws = workbook[layout.detail_sheet_name]
-    summary_ws = workbook[layout.summary_sheet_name]
+        detail_ws = workbook[layout.detail_sheet_name]
+        summary_ws = workbook[layout.summary_sheet_name]
 
-    rebuilt = _rebuild_detail_sheet(detail_ws, layout, hierarchy, rows)
-    _rebuild_summary_sheet(summary_ws, layout, hierarchy, rebuilt)
-    workbook.save(output_path)
+        rebuilt = _rebuild_detail_sheet(detail_ws, layout, hierarchy, rows)
+        _rebuild_summary_sheet(summary_ws, layout, hierarchy, rebuilt)
+        workbook.save(output_path)
+    finally:
+        workbook.close()
 
 
 def _rebuild_detail_sheet(
@@ -571,7 +574,6 @@ def _rebuild_detail_sheet(
     hierarchy: DetailHierarchy,
     rows: list[EmployeeRow],
 ) -> RebuiltDetailResult:
-    header_rows_count = layout.data_start_row - 1
     unmerge_ranges_from_row(ws, layout.data_start_row)
     ws.delete_rows(layout.data_start_row, ws.max_row - layout.data_start_row + 1)
 
@@ -864,7 +866,7 @@ def _rebuild_summary_sheet(
             source_items.append(("leaf", leaf))
 
     template_item_map: dict[int, tuple[str, Any]] = {}
-    for idx, (src_r, lbl, snap, raw_vals) in enumerate(template_rows):
+    for idx, (src_r, lbl, _snap, raw_vals) in enumerate(template_rows):
         matched_item = None
         for val in raw_vals:
             if isinstance(val, str) and ("!" in val or "明细" in val):
@@ -892,7 +894,7 @@ def _rebuild_summary_sheet(
     rendered_sub_rows_in_summary: list[int] = []
     rendered_group_rows_in_summary: list[int] = []
 
-    for src_r, lbl, snap, raw_vals in template_rows:
+    for src_r, lbl, snap, _raw_vals in template_rows:
         mapped = template_item_map.get(src_r)
         target_leaf: RenderedLeaf | None = None
         target_group: RenderedGroup | None = None

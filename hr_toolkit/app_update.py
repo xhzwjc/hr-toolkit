@@ -7,6 +7,7 @@ import platform as platform_module
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,10 @@ UPDATE_TEMP_PREFIXES = ("hr_toolkit_update_", "hr_toolkit_updater_", "hr_toolkit
 DISK_SPACE_FACTOR = 4
 UPDATE_LOG_MAX_BYTES = 1024 * 1024
 UPDATE_LOG_KEEP_BYTES = 256 * 1024
+UPDATE_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
+UPDATE_PACKAGE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+UPDATE_UPDATER_MAX_BYTES = 256 * 1024 * 1024
+UPDATE_ZIP_MAX_COMPRESSION_RATIO = 1000
 
 
 class UpdateError(RuntimeError):
@@ -88,8 +93,11 @@ def create_https_context() -> ssl.SSLContext:
 
 
 def _open_url(request: urllib.request.Request, *, timeout: int):
+    scheme = urllib.parse.urlparse(request.full_url).scheme.lower()
+    if scheme not in {"https", "http", "file"}:
+        raise UpdateError(f"不支持的更新地址协议：{scheme or '空'}。")
     kwargs: dict[str, Any] = {"timeout": timeout}
-    if urllib.parse.urlparse(request.full_url).scheme.lower() == "https":
+    if scheme == "https":
         kwargs["context"] = create_https_context()
     return urllib.request.urlopen(request, **kwargs)
 
@@ -155,7 +163,15 @@ def _fetch_json_object(url: str, *, timeout: int) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with _open_url(request, timeout=timeout) as response:
-            payload = response.read().decode("utf-8-sig")
+            content_length = _response_content_length(response)
+            if content_length > UPDATE_MANIFEST_MAX_BYTES:
+                raise UpdateError("更新配置文件过大，已拒绝读取。")
+            raw_payload = response.read(UPDATE_MANIFEST_MAX_BYTES + 1)
+            if len(raw_payload) > UPDATE_MANIFEST_MAX_BYTES:
+                raise UpdateError("更新配置文件过大，已拒绝读取。")
+            payload = raw_payload.decode("utf-8-sig")
+    except UpdateError:
+        raise
     except Exception as exc:
         raise UpdateError(f"无法读取更新配置：{exc}") from exc
     try:
@@ -197,6 +213,13 @@ def parse_update_manifest(manifest: dict[str, Any], manifest_url: str, platform:
         raise UpdateError("更新配置中的 update_mode 只能是 auto 或 manual。")
 
     file_url = urllib.parse.urljoin(manifest_url, file_url)
+    manifest_scheme = urllib.parse.urlparse(manifest_url).scheme.lower()
+    for candidate_url in (file_url, *fallback_urls):
+        candidate_scheme = urllib.parse.urlparse(candidate_url).scheme.lower()
+        if candidate_scheme not in {"https", "http", "file"}:
+            raise UpdateError(f"更新配置包含不支持的地址协议：{candidate_scheme or '空'}。")
+        if candidate_scheme == "file" and manifest_scheme != "file":
+            raise UpdateError("远程更新配置不能引用本机文件。")
     notes = _normalize_notes(notes_value)
     return UpdateInfo(
         version=version,
@@ -242,7 +265,9 @@ def download_update_package(
         final_path.unlink(missing_ok=True)
         try:
             with _open_url(request, timeout=60) as response:
-                total = int(response.headers.get("Content-Length") or 0)
+                total = _response_content_length(response)
+                if total > UPDATE_PACKAGE_MAX_BYTES:
+                    raise UpdateError("更新包超过允许的最大体积，已停止下载。")
                 _ensure_disk_space(dest_dir, total)
                 downloaded = 0
                 with temp_path.open("wb") as output:
@@ -254,6 +279,8 @@ def download_update_package(
                             break
                         output.write(chunk)
                         downloaded += len(chunk)
+                        if downloaded > UPDATE_PACKAGE_MAX_BYTES:
+                            raise UpdateError("更新包超过允许的最大体积，已停止下载。")
                         if cancel_event is not None and cancel_event.is_set():
                             raise UpdateCancelledError("用户已取消更新包下载。")
                         if progress_callback is not None:
@@ -370,9 +397,27 @@ def _extract_package_updater(package_path: Path, temp_dir: Path) -> Path | None:
                 member_name = Path(member.filename).name
                 if member_name not in names:
                     continue
+                unix_mode = (member.external_attr >> 16) & 0xFFFF
+                if stat.S_IFMT(unix_mode) not in (0, stat.S_IFREG):
+                    raise UpdateError("更新包中的独立更新程序不是普通文件，已拒绝执行。")
+                if member.file_size > UPDATE_UPDATER_MAX_BYTES:
+                    raise UpdateError("更新包中的独立更新程序体积异常，已拒绝执行。")
+                if _zip_compression_ratio(member) > UPDATE_ZIP_MAX_COMPRESSION_RATIO:
+                    raise UpdateError("更新包中的独立更新程序压缩比异常，已拒绝执行。")
                 target = temp_dir / member_name
                 with archive.open(member) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+                    copied = 0
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        if copied > UPDATE_UPDATER_MAX_BYTES:
+                            raise UpdateError("更新包中的独立更新程序体积异常，已拒绝执行。")
+                        output.write(chunk)
+                if copied != member.file_size:
+                    target.unlink(missing_ok=True)
+                    raise UpdateError("更新包中的独立更新程序数据不完整。")
                 return target
     except zipfile.BadZipFile as exc:
         raise UpdateError("更新包不是有效的 zip 文件。") from exc
@@ -392,15 +437,39 @@ def _append_update_log(log_file: Path, text: str) -> None:
 def trim_log_file(log_file: Path, max_bytes: int = UPDATE_LOG_MAX_BYTES, keep_bytes: int = UPDATE_LOG_KEEP_BYTES) -> None:
     """日志超限时只保留末尾内容，避免更新日志无限增长。"""
     try:
-        if not log_file.exists() or log_file.stat().st_size <= max_bytes:
+        if not log_file.exists():
             return
-        data = log_file.read_bytes()[-keep_bytes:]
+        size = log_file.stat().st_size
+        if size <= max_bytes:
+            return
+        with log_file.open("rb") as source:
+            source.seek(max(size - keep_bytes, 0))
+            data = source.read()
         newline = data.find(b"\n")
         if newline >= 0:
             data = data[newline + 1 :]
         log_file.write_bytes(b"(...earlier log trimmed...)\n" + data)
     except OSError:
         pass
+
+
+def _response_content_length(response: Any) -> int:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return 0
+    try:
+        value = int(headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def _zip_compression_ratio(member: zipfile.ZipInfo) -> float:
+    if member.file_size <= 0:
+        return 0.0
+    if member.compress_size <= 0:
+        return float("inf")
+    return member.file_size / member.compress_size
 
 
 def cleanup_stale_update_files(max_age_days: float = 3, temp_dir: Path | None = None) -> int:

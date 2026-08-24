@@ -836,7 +836,10 @@ def _center_row_cells(ws: Worksheet, row_index: int, max_column: int) -> None:
         cell = ws.cell(row_index, col_index)
         source_id = style_source_id(cell, "alignment")
         alignment_id = cached_style_id(
-            ws, "alignment", ("centered", source_id), lambda: _centered_alignment(alignments[source_id])
+            ws,
+            "alignment",
+            ("centered", source_id),
+            lambda source_id=source_id: _centered_alignment(alignments[source_id]),
         )
         set_style_ids(cell, border_id=border_id, alignment_id=alignment_id)
 
@@ -1144,7 +1147,7 @@ def _write_updated_roster(
             if id_card in existing:
                 warnings.append(f"花名册已存在增员身份证 {id_card}，未重复写入。")
                 continue
-            inserted_row = _insert_roster_addition(ws, layout, row)
+            _insert_roster_addition(ws, layout, row)
             layout = _detect_roster_layout(ws)
             existing = _roster_existing_records(ws, layout)
             added_count += 1

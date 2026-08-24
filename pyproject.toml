@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "hr-toolkit"
 description = "人事 Excel 自动化工具箱"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.13"
 dynamic = ["version"]
 dependencies = [
     "certifi>=2024.8.30",

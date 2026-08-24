@@ -7961,8 +7961,6 @@ class HRToolkitApp:
             )
             item.pack(fill="x", pady=self._px(1))
             nav_items[(entry_tool, entry_mode)] = item
-            previous_tool = entry_tool
-
         selection = self._current_tutorial_selection()
         if selection not in nav_items:
             selection = next(iter(nav_items))

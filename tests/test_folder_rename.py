@@ -129,6 +129,39 @@ class FolderRenameTest(unittest.TestCase):
             self.assertTrue((root / "章五").exists())
             self.assertTrue((root / "李四").exists())
 
+    def test_manual_modes_reject_paths_outside_the_selected_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "待改名"
+            root.mkdir()
+            (root / "张三").mkdir()
+            outside = base / "外部目录"
+            outside.mkdir()
+
+            for mode, kwargs in (
+                (MODE_APPEND, {"text": "-合同", "target_name": "../外部目录"}),
+                (MODE_REMOVE, {"text": "合同", "target_name": "../外部目录"}),
+                (MODE_REPLACE, {"target_name": "../外部目录", "replacement_name": "新名称"}),
+            ):
+                with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "Windows 不支持的字符"):
+                    rename_person_folders(root, mode=mode, **kwargs)
+
+            self.assertTrue(outside.is_dir())
+            self.assertTrue((root / "张三").is_dir())
+
+    def test_manual_modes_reject_windows_reserved_target_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "张三").mkdir()
+
+            with self.assertRaisesRegex(ValueError, "Windows 保留名称"):
+                rename_person_folders(
+                    root,
+                    mode=MODE_REPLACE,
+                    target_name="张三",
+                    replacement_name="CON",
+                )
+
     def test_skip_existing_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

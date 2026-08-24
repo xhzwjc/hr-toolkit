@@ -67,37 +67,41 @@ def _convert_with_xlrd(source: Path, output_path: Path) -> None:
 
     rb = xlrd.open_workbook(str(source), formatting_info=False)
     wb = openpyxl.Workbook()
-    # 移除默认新建的 Sheet
-    wb.remove(wb.active)
+    try:
+        # 移除默认新建的 Sheet
+        wb.remove(wb.active)
 
-    for sheet_name in rb.sheet_names():
-        rs = rb.sheet_by_name(sheet_name)
-        ws = wb.create_sheet(title=sheet_name)
-        for row_idx in range(rs.nrows):
-            row_vals: list[object] = []
-            for col_idx in range(rs.ncols):
-                cell = rs.cell(row_idx, col_idx)
-                val = cell.value
-                if cell.ctype == xlrd.XL_CELL_DATE:
-                    try:
-                        dt_tuple = xlrd.xldate_as_tuple(val, rb.datemode)
-                        if dt_tuple[3:] == (0, 0, 0):
-                            val = date(dt_tuple[0], dt_tuple[1], dt_tuple[2])
-                        else:
-                            val = datetime(*dt_tuple)
-                    except Exception:
-                        pass
-                elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
-                    val = bool(val)
-                elif cell.ctype == xlrd.XL_CELL_ERROR:
-                    val = None
-                elif cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
-                    val = None
-                row_vals.append(val)
-            ws.append(row_vals)
+        for sheet_name in rb.sheet_names():
+            rs = rb.sheet_by_name(sheet_name)
+            ws = wb.create_sheet(title=sheet_name)
+            for row_idx in range(rs.nrows):
+                row_vals: list[object] = []
+                for col_idx in range(rs.ncols):
+                    cell = rs.cell(row_idx, col_idx)
+                    val = cell.value
+                    if cell.ctype == xlrd.XL_CELL_DATE:
+                        try:
+                            dt_tuple = xlrd.xldate_as_tuple(val, rb.datemode)
+                            if dt_tuple[3:] == (0, 0, 0):
+                                val = date(dt_tuple[0], dt_tuple[1], dt_tuple[2])
+                            else:
+                                val = datetime(*dt_tuple)
+                        except Exception:
+                            pass
+                    elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                        val = bool(val)
+                    elif cell.ctype == xlrd.XL_CELL_ERROR:
+                        val = None
+                    elif cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+                        val = None
+                    row_vals.append(val)
+                ws.append(row_vals)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(str(output_path))
+    finally:
+        wb.close()
+        rb.release_resources()
 
 
 def _convert_xls_to_xlsx(source: Path, output_path: Path, temp_dir: Path | None = None) -> None:
@@ -118,8 +122,12 @@ def _convert_xls_to_xlsx(source: Path, output_path: Path, temp_dir: Path | None 
     sandbox_source = sandbox_dir / f"{digest}_{source.name}"
     try:
         shutil.copyfile(source, sandbox_source)
-    except Exception:
-        sandbox_source = source
+    except Exception as exc:
+        errors.append(f"创建只读转换副本失败：{exc}")
+        raise RuntimeError(
+            "无法创建 .xls 临时转换副本；为保护源文件，已停止外部转换。"
+            + (" 详细信息：" + "；".join(errors) if errors else "")
+        ) from exc
 
     try:
         if sys.platform.startswith("win"):
@@ -212,6 +220,7 @@ def _convert_with_libreoffice(source: Path, output_path: Path) -> None:
         stderr=subprocess.PIPE,
         text=True,
         env=_build_conversion_env(),
+        timeout=300,
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "").strip() or f"退出码 {result.returncode}")

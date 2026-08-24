@@ -72,6 +72,19 @@ class GuiPerformanceTests(unittest.TestCase):
         self.assertEqual(btn._display_text(), "更新文字")
         btn.destroy()
 
+    def test_codex_button_releases_and_replaces_variable_trace(self) -> None:
+        first = tk.StringVar(master=self.root, value="first")
+        second = tk.StringVar(master=self.root, value="second")
+        btn = CodexButton(self.root, textvariable=first)
+
+        self.assertEqual(len(first.trace_info()), 1)
+        btn.configure(textvariable=second)
+        self.assertEqual(first.trace_info(), [])
+        self.assertEqual(len(second.trace_info()), 1)
+
+        btn.destroy()
+        self.assertEqual(second.trace_info(), [])
+
     def test_sidebar_item_idempotent_redraw(self) -> None:
         item = SidebarItem(self.root, text="社保明细", icon_id="social_security")
         self.root.update_idletasks()

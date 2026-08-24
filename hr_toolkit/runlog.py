@@ -38,9 +38,14 @@ def current_app_dir() -> Path:
 def trim_log_file(log_file: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KEEP_BYTES) -> None:
     """日志超限时只保留末尾内容，避免日志文件无限增长。"""
     try:
-        if not log_file.exists() or log_file.stat().st_size <= max_bytes:
+        if not log_file.exists():
             return
-        data = log_file.read_bytes()[-keep_bytes:]
+        size = log_file.stat().st_size
+        if size <= max_bytes:
+            return
+        with log_file.open("rb") as source:
+            source.seek(max(size - keep_bytes, 0))
+            data = source.read()
         newline = data.find(b"\n")
         if newline >= 0:
             data = data[newline + 1 :]

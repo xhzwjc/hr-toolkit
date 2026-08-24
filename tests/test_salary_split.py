@@ -224,7 +224,9 @@ class SalarySplitTest(unittest.TestCase):
 
     def test_split_problem4_template_when_available(self) -> None:
         """Verify problem 4 template with multiple amount columns (车租 at col 12, 应发 at col 16)."""
-        p4_path = Path("/Users/salem/Documents/2026年8月人事月度工作/薪酬管理/工资表拆分/20260817_111124_工资表拆分_2026-08-16/上传资料/问题4-薪资表模板(1).xlsx")
+        external_path = Path("/Users/salem/Documents/2026年8月人事月度工作/薪酬管理/工资表拆分/20260817_111124_工资表拆分_2026-08-16/上传资料/问题4-薪资表模板(1).xlsx")
+        repository_fixture = Path(__file__).resolve().parents[1] / "附件" / "问题4-薪资表模板(1).xlsx"
+        p4_path = external_path if external_path.exists() else repository_fixture
         if not p4_path.exists():
             self.skipTest("问题4-薪资表模板(1).xlsx not present")
 

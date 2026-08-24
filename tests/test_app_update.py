@@ -7,6 +7,7 @@ import unittest
 import urllib.request
 import zipfile
 import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -141,6 +142,18 @@ class AppUpdateTests(unittest.TestCase):
         with self.assertRaises(UpdateError):
             parse_update_manifest(manifest, manifest_url="http://example.test/latest.json", platform="windows")
 
+    def test_remote_manifest_cannot_reference_local_file(self) -> None:
+        with self.assertRaisesRegex(UpdateError, "不能引用本机文件"):
+            parse_update_manifest(
+                {"version": "0.2.0", "file_url": "file:///tmp/update.zip", "sha256": "abc"},
+                manifest_url="https://example.test/latest.json",
+                platform="windows",
+            )
+
+    def test_update_network_rejects_unsupported_protocols(self) -> None:
+        with self.assertRaisesRegex(UpdateError, "不支持的更新地址协议"):
+            fetch_update_manifest("ftp://example.test/latest.json")
+
     def test_check_for_update_allows_current_version_without_package_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "latest.json"
@@ -221,6 +234,15 @@ class AppUpdateTests(unittest.TestCase):
 
         self.assertNotIn("context", urlopen.call_args.kwargs)
 
+    def test_oversized_manifest_is_rejected_with_bounded_read(self) -> None:
+        response = io.BytesIO(b'{"version":"0.2.1","padding":"xxxxxxxx"}')
+        with (
+            patch("hr_toolkit.app_update.UPDATE_MANIFEST_MAX_BYTES", 16),
+            patch("hr_toolkit.app_update.urllib.request.urlopen", return_value=response),
+            self.assertRaisesRegex(UpdateError, "配置文件过大"),
+        ):
+            fetch_update_manifest("https://example.test/latest.json")
+
     def test_download_package_verifies_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -290,6 +312,29 @@ class AppUpdateTests(unittest.TestCase):
             if download_dir.exists():
                 files = list(download_dir.iterdir())
                 self.assertEqual(files, [], "取消下载后临时文件必须被完全清理")
+
+    def test_download_package_rejects_body_beyond_size_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            package = tmp_dir / "oversized.zip"
+            package.write_bytes(b"0123456789")
+            update = parse_update_manifest(
+                {
+                    "version": "0.2.3",
+                    "file_url": package.as_uri(),
+                    "sha256": sha256_file(package),
+                },
+                manifest_url=(tmp_dir / "latest.json").as_uri(),
+                platform="windows",
+            )
+
+            with (
+                patch("hr_toolkit.app_update.UPDATE_PACKAGE_MAX_BYTES", 8),
+                self.assertRaisesRegex(UpdateError, "最大体积"),
+            ):
+                download_update_package(update, dest_dir=tmp_dir / "download")
+
+            self.assertEqual(list((tmp_dir / "download").iterdir()), [])
 
     def test_manual_download_url_falls_back_to_github(self) -> None:
         update = parse_update_manifest(
@@ -523,6 +568,76 @@ class AppUpdateTests(unittest.TestCase):
             self.assertEqual((app_dir / "HRToolkit.exe").read_text(encoding="utf-8"), "old")
             self.assertTrue((app_dir / "_internal").exists())
             self.assertIn("更新失败", log_file.read_text(encoding="utf-8"))
+
+    def test_update_runner_rejects_traversal_and_case_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_file = root / "update.log"
+            for name, entries in (
+                ("traversal.zip", [("../outside.txt", "bad")]),
+                ("case-conflict.zip", [("Data/file.txt", "one"), ("data/FILE.txt", "two")]),
+            ):
+                package = root / name
+                with zipfile.ZipFile(package, "w") as archive:
+                    for member_name, content in entries:
+                        archive.writestr(member_name, content)
+                extract_dir = root / f"extract-{name}"
+                extract_dir.mkdir()
+
+                with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "非法路径|大小写冲突"):
+                    update_runner._safe_extract_zip(package, extract_dir, log_file)
+
+            self.assertFalse((root / "outside.txt").exists())
+
+    def test_update_runner_rejects_links_and_oversized_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_file = root / "update.log"
+            link_package = root / "link.zip"
+            link_info = zipfile.ZipInfo("_internal/link")
+            link_info.create_system = 3
+            link_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            with zipfile.ZipFile(link_package, "w") as archive:
+                archive.writestr(link_info, "target")
+
+            link_extract = root / "link-extract"
+            link_extract.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "链接或特殊文件"):
+                update_runner._safe_extract_zip(link_package, link_extract, log_file)
+
+            large_package = root / "large.zip"
+            with zipfile.ZipFile(large_package, "w") as archive:
+                archive.writestr("payload.bin", b"12")
+            large_extract = root / "large-extract"
+            large_extract.mkdir()
+            with (
+                patch.object(update_runner, "ZIP_MAX_TOTAL_BYTES", 1),
+                self.assertRaisesRegex(RuntimeError, "总体积异常"),
+            ):
+                update_runner._safe_extract_zip(large_package, large_extract, log_file)
+
+    def test_update_runner_rejects_launcher_paths_before_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir = root / "HRToolkit"
+            app_dir.mkdir()
+            launcher = app_dir / "HRToolkit.exe"
+            launcher.write_text("old", encoding="utf-8")
+            package = root / "update.zip"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("HRToolkit.exe", "new")
+                archive.writestr("_internal/data.txt", "data")
+
+            exit_code = self._run_update_runner([
+                "--zip", str(package),
+                "--app-dir", str(app_dir),
+                "--launcher", "../outside.exe",
+                "--log-file", str(root / "update.log"),
+            ])
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(launcher.read_text(encoding="utf-8"), "old")
+            self.assertTrue(package.exists())
 
     def test_cleanup_stale_update_files_removes_only_old_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
