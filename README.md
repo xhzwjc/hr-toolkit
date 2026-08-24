@@ -260,6 +260,14 @@ python3 -m hr_toolkit
 python3 -m pip install -r requirements.txt
 ```
 
+正式 CI 与安装包统一使用已经验证的 Python 3.12 精确依赖集合；需要在本机复现生产环境时执行：
+
+```bash
+python3.12 -m pip install \
+  -r requirements.txt \
+  -c constraints/python312-production.txt
+```
+
 ### 1. 社保明细与汇总：
 ```bash
 python3 -m hr_toolkit social-security \
@@ -429,6 +437,29 @@ python3 -m hr_toolkit material-collector \
 
 `flat_ocr` 首次运行会在资料库根目录写入隐藏索引缓存；后续查询会复用内容未变化的文件。源文件不会被修改。
 
+### 精确 A/B 回归验收
+
+修改 Excel 处理或文件处理实现前，先保存“修改前输出 + 客户源附件”的本地基线：
+
+```bash
+python3 scripts/compare_regression_outputs.py capture \
+  --outputs "/path/to/before-output" \
+  --sources "/path/to/source-copy" \
+  --manifest "/tmp/hr-toolkit-baseline.json"
+```
+
+使用同一批输入生成修改后结果，再做验收：
+
+```bash
+python3 scripts/compare_regression_outputs.py verify \
+  --baseline "/tmp/hr-toolkit-baseline.json" \
+  --outputs "/path/to/after-output" \
+  --sources "/path/to/source-copy" \
+  --report "/tmp/hr-toolkit-regression-report.json"
+```
+
+工具会逐项比较工作表顺序、单元格值、公式及缓存计算值、格式、批注、链接、行列尺寸、合并区域、命名区域、打印区域与页眉页脚、验证规则、条件格式、表格、图表和嵌入资源；非 Excel 产物及全部源附件按字节大小和 SHA-256 验证。工具不会修改被检查的目录。基线会包含 Excel 业务值及附件哈希，应只保存在受控临时目录，不要提交到 Git 或对外发送。
+
 ---
 
 ## 自动构建与发布
@@ -453,7 +484,9 @@ npm run release -- 0.3.5 --dry-run
 
 ### GitHub Actions 产物
 
-普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查。只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag 和直接下载资产同步到 Gitee，并生成“Gitee 主地址 + GitHub 备用地址”的 `latest.json`。
+普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查，并在 Windows Python 3.12 上实际加载本地 OCR 模型完成一次推理。`.github/workflows/test-build.yml` 每周一北京时间 02:00 自动执行完整 Windows 测试、EXE/MSI/便携包构建及安装运行检查，也可继续手动选择 Windows、macOS 或全部平台。所有 Python 3.12 CI 和打包任务使用 `constraints/python312-production.txt`，避免上游依赖更新造成构建结果无预警漂移。
+
+只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag 和直接下载资产同步到 Gitee，并生成“Gitee 主地址 + GitHub 备用地址”的 `latest.json`。
 
 每个版本的直接下载资产为（以下用 `<version>` 表示版本号）：
 
