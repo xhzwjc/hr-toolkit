@@ -1,6 +1,9 @@
 name: Test Build (测试打包)
 
 on:
+  schedule:
+    # Monday 02:00 Asia/Shanghai. Scheduled runs exercise the Windows package.
+    - cron: "0 18 * * 0"
   workflow_dispatch:
     inputs:
       platform:
@@ -32,14 +35,14 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       short_sha: ${{ steps.meta.outputs.short_sha }}
-      target_platform: ${{ github.event.inputs.platform || 'windows' }}
-      run_tests: ${{ github.event.inputs.run_tests || 'false' }}
+      target_platform: ${{ steps.meta.outputs.target_platform }}
+      run_tests: ${{ steps.meta.outputs.run_tests }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -50,9 +53,19 @@ jobs:
           set -euo pipefail
           VERSION=$(python -c 'from hr_toolkit import __version__; print(__version__)')
           SHORT_SHA=$(git rev-parse --short HEAD)
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            TARGET_PLATFORM="windows"
+            RUN_TESTS="true"
+          else
+            TARGET_PLATFORM="${{ inputs.platform }}"
+            RUN_TESTS="${{ inputs.run_tests }}"
+          fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "short_sha=${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "target_platform=${TARGET_PLATFORM}" >> "${GITHUB_OUTPUT}"
+          echo "run_tests=${RUN_TESTS}" >> "${GITHUB_OUTPUT}"
           echo "Build version: ${VERSION} (commit: ${SHORT_SHA})"
+          echo "Target: ${TARGET_PLATFORM}; tests: ${RUN_TESTS}"
 
   build-windows:
     name: Build Windows (EXE & Portable ZIP)
@@ -65,10 +78,10 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           architecture: x64
@@ -76,8 +89,15 @@ jobs:
 
       - name: Install Python build dependencies
         run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+          python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
+          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip check
+
+      - name: Exercise local OCR models and inference
+        run: >-
+          python -c
+          "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test; ocr_runtime_smoke_test()"
 
       - name: Install Inno Setup and WiX
         shell: pwsh
@@ -107,7 +127,7 @@ jobs:
           Write-Host "Portable zip created at $zipPath"
 
       - name: Upload Windows test artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: HRToolkit-Windows-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
           path: |
@@ -127,18 +147,25 @@ jobs:
       SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install macOS build dependencies
         run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+          python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
+          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip check
+
+      - name: Exercise local OCR models and inference
+        run: >-
+          python -c
+          "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test; ocr_runtime_smoke_test()"
 
       - name: Run unit tests (Optional)
         if: needs.prepare.outputs.run_tests == 'true'
@@ -156,7 +183,7 @@ jobs:
             --output-dir artifacts/macos
 
       - name: Upload macOS test artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: HRToolkit-macOS-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
           path: |

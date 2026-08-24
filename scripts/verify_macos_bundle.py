@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import os
 import plistlib
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -250,7 +249,7 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=environment,
-            timeout=60,
+            timeout=180,
         )
         if smoke_result.returncode != 0:
             raise MacBundleVerificationError(

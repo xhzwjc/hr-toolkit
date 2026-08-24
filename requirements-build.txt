@@ -1,0 +1,3 @@
+# Build-only direct dependency. Transitive versions are fixed by
+# constraints/python312-production.txt in CI and release workflows.
+PyInstaller==6.21.0

@@ -6,10 +6,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 from hr_toolkit import __version__
-from hr_toolkit.runtime_checks import CHECK_OUTPUT_ENV, run_headless_command, smoke_test
+from hr_toolkit.runtime_checks import (
+    CHECK_OUTPUT_ENV,
+    ocr_runtime_smoke_test,
+    run_headless_command,
+    smoke_test,
+)
 
 
 class RuntimeChecksTest(unittest.TestCase):
@@ -48,6 +54,41 @@ class RuntimeChecksTest(unittest.TestCase):
             project_root = temp_root.resolve() / "project"
             self.assertTrue((project_root / ".hrtoolkit").is_dir())
             self.assertFalse((temp_root / "history").exists())
+
+    def test_ocr_runtime_smoke_executes_inference_with_valid_png(self) -> None:
+        calls: list[Path] = []
+
+        class FakeEngine:
+            def __call__(self, image_path: str):
+                path = Path(image_path)
+                calls.append(path)
+                self.assert_valid_png(path)
+                return None, None
+
+            @staticmethod
+            def assert_valid_png(path: Path) -> None:
+                payload = path.read_bytes()
+                if not payload.startswith(b"\x89PNG\r\n\x1a\n") or b"IHDR" not in payload:
+                    raise AssertionError("invalid PNG fixture")
+
+        rapidocr = ModuleType("rapidocr_onnxruntime")
+        rapidocr.RapidOCR = FakeEngine  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(sys.modules, {"rapidocr_onnxruntime": rapidocr}):
+                ocr_runtime_smoke_test(Path(tmp))
+            self.assertEqual(calls, [Path(tmp) / "blank.png"])
+
+    def test_ocr_runtime_smoke_rejects_invalid_result_shape(self) -> None:
+        class InvalidEngine:
+            def __call__(self, _image_path: str):
+                return []
+
+        rapidocr = ModuleType("rapidocr_onnxruntime")
+        rapidocr.RapidOCR = InvalidEngine  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(sys.modules, {"rapidocr_onnxruntime": rapidocr}):
+                with self.assertRaisesRegex(RuntimeError, "返回格式无效"):
+                    ocr_runtime_smoke_test(Path(tmp))
 
     def test_unknown_arguments_are_left_for_cli(self) -> None:
         self.assertIsNone(run_headless_command(["salary-split"]))

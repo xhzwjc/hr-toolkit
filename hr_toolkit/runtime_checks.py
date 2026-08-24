@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import os
+import struct
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 from hr_toolkit import __version__
@@ -25,6 +27,44 @@ TEMPLATE_NAMES = (
 _RAR_RUNTIME_FIXTURE = base64.b64decode(
     "UmFyIRoHAQAzkrXlCgEFBgAFAQGAgACVrTL6KgIDC58ABJ8ApIMCvJeqS4AAAQxydW50aW1lLnhsc3gKAxPxW4hqhkEQMUhSVG9vbGtpdCBhcmNoaXZlIHJ1bnRpbWUgc21va2Udd1ZRAwUEAA=="
 )
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    checksum = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", checksum)
+
+
+def _write_ocr_smoke_image(path: Path) -> None:
+    """Write a dependency-free RGB PNG that exercises RapidOCR inference."""
+    width, height = 64, 32
+    scanline = b"\x00" + (b"\xff\xff\xff" * width)
+    payload = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(scanline * height))
+        + _png_chunk(b"IEND", b"")
+    )
+    path.write_bytes(payload)
+
+
+def ocr_runtime_smoke_test(root: Path | None = None) -> None:
+    """Load bundled OCR models and execute one real, offline inference call."""
+    if root is None:
+        with tempfile.TemporaryDirectory(prefix="hr_toolkit_ocr_smoke_") as temp_root:
+            ocr_runtime_smoke_test(Path(temp_root))
+        return
+
+    root.mkdir(parents=True, exist_ok=True)
+    image_path = root / "blank.png"
+    _write_ocr_smoke_image(image_path)
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+
+        result = RapidOCR()(str(image_path))
+    except Exception as exc:
+        raise RuntimeError(f"本地 OCR 引擎运行检查失败：{exc}") from exc
+    if not isinstance(result, tuple) or len(result) != 2:
+        raise RuntimeError(f"本地 OCR 引擎返回格式无效：{type(result).__name__}")
 
 
 def run_headless_command(argv: list[str]) -> int | None:
@@ -63,6 +103,8 @@ def smoke_test() -> None:
         # 运行检查使用真实路径，不降低项目对链接路径的安全限制。
         resolved_temp_root = Path(temp_root).resolve()
         _smoke_test_archive_runtimes(resolved_temp_root / "archive-runtime")
+        if getattr(sys, "frozen", False):
+            ocr_runtime_smoke_test(resolved_temp_root / "ocr-runtime")
         project_root = resolved_temp_root / "project"
         with ProjectStore.create(project_root, "运行检查项目") as project:
             draft = project.create_draft_batch(

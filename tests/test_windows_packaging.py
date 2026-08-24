@@ -5,7 +5,6 @@ import struct
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
-import zipfile
 from pathlib import Path
 
 from scripts import build_update_assets
@@ -116,6 +115,54 @@ class WindowsPackagingTests(unittest.TestCase):
         )[0]
         job_configuration = windows_job.split("\n    steps:", 1)[0]
         self.assertIn('PYTHONUTF8: "1"', job_configuration)
+
+    def test_ci_actions_are_immutable_and_production_dependencies_are_locked(self) -> None:
+        workflow_dir = build_windows.REPO_ROOT / ".github" / "workflows"
+        workflow_paths = sorted(workflow_dir.glob("*.yml"))
+        action_lines: list[str] = []
+        for workflow_path in workflow_paths:
+            workflow = workflow_path.read_text(encoding="utf-8")
+            action_lines.extend(
+                line.strip() for line in workflow.splitlines() if "uses: actions/" in line
+            )
+        self.assertTrue(action_lines)
+        for line in action_lines:
+            with self.subTest(line=line):
+                self.assertRegex(
+                    line,
+                    r"^uses: actions/[a-z-]+@[0-9a-f]{40} # v\d+$",
+                )
+
+        constraint_path = (
+            build_windows.REPO_ROOT / "constraints" / "python312-production.txt"
+        )
+        constraints = [
+            line.strip()
+            for line in constraint_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertIn("pip==26.2", constraints)
+        self.assertIn("rapidocr_onnxruntime==1.4.4", constraints)
+        self.assertIn("pyinstaller==6.21.0", constraints)
+        for constraint in constraints:
+            with self.subTest(constraint=constraint):
+                requirement = constraint.split(";", 1)[0].strip()
+                self.assertRegex(requirement, r"^[A-Za-z0-9_.-]+==[^=\s]+$")
+
+        ci = (workflow_dir / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("requirements-audit.txt", ci)
+        self.assertIn("python -m pip_audit --local", ci)
+        self.assertIn("constraints/python312-production.txt", ci)
+
+    def test_scheduled_windows_package_gate_runs_tests_and_ocr(self) -> None:
+        workflow = (
+            build_windows.REPO_ROOT / ".github" / "workflows" / "test-build.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('- cron: "0 18 * * 0"', workflow)
+        self.assertIn('TARGET_PLATFORM="windows"', workflow)
+        self.assertIn('RUN_TESTS="true"', workflow)
+        self.assertIn("ocr_runtime_smoke_test", workflow)
+        self.assertIn("scripts/release_windows.py", workflow)
 
     def test_payload_verification_accepts_only_readme_and_builtin_excel_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

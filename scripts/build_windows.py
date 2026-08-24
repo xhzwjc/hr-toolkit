@@ -478,7 +478,7 @@ def run_runtime_smoke(app_executable: Path, updater_executable: Path) -> None:
             raise RuntimeError(
                 f"打包程序版本不一致：期望 {expected_version}，实际 {actual_version or '空'}"
             )
-        _run([str(app_executable), "--smoke-test"], timeout=60, env=env)
+        _run([str(app_executable), "--smoke-test"], timeout=180, env=env)
         smoke_result = output_path.read_text(encoding="utf-8").strip()
         if f"HRToolkit {expected_version} smoke-test OK" not in smoke_result:
             raise RuntimeError(f"打包程序 smoke-test 输出不正确：{smoke_result or '空'}")

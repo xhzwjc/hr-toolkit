@@ -20,12 +20,12 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -43,7 +43,12 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
       - name: Install runtime dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
+          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
+
+      - name: Verify dependency consistency
+        run: python -m pip check
 
       - name: Run complete unit test suite
         env:
@@ -74,10 +79,10 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           architecture: x64
@@ -85,8 +90,15 @@ jobs:
 
       - name: Install Python build dependencies
         run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+          python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
+          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip check
+
+      - name: Exercise local OCR models and inference
+        run: >-
+          python -c
+          "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test; ocr_runtime_smoke_test()"
 
       - name: Install Inno Setup and WiX
         shell: pwsh
@@ -124,7 +136,7 @@ jobs:
           }
 
       - name: Upload direct Windows assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: release-windows
           path: |
@@ -134,7 +146,7 @@ jobs:
           retention-days: 30
 
       - name: Upload legacy server bridge manifest for operations
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: legacy-server-bridge
           path: artifacts/windows/legacy-server-latest.json
@@ -153,10 +165,10 @@ jobs:
       MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up universal2-capable Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -173,8 +185,15 @@ jobs:
 
       - name: Install macOS build dependencies
         run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+          python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
+          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip check
+
+      - name: Exercise local OCR models and inference
+        run: >-
+          python -c
+          "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test; ocr_runtime_smoke_test()"
 
       - name: Attempt universal2 app and DMG
         id: universal
@@ -200,7 +219,7 @@ jobs:
 
       - name: Upload verified universal DMG
         if: steps.mode.outputs.universal_ok == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: release-macos-universal
           path: artifacts/macos/HRToolkit_${{ env.VERSION }}_universal.dmg
@@ -229,10 +248,10 @@ jobs:
       MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -245,8 +264,15 @@ jobs:
 
       - name: Install macOS build dependencies
         run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check "PyInstaller==6.21.0"
+          python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
+          python -m pip install --disable-pip-version-check -r requirements.txt -c constraints/python312-production.txt
+          python -m pip install --disable-pip-version-check -r requirements-build.txt -c constraints/python312-production.txt
+          python -m pip check
+
+      - name: Exercise local OCR models and inference
+        run: >-
+          python -c
+          "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test; ocr_runtime_smoke_test()"
 
       - name: Build and verify native app and DMG
         shell: bash
@@ -258,7 +284,7 @@ jobs:
             --output-dir artifacts/macos
 
       - name: Upload verified architecture DMG
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: release-macos-${{ matrix.asset_suffix }}
           path: artifacts/macos/HRToolkit_${{ env.VERSION }}_${{ matrix.asset_suffix }}.dmg
@@ -292,15 +318,15 @@ jobs:
       TAG: ${{ github.ref_name }}
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
       - name: Download successful platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: release-*
           path: release-assets
@@ -396,12 +422,12 @@ jobs:
       GITEE_REPOSITORY: optimistic-little-sunspot/hr-toolkit
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
