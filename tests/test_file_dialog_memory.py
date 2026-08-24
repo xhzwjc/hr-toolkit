@@ -124,6 +124,7 @@ class FileDialogMemoryTestCase(unittest.TestCase):
 
             with patch.object(self.app, "_workspace_settings_path", return_value=custom_settings):
                 self.app._last_selected_dir = chosen_dir
+                self.app._workspace_preferred_expanded = True
                 self.app._material_preferences = MaterialPreferences(
                     custom_materials=["户口本"]
                 )
@@ -136,6 +137,7 @@ class FileDialogMemoryTestCase(unittest.TestCase):
                 self.assertTrue(custom_settings.is_file())
                 saved_data = json.loads(custom_settings.read_text(encoding="utf-8"))
                 self.assertEqual(saved_data.get("version"), WORKSPACE_UI_SETTINGS_VERSION)
+                self.assertNotIn("project_panel_expanded", saved_data)
                 self.assertEqual(saved_data.get("last_selected_dir"), str(chosen_dir))
                 self.assertEqual(
                     saved_data["material_preferences"]["custom_materials"],
@@ -144,29 +146,17 @@ class FileDialogMemoryTestCase(unittest.TestCase):
 
                 # Now simulate restart / new app loading preferences
                 new_app = HRToolkitApp.__new__(HRToolkitApp)
+                new_app._workspace_preferred_expanded = True
                 with patch.object(new_app, "_workspace_settings_path", return_value=custom_settings):
                     new_app._load_workspace_preferences()
+                    self.assertFalse(new_app._workspace_preferred_expanded)
                     self.assertEqual(new_app._last_selected_dir, chosen_dir)
                     self.assertEqual(
                         new_app._material_preferences.get_preset("补充入职"),
                         ("身份证", "户口本"),
                     )
 
-    def test_legacy_preferences_migrate_panel_to_collapsed(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            custom_settings = Path(temp_dir) / "workspace-ui.json"
-            custom_settings.write_text(
-                json.dumps({"version": 1, "project_panel_expanded": True}),
-                encoding="utf-8",
-            )
-            self.app._workspace_preferred_expanded = True
-
-            with patch.object(self.app, "_workspace_settings_path", return_value=custom_settings):
-                self.app._load_workspace_preferences()
-
-            self.assertFalse(self.app._workspace_preferred_expanded)
-
-    def test_current_preferences_preserve_explicit_expanded_panel(self) -> None:
+    def test_preferences_always_start_panel_collapsed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             custom_settings = Path(temp_dir) / "workspace-ui.json"
             custom_settings.write_text(
@@ -176,19 +166,6 @@ class FileDialogMemoryTestCase(unittest.TestCase):
                         "project_panel_expanded": True,
                     }
                 ),
-                encoding="utf-8",
-            )
-
-            with patch.object(self.app, "_workspace_settings_path", return_value=custom_settings):
-                self.app._load_workspace_preferences()
-
-            self.assertTrue(self.app._workspace_preferred_expanded)
-
-    def test_current_preferences_default_panel_to_collapsed(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            custom_settings = Path(temp_dir) / "workspace-ui.json"
-            custom_settings.write_text(
-                json.dumps({"version": WORKSPACE_UI_SETTINGS_VERSION}),
                 encoding="utf-8",
             )
             self.app._workspace_preferred_expanded = True

@@ -61,6 +61,19 @@ class GuiPerformanceTests(unittest.TestCase):
 
         app.workspace_tree.get_children.assert_not_called()
 
+    def test_workspace_toggle_only_changes_current_session(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app._workspace_small = False
+        app._workspace_preferred_expanded = False
+        app._save_workspace_preferences = Mock()
+        app._apply_workspace_panel_mode = Mock()
+
+        app._toggle_workspace_panel()
+
+        self.assertTrue(app._workspace_preferred_expanded)
+        app._save_workspace_preferences.assert_not_called()
+        app._apply_workspace_panel_mode.assert_called_once_with()
+
     def test_workspace_mode_transition_to_expanded_refreshes_tree_once(self) -> None:
         app = HRToolkitApp.__new__(HRToolkitApp)
         app.root = Mock()

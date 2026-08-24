@@ -589,6 +589,8 @@ class HRToolkitApp:
         return base / "HRToolkit" / "workspace-ui.json"
 
     def _load_workspace_preferences(self) -> None:
+        # 项目文件区每次启动都收起；展开只在当前运行期间有效。
+        self._workspace_preferred_expanded = False
         self._workspace_last_project_path: Path | None = None
         self._last_selected_dir: Path | None = None
         self._material_preferences = MaterialPreferences()
@@ -607,19 +609,6 @@ class HRToolkitApp:
         except (AttributeError, TypeError, ValueError):
             width = WORKSPACE_DEFAULT_WIDTH
         self._workspace_width_units = max(WORKSPACE_MIN_WIDTH, min(WORKSPACE_MAX_WIDTH, width))
-        try:
-            settings_version = int(state.get("version", 0))
-        except (AttributeError, TypeError, ValueError):
-            settings_version = 0
-        if settings_version >= WORKSPACE_UI_SETTINGS_VERSION:
-            try:
-                self._workspace_preferred_expanded = bool(state.get("project_panel_expanded", False))
-            except AttributeError:
-                self._workspace_preferred_expanded = False
-        else:
-            # v1 会在保存其他设置时顺带写入旧默认值 True，无法区分用户选择。
-            # 升级时统一迁移到新默认值；此后仍记住用户主动展开或收起的选择。
-            self._workspace_preferred_expanded = False
         recent: list[tuple[str, Path]] = []
         raw_recent = state.get("recent_projects", [])
         if isinstance(raw_recent, list):
@@ -654,7 +643,6 @@ class HRToolkitApp:
         payload = {
             "version": WORKSPACE_UI_SETTINGS_VERSION,
             "project_panel_width": int(self._workspace_width_units),
-            "project_panel_expanded": bool(self._workspace_preferred_expanded),
             "current_project": str(self.current_project_path) if self.current_project_path is not None else None,
             "recent_projects": [str(path) for _name, path in self._workspace_recent_projects[:8]],
             "last_selected_dir": str(self._last_selected_dir) if getattr(self, "_last_selected_dir", None) is not None else None,
@@ -3166,7 +3154,6 @@ class HRToolkitApp:
             self._workspace_drawer_open = not self._workspace_drawer_open
         else:
             self._workspace_preferred_expanded = not self._workspace_preferred_expanded
-            self._save_workspace_preferences()
         self._apply_workspace_panel_mode()
 
     def _workspace_panel_is_expanded(self) -> bool:
