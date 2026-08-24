@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock
@@ -101,12 +102,12 @@ class TaskRunnerTests(unittest.TestCase):
         self.assertFalse(self.runner.is_running("dup_task"))
 
     def test_stop_runner(self) -> None:
-        cancelled = []
+        cancelled = threading.Event()
 
         def worker(is_cancelled, on_progress):
             for _ in range(50):
                 if is_cancelled():
-                    cancelled.append(True)
+                    cancelled.set()
                     return
                 time.sleep(0.01)
 
@@ -116,8 +117,7 @@ class TaskRunnerTests(unittest.TestCase):
         self.runner.stop()
         self.assertFalse(self.runner._polling_active)
         self.assertFalse(self.runner.is_running("long_task"))
-        time.sleep(0.03)
-        self.assertEqual(cancelled, [True])
+        self.assertTrue(cancelled.wait(timeout=1.0))
 
     def test_poll_handles_root_error_gracefully(self) -> None:
         self.mock_root.after.side_effect = RuntimeError("Tk root destroyed")
