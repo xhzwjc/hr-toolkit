@@ -94,6 +94,22 @@ class RuntimeChecksTest(unittest.TestCase):
     def test_unknown_arguments_are_left_for_cli(self) -> None:
         self.assertIsNone(run_headless_command(["salary-split"]))
 
+    def test_smoke_command_reports_failure_without_an_unhandled_dialog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "smoke-failure.txt"
+            os.environ[CHECK_OUTPUT_ENV] = str(output)
+            try:
+                with patch(
+                    "hr_toolkit.runtime_checks.smoke_test",
+                    side_effect=RuntimeError("frozen dependency failed"),
+                ):
+                    self.assertEqual(run_headless_command(["--smoke-test"]), 1)
+            finally:
+                os.environ.pop(CHECK_OUTPUT_ENV, None)
+            result = output.read_text(encoding="utf-8")
+            self.assertIn("smoke-test FAILED", result)
+            self.assertIn("frozen dependency failed", result)
+
     def test_update_smoke_command_is_headless_and_machine_verifiable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "update-smoke.txt"

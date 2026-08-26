@@ -1182,17 +1182,35 @@ def run_runtime_smoke(
         if target == WINDOWS_TARGET_WIN7:
             env.pop(WIN7_7ZIP_OVERRIDE_ENV, None)
         env["HR_TOOLKIT_CHECK_OUTPUT"] = str(output_path)
-        _run([str(app_executable), "--version"], timeout=60, env=env)
+        _run_packaged_check(
+            [str(app_executable), "--version"],
+            output_path=output_path,
+            label="打包程序版本检查",
+            timeout=60,
+            env=env,
+        )
         actual_version = output_path.read_text(encoding="utf-8").strip()
         if actual_version != expected_version:
             raise RuntimeError(
                 f"打包程序版本不一致：期望 {expected_version}，实际 {actual_version or '空'}"
             )
-        _run([str(app_executable), "--smoke-test"], timeout=180, env=env)
+        _run_packaged_check(
+            [str(app_executable), "--smoke-test"],
+            output_path=output_path,
+            label="打包程序 smoke-test",
+            timeout=180,
+            env=env,
+        )
         smoke_result = output_path.read_text(encoding="utf-8").strip()
         if f"HRToolkit {expected_version} smoke-test OK" not in smoke_result:
             raise RuntimeError(f"打包程序 smoke-test 输出不正确：{smoke_result or '空'}")
-        _run([str(app_executable), "--update-smoke-test"], timeout=90, env=env)
+        _run_packaged_check(
+            [str(app_executable), "--update-smoke-test"],
+            output_path=output_path,
+            label="打包程序 update-smoke-test",
+            timeout=90,
+            env=env,
+        )
         update_smoke_result = output_path.read_text(encoding="utf-8").strip()
         expected_prefix = f"HRToolkit {expected_version} update-smoke-test OK; latest="
         if not update_smoke_result.startswith(expected_prefix):
@@ -1214,7 +1232,13 @@ def run_runtime_smoke(
                         f"Win7 Updater 启动检查缺少 app-local 运行库：{runtime_name}"
                     )
                 shutil.copy2(source, updater_smoke_dir / runtime_name)
-            _run([str(updater_smoke), "--smoke-test"], timeout=90, env=env)
+            _run_packaged_check(
+                [str(updater_smoke), "--smoke-test"],
+                output_path=output_path,
+                label="打包更新程序 smoke-test",
+                timeout=90,
+                env=env,
+            )
             updater_smoke_result = output_path.read_text(encoding="utf-8").strip()
             expected_updater = f"HRToolkitUpdater {expected_version} smoke-test OK"
             if updater_smoke_result != expected_updater:
@@ -1222,6 +1246,26 @@ def run_runtime_smoke(
                     "打包更新程序 smoke-test 输出不正确："
                     f"{updater_smoke_result or '空'}"
                 )
+
+
+def _run_packaged_check(
+    command: list[str],
+    *,
+    output_path: Path,
+    label: str,
+    timeout: int,
+    env: dict[str, str],
+) -> None:
+    output_path.unlink(missing_ok=True)
+    try:
+        _run(command, timeout=timeout, env=env)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        try:
+            detail = output_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            detail = ""
+        suffix = f"；程序记录：{detail}" if detail else ""
+        raise RuntimeError(f"{label}失败：{exc}{suffix}") from exc
 
 
 def _is_template_payload_path(relative: Path) -> bool:

@@ -5,6 +5,7 @@ import os
 import struct
 import sys
 import tempfile
+import traceback
 import zipfile
 import zlib
 from pathlib import Path
@@ -61,9 +62,13 @@ def ocr_runtime_smoke_test(root: Path | None = None) -> None:
     image_path = root / "blank.png"
     _write_ocr_smoke_image(image_path)
     try:
+        _mark_smoke_stage("ocr-import")
         from rapidocr_onnxruntime import RapidOCR
 
-        result = RapidOCR()(str(image_path))
+        _mark_smoke_stage("ocr-engine-init")
+        engine = RapidOCR()
+        _mark_smoke_stage("ocr-inference")
+        result = engine(str(image_path))
     except Exception as exc:
         raise RuntimeError(f"本地 OCR 引擎运行检查失败：{exc}") from exc
     if not isinstance(result, tuple) or len(result) != 2:
@@ -76,26 +81,45 @@ def run_headless_command(argv: list[str]) -> int | None:
         _emit(__version__)
         return 0
     if argv == ["--smoke-test"]:
-        smoke_test()
-        _emit(f"HRToolkit {__version__} smoke-test OK")
-        return 0
+        try:
+            smoke_test()
+        except Exception:
+            _emit(
+                f"HRToolkit {__version__} smoke-test FAILED\n"
+                f"{traceback.format_exc().rstrip()}"
+            )
+            return 1
+        else:
+            _emit(f"HRToolkit {__version__} smoke-test OK")
+            return 0
     if argv == ["--update-smoke-test"]:
-        latest_version = update_smoke_test()
-        _emit(f"HRToolkit {__version__} update-smoke-test OK; latest={latest_version}")
-        return 0
+        try:
+            latest_version = update_smoke_test()
+        except Exception:
+            _emit(
+                f"HRToolkit {__version__} update-smoke-test FAILED\n"
+                f"{traceback.format_exc().rstrip()}"
+            )
+            return 1
+        else:
+            _emit(f"HRToolkit {__version__} update-smoke-test OK; latest={latest_version}")
+            return 0
     return None
 
 
 def smoke_test() -> None:
     """Validate dependencies and packaged whitelist resources without a GUI."""
+    _mark_smoke_stage("dependencies")
     import openpyxl  # noqa: F401
     import xlrd  # noqa: F401
     from hr_toolkit.app_update import create_https_context
     from hr_toolkit.project_store import ProjectStore
 
     # Loading the context proves that PyInstaller included certifi's CA bundle.
+    _mark_smoke_stage("https-context")
     create_https_context()
 
+    _mark_smoke_stage("templates")
     for template_name in TEMPLATE_NAMES:
         with open_template_resource(template_name) as handle:
             if not zipfile.is_zipfile(handle):
@@ -105,9 +129,11 @@ def smoke_test() -> None:
         # macOS 上 tempfile 可能返回经过 /var -> /private/var 的系统链接；
         # 运行检查使用真实路径，不降低项目对链接路径的安全限制。
         resolved_temp_root = Path(temp_root).resolve()
+        _mark_smoke_stage("archive-7z")
         _smoke_test_archive_runtimes(resolved_temp_root / "archive-runtime")
         if getattr(sys, "frozen", False):
             ocr_runtime_smoke_test(resolved_temp_root / "ocr-runtime")
+        _mark_smoke_stage("project-store")
         project_root = resolved_temp_root / "project"
         with ProjectStore.create(project_root, "运行检查项目") as project:
             draft = project.create_draft_batch(
@@ -130,6 +156,7 @@ def smoke_test() -> None:
                 raise RuntimeError("本地项目工作区运行检查失败。")
 
     if getattr(sys, "frozen", False):
+        _mark_smoke_stage("readme")
         bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
         if not (bundle_root / "README.md").is_file():
             raise RuntimeError("打包程序缺少 README.md。")
@@ -147,6 +174,7 @@ def _smoke_test_archive_runtimes(root: Path) -> None:
 
     rar_path = root / "runtime.rar"
     rar_path.write_bytes(_RAR_RUNTIME_FIXTURE)
+    _mark_smoke_stage("archive-rar")
     rar_warnings: list[str] = []
     rar_files = extract_archive_excel_files(rar_path, root / "extract-rar", rar_warnings)
     if rar_warnings or len(rar_files) != 1 or rar_files[0].read_bytes() != payload:
@@ -170,3 +198,13 @@ def _emit(text: str) -> None:
     output_path = os.environ.get(CHECK_OUTPUT_ENV, "").strip()
     if output_path:
         Path(output_path).write_text(text + "\n", encoding="utf-8")
+
+
+def _mark_smoke_stage(stage: str) -> None:
+    """Persist the active frozen-check stage so CI can diagnose hard hangs."""
+    output_path = os.environ.get(CHECK_OUTPUT_ENV, "").strip()
+    if output_path:
+        Path(output_path).write_text(
+            f"HRToolkit {__version__} smoke-test RUNNING: {stage}\n",
+            encoding="utf-8",
+        )

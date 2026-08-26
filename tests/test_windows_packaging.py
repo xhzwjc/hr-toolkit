@@ -5,6 +5,7 @@ import hashlib
 import json
 import runpy
 import struct
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -354,6 +355,29 @@ class WindowsPackagingTests(unittest.TestCase):
         payload = build_windows.windows_version_info("0.2.1")
         self.assertIn("filevers=(0, 2, 1, 0)", payload)
         self.assertIn("StringStruct('ProductVersion', '0.2.1')", payload)
+
+    def test_packaged_smoke_timeout_reports_the_last_runtime_stage(self) -> None:
+        def fake_run(command: list[str], *, timeout=None, env=None) -> None:
+            self.assertIsNotNone(env)
+            assert env is not None
+            output_path = Path(env["HR_TOOLKIT_CHECK_OUTPUT"])
+            if "--version" in command:
+                output_path.write_text(self.version, encoding="utf-8")
+                return
+            output_path.write_text(
+                f"HRToolkit {self.version} smoke-test RUNNING: ocr-inference\n",
+                encoding="utf-8",
+            )
+            raise subprocess.TimeoutExpired(command, timeout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app = tmp_dir / "HRToolkit.exe"
+            updater = tmp_dir / "HRToolkitUpdater.exe"
+            self._write_fake_pe(updater, build_windows.PE_MACHINE_AMD64)
+            with patch.object(build_windows, "_run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "ocr-inference"):
+                    build_windows.run_runtime_smoke(app, updater)
 
     def test_wix_xml_indentation_has_a_python38_fallback(self) -> None:
         root = ET.Element("root")
