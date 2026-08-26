@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import struct
 import tempfile
@@ -1208,6 +1209,11 @@ class WindowsPackagingTests(unittest.TestCase):
         )
         self.assertEqual(prepare_win7_runtime.VC_REDIST_VERSION, "14.29.30157")
         self.assertEqual(len(prepare_win7_runtime.VC_REDIST_SHA256), 64)
+        self.assertEqual(
+            len(prepare_win7_runtime.VC_REDIST_ATTACHED_CONTAINER_SHA256),
+            64,
+        )
+        self.assertEqual(len(prepare_win7_runtime.VC_REDIST_MINIMUM_CAB_SHA256), 64)
         self.assertIn("download.visualstudio.microsoft.com", prepare_win7_runtime.VC_REDIST_URL)
         self.assertEqual(
             set(WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES),
@@ -1224,19 +1230,60 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("onnxruntime==1.11.1", constraints)
         self.assertNotIn("onnxruntime==1.14.1", constraints)
 
-    def test_vc_redist_layout_uses_its_documented_current_directory(self) -> None:
+    def test_verified_slice_rejects_truncated_or_changed_content(self) -> None:
+        payload = b"pinned embedded container"
+        expected_sha256 = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            source = tmp_dir / "bundle.exe"
+            destination = tmp_dir / "attached.cab"
+            source.write_bytes(b"prefix" + payload + b"signature")
+            prepare_win7_runtime._copy_verified_slice(
+                source=source,
+                destination=destination,
+                offset=len(b"prefix"),
+                size=len(payload),
+                expected_sha256=expected_sha256,
+            )
+            self.assertEqual(destination.read_bytes(), payload)
+
+            with self.assertRaisesRegex(RuntimeError, "校验失败"):
+                prepare_win7_runtime._copy_verified_slice(
+                    source=source,
+                    destination=destination,
+                    offset=len(b"prefix"),
+                    size=len(payload),
+                    expected_sha256="0" * 64,
+                )
+            self.assertFalse(destination.exists())
+
+            with self.assertRaisesRegex(RuntimeError, "不完整"):
+                prepare_win7_runtime._copy_verified_slice(
+                    source=source,
+                    destination=destination,
+                    offset=source.stat().st_size - 1,
+                    size=2,
+                    expected_sha256=expected_sha256,
+                )
+            self.assertFalse(destination.exists())
+
+    def test_vc_redist_extracts_pinned_embedded_minimum_runtime(self) -> None:
         subprocess_calls = []
+        minimum_cab = b"pinned minimum cab"
 
         def fake_download(_url, destination, _expected_sha256):
             destination.write_bytes(b"pinned VC redist")
 
+        def fake_copy_slice(**kwargs):
+            kwargs["destination"].write_bytes(b"attached container")
+
         def fake_run(command, **kwargs):
             subprocess_calls.append((command, kwargs))
-            if "/layout" in command:
-                layout_dir = Path(kwargs["cwd"])
-                package_dir = layout_dir / "packages" / "vcRuntimeMinimum_amd64"
-                package_dir.mkdir(parents=True)
-                (package_dir / "vc_runtimeMinimum_x64.msi").write_bytes(b"msi")
+            destination = Path(command[-1])
+            if command[1] == f"-F:{prepare_win7_runtime.VC_REDIST_MINIMUM_CAB_MEMBER}":
+                (destination / prepare_win7_runtime.VC_REDIST_MINIMUM_CAB_MEMBER).write_bytes(
+                    minimum_cab
+                )
             return SimpleNamespace(returncode=0)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1247,18 +1294,33 @@ class WindowsPackagingTests(unittest.TestCase):
                     side_effect=fake_download,
                 ),
                 patch.object(
+                    prepare_win7_runtime,
+                    "_copy_verified_slice",
+                    side_effect=fake_copy_slice,
+                ),
+                patch.object(
                     prepare_win7_runtime.subprocess,
                     "run",
                     side_effect=fake_run,
                 ),
                 patch.object(prepare_win7_runtime, "_replace_with_discovered_files"),
+                patch.object(
+                    prepare_win7_runtime,
+                    "VC_REDIST_MINIMUM_CAB_SHA256",
+                    hashlib.sha256(minimum_cab).hexdigest(),
+                ),
             ):
                 prepare_win7_runtime._prepare_vc_runtime(Path(tmp) / "vc-runtime")
 
-        layout_command, layout_options = subprocess_calls[0]
-        self.assertEqual(layout_command[1:], ["/layout", "/quiet", "/norestart"])
-        self.assertEqual(Path(layout_options["cwd"]).name, "layout")
-        self.assertEqual(subprocess_calls[1][0][0], "msiexec.exe")
+        self.assertEqual(subprocess_calls[0][0][0], "expand.exe")
+        self.assertEqual(
+            subprocess_calls[0][0][1],
+            f"-F:{prepare_win7_runtime.VC_REDIST_MINIMUM_CAB_MEMBER}",
+        )
+        self.assertEqual(subprocess_calls[1][0][0:2], ["expand.exe", "-F:*"])
+        self.assertFalse(
+            any("/layout" in command or "msiexec.exe" in command for command, _ in subprocess_calls)
+        )
 
     def test_win7_ucrt_archive_files_are_discovered_by_embedded_dll_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

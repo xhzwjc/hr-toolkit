@@ -44,6 +44,17 @@ VC_REDIST_URL = (
     "VC_redist.x64.exe"
 )
 VC_REDIST_SHA256 = "6afae68a783f11292149175844aed0e2ce3f247bc0250f6cb18c931295b3f399"
+VC_REDIST_ATTACHED_CONTAINER_OFFSET = 684_808
+VC_REDIST_ATTACHED_CONTAINER_SIZE = 24_638_032
+VC_REDIST_ATTACHED_CONTAINER_SHA256 = (
+    "ef47a63f547593d1afb754d3037a1c261ea6e60296d345d334ef1596bc09dd04"
+)
+# The pinned bundle's Burn manifest maps a12 to
+# packages\vcRuntimeMinimum_amd64\cab1.cab.
+VC_REDIST_MINIMUM_CAB_MEMBER = "a12"
+VC_REDIST_MINIMUM_CAB_SHA256 = (
+    "0f80eaff837bc69f6fab2b07627149c09bb20a8f2649869c7faa5a1c98d76c28"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,33 +140,86 @@ def _prepare_vc_runtime(target_dir: Path) -> None:
         temporary_dir = Path(temporary)
         installer = temporary_dir / "VC_redist.x64.exe"
         _download_verified(VC_REDIST_URL, installer, VC_REDIST_SHA256)
-        layout_dir = temporary_dir / "layout"
-        layout_dir.mkdir()
-        # VC_redist /layout writes its payload into the current directory.
-        subprocess.run(
-            [str(installer), "/layout", "/quiet", "/norestart"],
-            cwd=layout_dir,
-            check=True,
-            timeout=180,
+        attached_container = temporary_dir / "attached.cab"
+        _copy_verified_slice(
+            source=installer,
+            destination=attached_container,
+            offset=VC_REDIST_ATTACHED_CONTAINER_OFFSET,
+            size=VC_REDIST_ATTACHED_CONTAINER_SIZE,
+            expected_sha256=VC_REDIST_ATTACHED_CONTAINER_SHA256,
         )
-        minimum_msi = _find_casefold_name(layout_dir, "vc_runtimeMinimum_x64.msi")
-        extracted_dir = temporary_dir / "extracted"
+        container_dir = temporary_dir / "container"
+        container_dir.mkdir()
         subprocess.run(
             [
-                "msiexec.exe",
-                "/a",
-                str(minimum_msi),
-                "/qn",
-                f"TARGETDIR={extracted_dir}",
+                "expand.exe",
+                f"-F:{VC_REDIST_MINIMUM_CAB_MEMBER}",
+                str(attached_container),
+                str(container_dir),
             ],
             check=True,
-            timeout=180,
+            timeout=120,
+        )
+        minimum_cab = _find_casefold_name(
+            container_dir,
+            VC_REDIST_MINIMUM_CAB_MEMBER,
+        )
+        minimum_cab_sha256 = _sha256_file(minimum_cab)
+        if minimum_cab_sha256 != VC_REDIST_MINIMUM_CAB_SHA256:
+            raise RuntimeError(
+                "Visual C++ minimum runtime CAB 校验失败："
+                f"期望 {VC_REDIST_MINIMUM_CAB_SHA256}，实际 {minimum_cab_sha256}"
+            )
+        extracted_dir = temporary_dir / "extracted"
+        extracted_dir.mkdir()
+        subprocess.run(
+            [
+                "expand.exe",
+                "-F:*",
+                str(minimum_cab),
+                str(extracted_dir),
+            ],
+            check=True,
+            timeout=120,
         )
         _replace_with_discovered_files(
             source_dir=extracted_dir,
             target_dir=target_dir,
             names=WIN7_REQUIRED_VC_RUNTIME_FILES,
             label=f"Visual C++ 2015-2019 {VC_REDIST_VERSION}",
+        )
+
+
+def _copy_verified_slice(
+    *,
+    source: Path,
+    destination: Path,
+    offset: int,
+    size: int,
+    expected_sha256: str,
+) -> None:
+    digest = hashlib.sha256()
+    remaining = size
+    truncated = False
+    with source.open("rb") as input_file, destination.open("wb") as output_file:
+        input_file.seek(offset)
+        while remaining:
+            chunk = input_file.read(min(1024 * 1024, remaining))
+            if not chunk:
+                truncated = True
+                break
+            output_file.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+    if truncated:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError("Visual C++ 安装包的内嵌容器不完整。")
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Visual C++ 安装包的内嵌容器校验失败："
+            f"期望 {expected_sha256}，实际 {actual_sha256}"
         )
 
 
