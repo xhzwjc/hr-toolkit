@@ -176,6 +176,10 @@ WIN7_REQUIRED_VC_RUNTIME_FILES = (
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 )
+WIN7_REQUIRED_PYTHON_RUNTIME_FILES = (
+    "python38.dll",
+    "python3.dll",
+)
 WIN7_FORBIDDEN_DLLS = frozenset(
     {
         "api-ms-win-core-path-l1-1-0.dll",
@@ -823,13 +827,18 @@ def verify_win7_runtime_payload(app_dir: Path) -> None:
             "Windows 7 程序包不得通过旁加载伪造缺失的系统 API："
             f"{sorted(forbidden_runtime_names)}"
         )
-    python_runtime = internal / "python38.dll"
-    if not python_runtime.is_file():
-        raise RuntimeError("Windows 7 程序包必须包含 python38.dll。")
+    _require_files(
+        internal,
+        WIN7_REQUIRED_PYTHON_RUNTIME_FILES,
+        label="Win7 payload Python 3.8 runtime",
+    )
+    allowed_python_runtime = {
+        name.casefold() for name in WIN7_REQUIRED_PYTHON_RUNTIME_FILES
+    }
     unexpected_python = sorted(
         path.name
         for path in internal.glob("python3*.dll")
-        if path.name.casefold() != "python38.dll"
+        if path.name.casefold() not in allowed_python_runtime
     )
     if unexpected_python:
         raise RuntimeError(f"Windows 7 程序包混入其他 Python 运行时：{unexpected_python}")

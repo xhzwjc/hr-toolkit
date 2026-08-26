@@ -38,6 +38,7 @@ try {
         (Join-Path $payload "HRToolkit.exe"),
         (Join-Path $payload "HRToolkitUpdater.exe"),
         (Join-Path $internal "python38.dll"),
+        (Join-Path $internal "python3.dll"),
         (Join-Path $payload "ucrtbase.dll"),
         (Join-Path $payload "msvcp140.dll"),
         (Join-Path $payload "vcruntime140.dll"),

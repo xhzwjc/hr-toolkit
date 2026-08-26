@@ -553,6 +553,7 @@ class WindowsPackagingTests(unittest.TestCase):
             app_dir, _updater = self._fake_app(Path(tmp))
             internal = app_dir / "_internal"
             self._write_fake_pe(internal / "python38.dll", build_windows.PE_MACHINE_AMD64)
+            self._write_fake_pe(internal / "python3.dll", build_windows.PE_MACHINE_AMD64)
             for name in build_windows.WIN7_REQUIRED_UCRT_FILES:
                 self._write_fake_pe(app_dir / name, build_windows.PE_MACHINE_AMD64)
             for name in build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES:
@@ -577,8 +578,22 @@ class WindowsPackagingTests(unittest.TestCase):
                     target=build_windows.WINDOWS_TARGET_WIN7,
                 )
             forbidden.unlink()
+            self._write_fake_pe(internal / "python39.dll", build_windows.PE_MACHINE_AMD64)
+            with self.assertRaisesRegex(RuntimeError, "其他 Python 运行时"):
+                build_windows.verify_windows_payload(
+                    app_dir,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+            (internal / "python39.dll").unlink()
             (internal / "python38.dll").unlink()
             with self.assertRaisesRegex(RuntimeError, "python38.dll"):
+                build_windows.verify_windows_payload(
+                    app_dir,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+            self._write_fake_pe(internal / "python38.dll", build_windows.PE_MACHINE_AMD64)
+            (internal / "python3.dll").unlink()
+            with self.assertRaisesRegex(RuntimeError, "python3.dll"):
                 build_windows.verify_windows_payload(
                     app_dir,
                     target=build_windows.WINDOWS_TARGET_WIN7,
@@ -1142,6 +1157,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('Version -notlike "6.1.*"', script)
         self.assertIn("ServicePackMajorVersion", script)
         self.assertIn("python38.dll", script)
+        self.assertIn("python3.dll", script)
         self.assertIn("vcruntime140_1.dll", script)
         self.assertIn('(Join-Path $payload "ucrtbase.dll")', script)
         self.assertNotIn('(Join-Path $internal "ucrtbase.dll")', script)
