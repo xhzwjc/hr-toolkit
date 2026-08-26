@@ -260,7 +260,7 @@ python3 -m hr_toolkit
 python3 -m pip install -r requirements.txt
 ```
 
-正式 CI 与安装包统一使用已经验证的 Python 3.12 精确依赖集合；需要在本机复现生产环境时执行：
+现代版正式 CI 与安装包使用已经验证的 Python 3.12 精确依赖集合；Windows 7 SP1 x64 兼容包使用单独冻结的 Python 3.8 依赖集合，不会改变现代版依赖。需要在本机复现现代生产环境时执行：
 
 ```bash
 python3.12 -m pip install \
@@ -484,9 +484,9 @@ npm run release -- 0.3.5 --dry-run
 
 ### GitHub Actions 产物
 
-普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查，并在 Windows Python 3.12 上实际加载本地 OCR 模型完成一次推理。`.github/workflows/test-build.yml` 每周一北京时间 02:00 自动执行完整 Windows 测试、EXE/MSI/便携包构建及安装运行检查，也可手动选择 Windows、macOS 或全部平台；选择 macOS 时会在真实 Intel 与 Apple Silicon runner 上分别构建和验收。所有 Python 3.12 CI 和打包任务使用 `constraints/python312-production.txt`，避免上游依赖更新造成构建结果无预警漂移。
+普通 push 和 pull request 由 `.github/workflows/ci.yml` 运行测试、编译和静态发布检查：现代 Windows 使用 Python 3.12，Win7 兼容栈使用 Python 3.8，并分别实际加载 OCR 与压缩包运行时。`.github/workflows/test-build.yml` 每周一北京时间 02:00 同时构建现代 Windows 与 Win7 SP1 兼容包，也可手动选择单个平台；选择 macOS 时会在真实 Intel 与 Apple Silicon runner 上分别构建和验收。现代构建使用 `constraints/python312-production.txt`，Win7 构建使用 `constraints/python38-win7.txt`，两套依赖互不替换。
 
-只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再分别构建 Windows 与 macOS；两个平台全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag，以及 `SHA256SUMS.txt`、`latest.json` 和 Windows `setup.exe` 同步到 Gitee。MSI 与两个 DMG 按镜像精简策略仅保留在 GitHub；四个正式二进制资产发布前都必须严格小于 100,000,000 字节。
+只有 `v*` Tag 会触发 `.github/workflows/release.yml`：先校验 Tag 与 `hr_toolkit.__version__` 完全一致，再独立构建现代 Windows、Win7 SP1 x64 和 macOS；全部成功后才创建并发布 GitHub Release。GitHub Release 发布成功后，独立的 `mirror-gitee` job 才会把同一份源码、annotated Tag，以及 `SHA256SUMS.txt`、`latest.json` 和两种 Windows `setup.exe` 同步到 Gitee。MSI 与两个 DMG 按镜像精简策略仅保留在 GitHub；所有正式二进制资产发布前都必须严格小于 100,000,000 字节。
 
 每个版本的直接下载资产为（以下用 `<version>` 表示版本号）：
 
@@ -495,6 +495,8 @@ HRToolkit_<version>_arm64.dmg
 HRToolkit_<version>_x64.dmg
 HRToolkit_<version>_x64-setup.exe
 HRToolkit_<version>_x64.msi
+HRToolkit_<version>_win7_x64-setup.exe
+HRToolkit_<version>_win7_x64.msi
 latest.json
 SHA256SUMS.txt
 ```
@@ -504,12 +506,20 @@ SHA256SUMS.txt
 ### Windows 安装与自动更新架构
 
 Windows 构建输出：
-- `HRToolkit_<version>_x64-setup.exe`：Inno Setup 平衡固实压缩安装包，使用当前用户权限目录 `%LOCALAPPDATA%\Programs\HRToolkit`，普通用户双击安装无需管理员提权；
+- `HRToolkit_<version>_x64-setup.exe`：原现代版安装包，继续使用 Python 3.12，支持 Windows 8.1 x64 及更高版本，文件名和更新入口保持不变；
 - `HRToolkit_<version>_x64.msi`：WiX v4 生成的 per-user MSI 安装器，供企业 IT 批量分发；
+- `HRToolkit_<version>_win7_x64-setup.exe`：供 Windows 7 SP1 x64 使用的 Python 3.8 兼容安装包（同时覆盖不能运行 Python 3.12 的 Windows 8/Server 2012），OCR 固定使用 Win7 兼容候选 ONNX Runtime 1.11.1，并内含固定为 Windows SDK 10.0.14393.795 的完整 x64 app-local UCRT、Win7 可用的 Visual C++ 2015-2019 运行库和固定版本的官方 7-Zip；UCRT/VC DLL 会按微软的旧系统部署要求放在主 EXE 同目录；
+- `HRToolkit_<version>_win7_x64.msi`：Win7 兼容版的企业分发安装器；
 - `HRToolkitUpdater.exe`：内置独立更新器。
 
+两种 EXE 都安装到当前用户目录 `%LOCALAPPDATA%\Programs\HRToolkit`，普通用户双击安装无需管理员提权。同一台电脑只安装其中一种。Win7 用户首次切换时必须手动安装一次带 `win7_x64` 的安装包；之后程序会固定使用 `windows-x64-win7` 更新通道。不要再从网上单独下载或复制 `api-ms-win-core-path-l1-1-0.dll` 到程序目录，兼容包已经携带经过校验的运行时文件。
+
+Win7 与 Python 3.8 均已停止官方维护，因此兼容分支只加载程序随包附带的可信 OCR 模型，不提供用户自定义 ONNX 模型入口；任何原生依赖升级都必须重新通过 PE 扫描和干净 Win7 虚拟机验收，现代分支不跟随该冻结版本降级。
+
+发布前除自动执行现代环境全量测试、Python 3.8 核心兼容测试、两种 Windows 安装测试和所有 PE 导入表检查外，还必须在干净的 Windows 7 SP1 x64 虚拟机中运行 `scripts/smoke_win7_installer.ps1 -InstallerPath <安装包> -ExpectedVersion <版本号>`。该脚本会完成静默安装、主程序与更新器真实启动、OCR/压缩包/项目运行检查、运行时白名单校验和卸载；未取得这一步的通过结果，不能把“静态兼容”表述为“已在 Win7 实机验证”。
+
 **自动更新机制**：
-- Windows 客户端在检测到新版本后，直接在后台下载 `setup.exe` 安装包；
+- Windows 客户端在检测到新版本后，按当前系统选择现代版或 Win7 专用 `setup.exe`；Win7 通道不会回退到现代包；
 - 下载完成后唤起 `HRToolkitUpdater.exe` 并退出主程序；
 - 更新器在后台通过静默指令 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` 秒级完成程序目录覆盖并自动重新打开新版本；
 - 保留对旧版 ZIP 解压更新的向后兼容。
@@ -525,8 +535,8 @@ Windows 构建输出：
 
 - Gitee 最新 Release 接口会返回公开附件列表，客户端从中找到 `latest.json`。只要 Gitee 能返回有效配置，就不会访问 GitHub；
 - Gitee 连接失败、超时或配置异常时，自动回退尝试 GitHub；
-- `latest.json` 中 Windows 平台的 `file_url` 优先指向 Gitee 国内 CDN，`fallback_urls` 配置 GitHub 镜像，下载失败时自动重试备用源；
-- macOS 的 DMG 清单使用 GitHub 下载地址；Gitee Release 按镜像精简策略严格只保留校验文件、更新清单和 Windows EXE；
+- `latest.json` 同时提供 `windows`/`windows-x64-modern` 与 `windows-x64-win7`；两种 Windows EXE 均优先使用 Gitee 国内 CDN，下载失败时自动重试 GitHub；
+- macOS 的 DMG 清单使用 GitHub 下载地址；Gitee Release 按镜像精简策略只保留校验文件、更新清单和两种 Windows EXE；
 - 下载弹窗实时显示进度与速率，支持点击右上角 `×` 或按 `Esc` 随时安全取消，并自动清理未完成的临时文件。
 
 ---

@@ -22,8 +22,15 @@ from build_windows import (
     REPO_ROOT,
     UPDATER_NAME,
     WINDOWS_ICON,
+    WINDOWS_TARGET_MODERN,
+    WINDOWS_TARGET_WIN7,
+    WINDOWS_TARGETS,
     run_runtime_smoke,
     validate_build_version,
+    validate_windows_target,
+    windows_asset_suffix,
+    windows_msi_asset_name,
+    windows_setup_asset_name,
 )
 from generate_release_metadata import require_release_assets_under_limit
 
@@ -51,6 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inno-compiler", help=f"ISCC.exe；也可设置 {INNO_ENV}")
     parser.add_argument("--wix-executable", help=f"WiX v4+ wix.exe；也可设置 {WIX_ENV}")
     parser.add_argument(
+        "--target",
+        choices=WINDOWS_TARGETS,
+        default=WINDOWS_TARGET_MODERN,
+        help="modern 保持现有安装器；win7 生成 Windows 7 SP1 x64 安装器",
+    )
+    parser.add_argument(
         "--skip-install-smoke",
         action="store_true",
         help="仅供诊断；跳过 EXE/MSI 静默安装、运行和卸载验证",
@@ -72,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         wix_executable=resolve_wix_executable(args.wix_executable),
         install_smoke=not args.skip_install_smoke,
         inno_sign_tool_name=args.inno_sign_tool_name,
+        target=args.target,
     )
     print(f"Windows EXE 安装器：{exe_path}")
     print(f"Windows MSI 安装器：{msi_path}")
@@ -83,12 +97,20 @@ def ensure_windows_runtime() -> None:
         raise RuntimeError("Windows 安装器必须由 Windows runner 构建和验证。")
 
 
-def installer_asset_names(version: str) -> tuple[str, str]:
+def installer_asset_names(
+    version: str,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> tuple[str, str]:
     validate_build_version(version)
     return (
-        f"HRToolkit_{version}_x64-setup.exe",
-        f"HRToolkit_{version}_x64.msi",
+        windows_setup_asset_name(version, target),
+        windows_msi_asset_name(version, target),
     )
+
+
+def _inno_min_windows_version(target: str) -> str:
+    target = validate_windows_target(target)
+    return "6.1sp1" if target == WINDOWS_TARGET_WIN7 else "6.3"
 
 
 def build_windows_installers(
@@ -101,11 +123,13 @@ def build_windows_installers(
     wix_executable: str,
     install_smoke: bool = True,
     inno_sign_tool_name: str | None = None,
+    target: str = WINDOWS_TARGET_MODERN,
 ) -> tuple[Path, Path]:
     validate_build_version(version)
+    target = validate_windows_target(target)
     validate_installer_definitions()
     output_dir.mkdir(parents=True, exist_ok=True)
-    exe_name, msi_name = installer_asset_names(version)
+    exe_name, msi_name = installer_asset_names(version, target)
     exe_path = output_dir / exe_name
     msi_path = output_dir / msi_name
     exe_path.unlink(missing_ok=True)
@@ -114,9 +138,14 @@ def build_windows_installers(
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_windows_installers_") as tmp:
         temp_dir = Path(tmp)
         payload_dir = temp_dir / "payload"
-        stage_windows_payload(app_dir=app_dir, updater=updater, target_dir=payload_dir)
+        stage_windows_payload(
+            app_dir=app_dir,
+            updater=updater,
+            target_dir=payload_dir,
+            target=target,
+        )
         wix_fragment = temp_dir / "HRToolkitPayload.wxs"
-        generate_wix_payload_fragment(payload_dir, wix_fragment)
+        generate_wix_payload_fragment(payload_dir, wix_fragment, target=target)
 
         _run(
             inno_compile_command(
@@ -125,6 +154,7 @@ def build_windows_installers(
                 payload_dir=payload_dir,
                 output_dir=output_dir,
                 sign_tool_name=inno_sign_tool_name,
+                target=target,
             )
         )
         _run(
@@ -133,13 +163,14 @@ def build_windows_installers(
                 version=version,
                 payload_fragment=wix_fragment,
                 output_path=msi_path,
+                target=target,
             )
         )
 
     verify_installer_outputs(exe_path, msi_path)
     require_release_assets_under_limit((exe_path, msi_path))
     if install_smoke:
-        smoke_test_installers(exe_path, msi_path)
+        smoke_test_installers(exe_path, msi_path, target=target)
     return exe_path, msi_path
 
 
@@ -150,8 +181,10 @@ def inno_compile_command(
     payload_dir: Path,
     output_dir: Path,
     sign_tool_name: str | None = None,
+    target: str = WINDOWS_TARGET_MODERN,
 ) -> list[str]:
     validate_build_version(version)
+    target = validate_windows_target(target)
     command = [
         compiler,
         "/Qp",
@@ -159,7 +192,12 @@ def inno_compile_command(
         f"/DSourceDir={payload_dir}",
         f"/DOutputDir={output_dir}",
         f"/DSetupIconFile={WINDOWS_ICON}",
+        f"/DInstallerSuffix={windows_asset_suffix(target)}",
+        f"/DMinWindowsVersion={_inno_min_windows_version(target)}",
     ]
+    if target == WINDOWS_TARGET_WIN7:
+        command.append("/DWin7Compatibility=1")
+        command.append("/DCleanExistingPayload=1")
     if sign_tool_name:
         command.append(f"/DSignToolName={sign_tool_name}")
     command.append(str(INNO_SCRIPT))
@@ -172,8 +210,10 @@ def wix_build_command(
     version: str,
     payload_fragment: Path,
     output_path: Path,
+    target: str = WINDOWS_TARGET_MODERN,
 ) -> list[str]:
     validate_build_version(version)
+    target = validate_windows_target(target)
     return [
         wix_executable,
         "build",
@@ -183,6 +223,8 @@ def wix_build_command(
         "x64",
         "-d",
         f"AppVersion={version}",
+        "-d",
+        f"WindowsTarget={target}",
         "-pdbtype",
         "none",
         "-o",
@@ -190,9 +232,14 @@ def wix_build_command(
     ]
 
 
-def generate_wix_payload_fragment(payload_dir: Path, output_path: Path) -> Path:
+def generate_wix_payload_fragment(
+    payload_dir: Path,
+    output_path: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> Path:
     payload_dir = payload_dir.resolve()
-    verify_staged_payload(payload_dir)
+    verify_staged_payload(payload_dir, target=target)
     ET.register_namespace("", WIX_NAMESPACE)
     wix = ET.Element(_wix("Wix"))
     directory_fragment = ET.SubElement(wix, _wix("Fragment"))
@@ -228,10 +275,35 @@ def generate_wix_payload_fragment(payload_dir: Path, output_path: Path) -> Path:
         ET.SubElement(group, _wix("ComponentRef"), {"Id": component_id})
 
     tree = ET.ElementTree(wix)
-    ET.indent(tree, space="  ")
+    _indent_xml(tree)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
     return output_path
+
+
+def _indent_xml(tree: ET.ElementTree) -> None:
+    indent = getattr(ET, "indent", None)
+    if indent is not None:
+        indent(tree, space="  ")
+        return
+
+    # xml.etree.ElementTree.indent was added in Python 3.9. Keep the exact
+    # modern path above and provide only the Win7/Python 3.8 build fallback.
+    def apply(element: ET.Element, level: int = 0) -> None:
+        padding = "\n" + ("  " * level)
+        child_padding = "\n" + ("  " * (level + 1))
+        children = list(element)
+        if children:
+            if not element.text or not element.text.strip():
+                element.text = child_padding
+            for child in children:
+                apply(child, level + 1)
+            if not children[-1].tail or not children[-1].tail.strip():
+                children[-1].tail = padding
+        if level and (not element.tail or not element.tail.strip()):
+            element.tail = padding
+
+    apply(tree.getroot())
 
 
 def validate_installer_definitions() -> None:
@@ -249,9 +321,15 @@ def validate_installer_definitions() -> None:
         "DefaultDirName={localappdata}\\Programs\\HRToolkit",
         "PrivilegesRequired=lowest",
         "ArchitecturesAllowed=x64compatible",
+        "MinVersion={#MinWindowsVersion}",
+        "#ifdef Win7Compatibility",
+        "OnlyBelowVersion=6.3",
         'DestDir: "{app}\\app"',
         'UninstallDisplayIcon={app}\\app\\{#MyAppExeName}',
         'MessagesFile: "compiler:Default.isl,ChineseSimplified.isl"',
+        "#ifdef CleanExistingPayload",
+        "Check: ExistingPayloadIsWin7",
+        "function ExistingPayloadIsWin7: Boolean;",
     )
     missing_iss = [value for value in required_iss if value not in iss]
     if missing_iss:
@@ -264,6 +342,9 @@ def validate_installer_definitions() -> None:
         'Id="APPDIR" Name="app"',
         'Target="[APPDIR]HRToolkit.exe"',
         'Id="PayloadComponents"',
+        "$(var.WindowsTarget)",
+        "VersionNT64",
+        'AllowSameVersionUpgrades="yes"',
     )
     missing_wix = [value for value in required_wix if value not in wix]
     if missing_wix:
@@ -277,12 +358,18 @@ def verify_installer_outputs(exe_path: Path, msi_path: Path) -> None:
         raise RuntimeError(f"MSI 安装器无效：{msi_path}")
 
 
-def smoke_test_installers(exe_path: Path, msi_path: Path) -> None:
+def smoke_test_installers(
+    exe_path: Path,
+    msi_path: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
+    target = validate_windows_target(target)
     ensure_windows_runtime()
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_installer_smoke_") as tmp:
         root = Path(tmp)
-        _smoke_test_inno(exe_path, root / "inno")
-        _smoke_test_msi(msi_path, root / "msi")
+        _smoke_test_inno(exe_path, root / "inno", target=target)
+        _smoke_test_msi(msi_path, root / "msi", target=target)
 
 
 def resolve_inno_compiler(explicit: str | None = None) -> str:
@@ -325,7 +412,12 @@ def _ensure_wix_directory(
     return node
 
 
-def _smoke_test_inno(installer: Path, install_root: Path) -> None:
+def _smoke_test_inno(
+    installer: Path,
+    install_root: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
     install_root.parent.mkdir(parents=True, exist_ok=True)
     install_command = [
         str(installer),
@@ -338,13 +430,17 @@ def _smoke_test_inno(installer: Path, install_root: Path) -> None:
     _run_windows_installer(install_command)
     try:
         payload = install_root / "app"
-        verify_staged_payload(payload)
+        verify_staged_payload(payload, target=target)
         uninstallers = sorted(install_root.glob("unins*.exe"))
         if not uninstallers:
             raise RuntimeError("Inno 安装器没有把卸载器保留在 payload 外层。")
         if any(path.parent == payload for path in uninstallers):
             raise RuntimeError("Inno 卸载器错误地位于会被自更新替换的 app 目录。")
-        run_runtime_smoke(payload / f"{APP_NAME}.exe", payload / f"{UPDATER_NAME}.exe")
+        run_runtime_smoke(
+            payload / f"{APP_NAME}.exe",
+            payload / f"{UPDATER_NAME}.exe",
+            target=target,
+        )
     finally:
         uninstallers = sorted(install_root.glob("unins*.exe"))
         if uninstallers:
@@ -353,7 +449,12 @@ def _smoke_test_inno(installer: Path, install_root: Path) -> None:
             )
 
 
-def _smoke_test_msi(installer: Path, install_root: Path) -> None:
+def _smoke_test_msi(
+    installer: Path,
+    install_root: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
     install_root.parent.mkdir(parents=True, exist_ok=True)
     install_command = [
         "msiexec.exe",
@@ -366,8 +467,12 @@ def _smoke_test_msi(installer: Path, install_root: Path) -> None:
     _run_windows_installer(install_command)
     try:
         payload = install_root / "app"
-        verify_staged_payload(payload)
-        run_runtime_smoke(payload / f"{APP_NAME}.exe", payload / f"{UPDATER_NAME}.exe")
+        verify_staged_payload(payload, target=target)
+        run_runtime_smoke(
+            payload / f"{APP_NAME}.exe",
+            payload / f"{UPDATER_NAME}.exe",
+            target=target,
+        )
     finally:
         _run_windows_installer(
             ["msiexec.exe", "/x", str(installer), "/qn", "/norestart"],

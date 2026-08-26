@@ -322,15 +322,19 @@ def mirror_asset_names(
 ) -> tuple[str, ...]:
     if max_asset_bytes < 1:
         raise GiteeReleaseError("Gitee 单附件上限必须是正整数。")
-    windows_installer = f"HRToolkit_{version}_x64-setup.exe"
-    try:
-        require_release_asset_under_limit(
-            assets_dir / windows_installer,
-            max_bytes=max_asset_bytes,
-        )
-    except ReleaseMetadataError as exc:
-        raise GiteeReleaseError(f"Gitee 必需的 Windows EXE 不可发布：{exc}") from None
-    return windows_installer, "SHA256SUMS.txt", "latest.json"
+    windows_installers = (
+        f"HRToolkit_{version}_x64-setup.exe",
+        f"HRToolkit_{version}_win7_x64-setup.exe",
+    )
+    for windows_installer in windows_installers:
+        try:
+            require_release_asset_under_limit(
+                assets_dir / windows_installer,
+                max_bytes=max_asset_bytes,
+            )
+        except ReleaseMetadataError as exc:
+            raise GiteeReleaseError(f"Gitee 必需的 Windows EXE 不可发布：{exc}") from None
+    return windows_installers + ("SHA256SUMS.txt", "latest.json")
 
 
 def validate_mirror_assets(
@@ -375,7 +379,10 @@ def validate_mirror_assets(
     gitee_prefix = f"https://gitee.com/{repository}/releases/download/{tag}/"
     github_prefix = f"https://github.com/{github_repository}/releases/download/{tag}/"
     binary_names = set(all_names) - set(METADATA_NAMES)
-    gitee_windows_installer = f"HRToolkit_{version}_x64-setup.exe"
+    gitee_windows_installers = {
+        f"HRToolkit_{version}_x64-setup.exe",
+        f"HRToolkit_{version}_win7_x64-setup.exe",
+    }
     for key, payload in platforms.items():
         if not isinstance(payload, dict):
             raise GiteeReleaseError(f"latest.json 平台 {key} 格式不正确。")
@@ -385,7 +392,7 @@ def validate_mirror_assets(
         if filename not in binary_names:
             raise GiteeReleaseError(f"latest.json 平台 {key} 指向非白名单资产：{filename}")
         asset_is_mirrored = (
-            filename == gitee_windows_installer
+            filename in gitee_windows_installers
             and (assets_dir / filename).stat().st_size < max_asset_bytes
         )
         if asset_is_mirrored:

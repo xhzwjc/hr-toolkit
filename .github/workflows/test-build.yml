@@ -13,6 +13,8 @@ on:
         type: choice
         options:
           - "windows"
+          - "windows-win7"
+          - "windows-all"
           - "macos"
           - "all"
       run_tests:
@@ -54,7 +56,7 @@ jobs:
           VERSION=$(python -c 'from hr_toolkit import __version__; print(__version__)')
           SHORT_SHA=$(git rev-parse --short HEAD)
           if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            TARGET_PLATFORM="windows"
+            TARGET_PLATFORM="windows-all"
             RUN_TESTS="true"
           else
             TARGET_PLATFORM="${{ inputs.platform }}"
@@ -70,7 +72,7 @@ jobs:
   build-windows:
     name: Build Windows (EXE & Portable ZIP)
     needs: prepare
-    if: needs.prepare.outputs.target_platform == 'windows' || needs.prepare.outputs.target_platform == 'all'
+    if: needs.prepare.outputs.target_platform == 'windows' || needs.prepare.outputs.target_platform == 'windows-all' || needs.prepare.outputs.target_platform == 'all'
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -137,6 +139,99 @@ jobs:
             artifacts/windows/HRToolkit_${{ env.VERSION }}_x64-setup.exe
             artifacts/windows/HRToolkit_${{ env.VERSION }}_x64.msi
             artifacts/windows/HRToolkit_${{ env.VERSION }}_test_${{ env.SHORT_SHA }}_portable.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  build-windows-win7:
+    name: Build Windows 7 SP1 compatibility package
+    needs: prepare
+    if: needs.prepare.outputs.target_platform == 'windows-win7' || needs.prepare.outputs.target_platform == 'windows-all' || needs.prepare.outputs.target_platform == 'all'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      PYTHONUTF8: "1"
+      HR_TOOLKIT_7ZIP_EXE: ${{ github.workspace }}\build\win7-runtime\7zip\7z.exe
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python 3.8 x64
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.8.10"
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-win7.txt
+            requirements-build.txt
+            constraints/python38-win7.txt
+
+      - name: Install frozen Win7 build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade "pip==25.0.1"
+          python -m pip install --disable-pip-version-check -r requirements-win7.txt -r requirements-build.txt -c constraints/python38-win7.txt
+          python -m pip check
+
+      - name: Prepare pinned Win7 runtimes
+        run: python scripts/prepare_win7_runtime.py --output-dir build/win7-runtime
+
+      - name: Exercise local OCR and archive runtimes
+        run: >-
+          python -c
+          "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test, smoke_test; ocr_runtime_smoke_test(); smoke_test()"
+
+      - name: Install Inno Setup and WiX
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.7.1 --no-progress -y
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run Python 3.8-compatible core tests (Optional)
+        if: needs.prepare.outputs.run_tests == 'true'
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python -m unittest -v
+          tests.test_archive_import
+          tests.test_data_statistics
+          tests.test_project_store
+          tests.test_runtime_checks
+          tests.test_salary_merge
+          tests.test_salary_split
+          tests.test_social_security
+          tests.test_tool_registry
+          tests.test_paths
+          tests.test_release_metadata
+
+      - name: Build Win7 application and installers
+        run: >-
+          python scripts/release_windows.py
+          --version "${{ env.VERSION }}"
+          --target win7
+          --seven-zip-dir build/win7-runtime/7zip
+          --ucrt-dir build/win7-runtime/ucrt
+          --vc-runtime-dir build/win7-runtime/vc-runtime
+          --build-dir dist/windows-win7
+          --work-dir build/windows-win7
+          --output-dir artifacts/windows-win7
+
+      - name: Create Win7 portable zip
+        shell: pwsh
+        run: |
+          $zipPath = "artifacts/windows-win7/HRToolkit_${env:VERSION}_win7_test_${env:SHORT_SHA}_portable.zip"
+          Compress-Archive -Path dist/windows-win7/HRToolkit -DestinationPath $zipPath -Force
+
+      - name: Upload Win7 test artifacts
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: HRToolkit-Windows7-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
+          path: |
+            artifacts/windows-win7/HRToolkit_${{ env.VERSION }}_win7_x64-setup.exe
+            artifacts/windows-win7/HRToolkit_${{ env.VERSION }}_win7_x64.msi
+            artifacts/windows-win7/HRToolkit_${{ env.VERSION }}_win7_test_${{ env.SHORT_SHA }}_portable.zip
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata as importlib_metadata
 import importlib.util
 import os
 import platform
@@ -25,7 +26,11 @@ UPDATER_NAME = "HRToolkitUpdater"
 APP_ENTRYPOINT = REPO_ROOT / "hr_toolkit_app.py"
 UPDATER_ENTRYPOINT = REPO_ROOT / "hr_toolkit_updater.py"
 WINDOWS_MANIFEST = REPO_ROOT / "packaging" / "windows" / "HRToolkit.manifest"
+WINDOWS_WIN7_MANIFEST = REPO_ROOT / "packaging" / "windows" / "HRToolkit.win7.manifest"
 WINDOWS_ICON = REPO_ROOT / "packaging" / "windows" / "HRToolkit.ico"
+WIN7_THIRD_PARTY_NOTICE = (
+    REPO_ROOT / "packaging" / "windows" / "win7" / "THIRD-PARTY-NOTICES.txt"
+)
 README_FILE = REPO_ROOT / "README.md"
 TEMPLATES_DIR = REPO_ROOT / "hr_toolkit" / "templates"
 
@@ -41,6 +46,28 @@ WINDOWS_BUILD_MODULES = {
     "win32com.client": "pywin32",
     "win32timezone": "pywin32",
 }
+WINDOWS_WIN7_BUILD_MODULES = {
+    "PyInstaller": "pyinstaller",
+    "certifi": "certifi",
+    "openpyxl": "openpyxl",
+    "pefile": "pefile",
+    "py7zr": "py7zr",
+    "xlrd": "xlrd",
+    "pythoncom": "pywin32",
+    "pywintypes": "pywin32",
+    "win32com.client": "pywin32",
+    "win32timezone": "pywin32",
+}
+WIN7_PINNED_DISTRIBUTIONS = {
+    "numpy": "1.24.4",
+    "onnxruntime": "1.11.1",
+    "opencv-python": "4.8.1.78",
+    "Pillow": "10.4.0",
+    "PyInstaller": "6.21.0",
+    "py7zr": "0.22.0",
+    "pywin32": "306",
+    "rapidocr-onnxruntime": "1.4.4",
+}
 HIDDEN_IMPORTS = (
     "pythoncom",
     "pywintypes",
@@ -51,10 +78,22 @@ HIDDEN_IMPORTS = (
     "unrar.cffi.unrarlib",
     "xlrd",
 )
+WIN7_HIDDEN_IMPORTS = (
+    "pythoncom",
+    "pywintypes",
+    "win32com.client",
+    "win32timezone",
+    "py7zr",
+    "xlrd",
+)
 COLLECT_ALL_MODULES = (
     "rapidocr_onnxruntime",
     "py7zr",
     "unrar",
+)
+WIN7_COLLECT_ALL_MODULES = (
+    "rapidocr_onnxruntime",
+    "py7zr",
 )
 EXCLUDED_MODULES = (
     "pytest",
@@ -81,6 +120,90 @@ RELEASE_TEMPLATE_NAMES = (
     "social_security_summary_template.xlsx",
 )
 PE_MACHINE_AMD64 = 0x8664
+WINDOWS_TARGET_MODERN = "modern"
+WINDOWS_TARGET_WIN7 = "win7"
+WINDOWS_TARGETS = (WINDOWS_TARGET_MODERN, WINDOWS_TARGET_WIN7)
+WIN7_REQUIRED_UCRT_FILES = (
+    "api-ms-win-core-console-l1-1-0.dll",
+    "api-ms-win-core-datetime-l1-1-0.dll",
+    "api-ms-win-core-debug-l1-1-0.dll",
+    "api-ms-win-core-errorhandling-l1-1-0.dll",
+    "api-ms-win-core-file-l1-1-0.dll",
+    "api-ms-win-core-file-l1-2-0.dll",
+    "api-ms-win-core-file-l2-1-0.dll",
+    "api-ms-win-core-handle-l1-1-0.dll",
+    "api-ms-win-core-heap-l1-1-0.dll",
+    "api-ms-win-core-interlocked-l1-1-0.dll",
+    "api-ms-win-core-libraryloader-l1-1-0.dll",
+    "api-ms-win-core-localization-l1-2-0.dll",
+    "api-ms-win-core-memory-l1-1-0.dll",
+    "api-ms-win-core-namedpipe-l1-1-0.dll",
+    "api-ms-win-core-processenvironment-l1-1-0.dll",
+    "api-ms-win-core-processthreads-l1-1-0.dll",
+    "api-ms-win-core-processthreads-l1-1-1.dll",
+    "api-ms-win-core-profile-l1-1-0.dll",
+    "api-ms-win-core-rtlsupport-l1-1-0.dll",
+    "api-ms-win-core-string-l1-1-0.dll",
+    "api-ms-win-core-synch-l1-1-0.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "api-ms-win-core-sysinfo-l1-1-0.dll",
+    "api-ms-win-core-timezone-l1-1-0.dll",
+    "api-ms-win-core-util-l1-1-0.dll",
+    "api-ms-win-crt-conio-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-environment-l1-1-0.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-multibyte-l1-1-0.dll",
+    "api-ms-win-crt-private-l1-1-0.dll",
+    "api-ms-win-crt-process-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "api-ms-win-crt-utility-l1-1-0.dll",
+    "ucrtbase.dll",
+)
+WIN7_REQUIRED_UCRT_FILE_KEYS = frozenset(
+    name.casefold() for name in WIN7_REQUIRED_UCRT_FILES
+)
+WIN7_REQUIRED_7ZIP_FILES = ("7z.exe", "7z.dll", "License.txt")
+WIN7_7ZIP_OVERRIDE_ENV = "HR_TOOLKIT_7ZIP_EXE"
+WIN7_REQUIRED_VC_RUNTIME_FILES = (
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+)
+WIN7_FORBIDDEN_DLLS = frozenset(
+    {
+        "api-ms-win-core-path-l1-1-0.dll",
+        "api-ms-win-core-path-l1-1-1.dll",
+    }
+)
+WIN7_FORBIDDEN_IMPORTS = frozenset(
+    {
+        "copyfile2",
+        "createfile2",
+        "getcurrentpackagefullname",
+        "getcurrentpackageid",
+        "getfileinformationbyname",
+        "getoverlappedresultex",
+        "getpackagefullname",
+        "getpackagepathbyfullname",
+        "getsystemtimeadjustmentprecise",
+        "getsystemtimepreciseasfiletime",
+        "getthreaddescription",
+        "iswow64process2",
+        "setprocessmitigationpolicy",
+        "setsystemtimeadjustmentprecise",
+        "setthreaddescription",
+        "waitonaddress",
+        "wakebyaddressall",
+        "wakebyaddresssingle",
+    }
+)
 FORBIDDEN_PAYLOAD_PARTS = {
     "__pycache__",
     ".pytest_cache",
@@ -140,22 +263,60 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="仅供诊断；跳过打包后可执行文件的无界面启动检查",
     )
+    parser.add_argument(
+        "--target",
+        choices=WINDOWS_TARGETS,
+        default=WINDOWS_TARGET_MODERN,
+        help="modern 保持现有构建；win7 生成 Windows 7 SP1 x64 兼容构建",
+    )
+    parser.add_argument(
+        "--seven-zip-dir",
+        type=Path,
+        help="win7 构建所需的官方 7-Zip x64 目录（7z.exe/7z.dll/License.txt）",
+    )
+    parser.add_argument(
+        "--ucrt-dir",
+        type=Path,
+        help="win7 构建所需的 Windows SDK app-local UCRT x64 目录",
+    )
+    parser.add_argument(
+        "--vc-runtime-dir",
+        type=Path,
+        help="win7 构建所需的 Visual C++ 2015-2019 app-local x64 目录",
+    )
     args = parser.parse_args(argv)
 
     version = validate_build_version(args.version)
-    ensure_windows_x64_build_environment()
-    ensure_build_dependencies()
+    target = validate_windows_target(args.target)
+    seven_zip_dir, ucrt_dir, vc_runtime_dir = validate_win7_runtime_sources(
+        target=target,
+        seven_zip_dir=args.seven_zip_dir,
+        ucrt_dir=args.ucrt_dir,
+        vc_runtime_dir=args.vc_runtime_dir,
+    )
+    ensure_windows_x64_build_environment(target)
+    ensure_build_dependencies(target)
 
     app_dir, updater = build_windows_binaries(
         version=version,
         output_dir=args.output_dir.resolve(),
         work_dir=args.work_dir.resolve(),
+        target=target,
+        seven_zip_dir=seven_zip_dir,
+        ucrt_dir=ucrt_dir,
+        vc_runtime_dir=vc_runtime_dir,
     )
-    verify_windows_payload(app_dir)
+    verify_windows_payload(app_dir, target=target)
     verify_pe_x64(app_dir / f"{APP_NAME}.exe")
     verify_pe_x64(updater)
+    if target == WINDOWS_TARGET_WIN7:
+        verify_win7_pe_compatibility((*_payload_pe_files(app_dir), updater))
     if not args.skip_runtime_smoke:
-        run_runtime_smoke(app_dir / f"{APP_NAME}.exe", updater)
+        run_runtime_smoke(
+            app_dir / f"{APP_NAME}.exe",
+            updater,
+            target=target,
+        )
 
     print(f"Windows 程序目录：{app_dir}")
     print(f"Windows 更新程序：{updater}")
@@ -182,30 +343,133 @@ def validate_stable_semver(version: str) -> tuple[int, int, int]:
     return int(parts[0]), int(parts[1]), int(parts[2])
 
 
-def ensure_windows_x64_build_environment() -> None:
+def validate_windows_target(target: str) -> str:
+    if target not in WINDOWS_TARGETS:
+        raise ValueError(f"未知 Windows 构建目标：{target}")
+    return target
+
+
+def windows_asset_suffix(target: str = WINDOWS_TARGET_MODERN) -> str:
+    target = validate_windows_target(target)
+    return "win7_x64" if target == WINDOWS_TARGET_WIN7 else "x64"
+
+
+def windows_setup_asset_name(
+    version: str,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> str:
+    validate_stable_semver(version)
+    return f"HRToolkit_{version}_{windows_asset_suffix(target)}-setup.exe"
+
+
+def windows_msi_asset_name(
+    version: str,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> str:
+    validate_stable_semver(version)
+    return f"HRToolkit_{version}_{windows_asset_suffix(target)}.msi"
+
+
+def validate_win7_runtime_sources(
+    *,
+    target: str,
+    seven_zip_dir: Path | None,
+    ucrt_dir: Path | None,
+    vc_runtime_dir: Path | None = None,
+) -> tuple[Path | None, Path | None, Path | None]:
+    target = validate_windows_target(target)
+    if target != WINDOWS_TARGET_WIN7:
+        return None, None, None
+    if seven_zip_dir is None or ucrt_dir is None or vc_runtime_dir is None:
+        raise ValueError(
+            "Windows 7 构建必须提供 --seven-zip-dir、--ucrt-dir 和 --vc-runtime-dir。"
+        )
+
+    resolved_7zip = seven_zip_dir.resolve()
+    resolved_ucrt = ucrt_dir.resolve()
+    resolved_vc_runtime = vc_runtime_dir.resolve()
+    _require_files(resolved_7zip, WIN7_REQUIRED_7ZIP_FILES, label="7-Zip")
+    _require_files(resolved_ucrt, WIN7_REQUIRED_UCRT_FILES, label="app-local UCRT")
+    _require_files(
+        resolved_vc_runtime,
+        WIN7_REQUIRED_VC_RUNTIME_FILES,
+        label="Visual C++ app-local runtime",
+    )
+    if not WIN7_THIRD_PARTY_NOTICE.is_file():
+        raise RuntimeError(f"缺少 Win7 第三方许可说明：{WIN7_THIRD_PARTY_NOTICE}")
+    if not WINDOWS_WIN7_MANIFEST.is_file():
+        raise RuntimeError(f"缺少 Win7 应用清单：{WINDOWS_WIN7_MANIFEST}")
+    return resolved_7zip, resolved_ucrt, resolved_vc_runtime
+
+
+def _require_files(directory: Path, names: tuple[str, ...], *, label: str) -> None:
+    if not directory.is_dir():
+        raise RuntimeError(f"{label} 目录不存在：{directory}")
+    missing = [name for name in names if not (directory / name).is_file()]
+    if missing:
+        raise RuntimeError(f"{label} 目录缺少文件：{missing}")
+
+
+def ensure_windows_x64_build_environment(target: str = WINDOWS_TARGET_MODERN) -> None:
+    target = validate_windows_target(target)
     if not sys.platform.startswith("win"):
         raise RuntimeError("Windows 产物必须由 Windows runner 构建。")
-    if sys.version_info < (3, 9):
+    if target == WINDOWS_TARGET_WIN7 and sys.version_info[:2] != (3, 8):
+        raise RuntimeError("Windows 7 兼容构建必须使用 Python 3.8。")
+    if target == WINDOWS_TARGET_MODERN and sys.version_info < (3, 9):
         raise RuntimeError("构建 Python 必须为 3.9 或更高版本。")
     machine = platform.machine().lower()
     if struct.calcsize("P") != 8 or machine not in {"amd64", "x86_64"}:
         raise RuntimeError(f"必须使用 Windows x64 Python，当前架构：{platform.machine()}")
 
 
-def ensure_build_dependencies() -> None:
-    missing = [module for module in WINDOWS_BUILD_MODULES if not _module_exists(module)]
-    if not missing:
-        return
-    packages = sorted({WINDOWS_BUILD_MODULES[module] for module in missing})
-    raise RuntimeError(
-        "Windows 打包环境缺少依赖模块："
-        + ", ".join(missing)
-        + "。请安装："
-        + " ".join(packages)
+def ensure_build_dependencies(target: str = WINDOWS_TARGET_MODERN) -> None:
+    target = validate_windows_target(target)
+    modules = (
+        WINDOWS_WIN7_BUILD_MODULES
+        if target == WINDOWS_TARGET_WIN7
+        else WINDOWS_BUILD_MODULES
     )
+    missing = [module for module in modules if not _module_exists(module)]
+    if missing:
+        packages = sorted({modules[module] for module in missing})
+        raise RuntimeError(
+            "Windows 打包环境缺少依赖模块："
+            + ", ".join(missing)
+            + "。请安装："
+            + " ".join(packages)
+        )
+    if target == WINDOWS_TARGET_WIN7:
+        _ensure_win7_pinned_distributions()
 
 
-def build_windows_binaries(version: str, output_dir: Path, work_dir: Path) -> tuple[Path, Path]:
+def _ensure_win7_pinned_distributions() -> None:
+    mismatches: list[str] = []
+    for distribution, expected in WIN7_PINNED_DISTRIBUTIONS.items():
+        try:
+            actual = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            mismatches.append(f"{distribution}=未安装（要求 {expected}）")
+            continue
+        if actual != expected:
+            mismatches.append(f"{distribution}={actual}（要求 {expected}）")
+    if mismatches:
+        raise RuntimeError(
+            "Windows 7 构建依赖必须与冻结清单完全一致：" + "；".join(mismatches)
+        )
+
+
+def build_windows_binaries(
+    version: str,
+    output_dir: Path,
+    work_dir: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+    seven_zip_dir: Path | None = None,
+    ucrt_dir: Path | None = None,
+    vc_runtime_dir: Path | None = None,
+) -> tuple[Path, Path]:
+    target = validate_windows_target(target)
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     app_dir = output_dir / APP_NAME
@@ -230,16 +494,39 @@ def build_windows_binaries(version: str, output_dir: Path, work_dir: Path) -> tu
         work_dir=work_dir,
         version_file=version_file,
         updater_version_file=updater_version_file,
+        target=target,
+        seven_zip_dir=seven_zip_dir,
+        ucrt_dir=ucrt_dir,
+        vc_runtime_dir=vc_runtime_dir,
     )
     _run(main_command)
     if not app_dir.is_dir():
         raise RuntimeError("PyInstaller 未生成预期的 HRToolkit onedir。")
+    if target == WINDOWS_TARGET_WIN7:
+        assert ucrt_dir is not None
+        assert vc_runtime_dir is not None
+        stage_win7_app_local_runtimes(
+            app_dir=app_dir,
+            ucrt_dir=ucrt_dir,
+            vc_runtime_dir=vc_runtime_dir,
+        )
     removed_bytes = remove_unused_opencv_videoio_ffmpeg(app_dir)
     if removed_bytes:
         print(f"已移除未使用的 OpenCV 视频后端：{removed_bytes} 字节")
     _run(updater_command)
     if not app_dir.is_dir() or not updater_path.is_file():
         raise RuntimeError("PyInstaller 未生成预期的 HRToolkit onedir 和 Updater。")
+    if target == WINDOWS_TARGET_WIN7:
+        assert seven_zip_dir is not None
+        assert ucrt_dir is not None
+        assert vc_runtime_dir is not None
+        verify_win7_runtime_source_integrity(
+            app_dir=app_dir,
+            updater=updater_path,
+            seven_zip_dir=seven_zip_dir,
+            ucrt_dir=ucrt_dir,
+            vc_runtime_dir=vc_runtime_dir,
+        )
     return app_dir, updater_path
 
 
@@ -259,6 +546,31 @@ def remove_unused_opencv_videoio_ffmpeg(app_dir: Path) -> int:
     return removed_bytes
 
 
+def stage_win7_app_local_runtimes(
+    *,
+    app_dir: Path,
+    ucrt_dir: Path,
+    vc_runtime_dir: Path,
+) -> None:
+    """Place downlevel runtimes beside the main EXE as required before Windows 8."""
+    for source_dir, names, label in (
+        (ucrt_dir, WIN7_REQUIRED_UCRT_FILES, "app-local UCRT"),
+        (vc_runtime_dir, WIN7_REQUIRED_VC_RUNTIME_FILES, "Visual C++ app-local runtime"),
+    ):
+        _require_files(source_dir, names, label=label)
+        for name in names:
+            matches = sorted(
+                path
+                for path in app_dir.rglob("*")
+                if path.name.casefold() == name.casefold()
+            )
+            for path in matches:
+                if path.is_symlink() or not path.is_file():
+                    raise RuntimeError(f"拒绝替换非普通 Win7 运行库文件：{path}")
+                path.unlink()
+            shutil.copy2(source_dir / name, app_dir / name)
+
+
 def pyinstaller_commands(
     *,
     version: str,
@@ -266,8 +578,19 @@ def pyinstaller_commands(
     work_dir: Path,
     version_file: Path | None = None,
     updater_version_file: Path | None = None,
+    target: str = WINDOWS_TARGET_MODERN,
+    seven_zip_dir: Path | None = None,
+    ucrt_dir: Path | None = None,
+    vc_runtime_dir: Path | None = None,
 ) -> tuple[list[str], list[str]]:
     validate_stable_semver(version)
+    target = validate_windows_target(target)
+    seven_zip_dir, ucrt_dir, vc_runtime_dir = validate_win7_runtime_sources(
+        target=target,
+        seven_zip_dir=seven_zip_dir,
+        ucrt_dir=ucrt_dir,
+        vc_runtime_dir=vc_runtime_dir,
+    )
     version_file = version_file or (work_dir / "HRToolkit.version.txt")
     updater_version_file = updater_version_file or (work_dir / "HRToolkitUpdater.version.txt")
     spec_dir = work_dir / "spec"
@@ -297,10 +620,24 @@ def pyinstaller_commands(
         "--workpath",
         str(work_dir / APP_NAME),
         "--manifest",
-        str(WINDOWS_MANIFEST),
+        str(WINDOWS_WIN7_MANIFEST if target == WINDOWS_TARGET_WIN7 else WINDOWS_MANIFEST),
         "--add-data",
         f"{README_FILE};.",
     ]
+    if target == WINDOWS_TARGET_WIN7:
+        assert seven_zip_dir is not None
+        main.extend(
+            [
+                "--add-binary",
+                f"{seven_zip_dir / '7z.exe'};third_party/7zip",
+                "--add-binary",
+                f"{seven_zip_dir / '7z.dll'};third_party/7zip",
+                "--add-data",
+                f"{seven_zip_dir / 'License.txt'};third_party/7zip",
+                "--add-data",
+                f"{WIN7_THIRD_PARTY_NOTICE};third_party/7zip",
+            ]
+        )
     for template in release_template_files():
         main.extend(
             [
@@ -308,11 +645,17 @@ def pyinstaller_commands(
                 f"{template};hr_toolkit/templates",
             ]
         )
-    for module in HIDDEN_IMPORTS:
+    hidden_imports = WIN7_HIDDEN_IMPORTS if target == WINDOWS_TARGET_WIN7 else HIDDEN_IMPORTS
+    collect_all_modules = (
+        WIN7_COLLECT_ALL_MODULES
+        if target == WINDOWS_TARGET_WIN7
+        else COLLECT_ALL_MODULES
+    )
+    for module in hidden_imports:
         main.extend(["--hidden-import", module])
     for module in EXCLUDED_MODULES:
         main.extend(["--exclude-module", module])
-    for module in COLLECT_ALL_MODULES:
+    for module in collect_all_modules:
         main.extend(["--collect-all", module])
     main.append(str(APP_ENTRYPOINT))
 
@@ -337,6 +680,13 @@ def pyinstaller_commands(
         "--workpath",
         str(work_dir / UPDATER_NAME),
     ]
+    if target == WINDOWS_TARGET_WIN7:
+        assert ucrt_dir is not None
+        for runtime_name in WIN7_REQUIRED_UCRT_FILES:
+            updater.extend(["--add-binary", f"{ucrt_dir / runtime_name};."])
+        assert vc_runtime_dir is not None
+        for runtime_name in WIN7_REQUIRED_VC_RUNTIME_FILES:
+            updater.extend(["--add-binary", f"{vc_runtime_dir / runtime_name};."])
     for module in EXCLUDED_MODULES:
         updater.extend(["--exclude-module", module])
     updater.append(str(UPDATER_ENTRYPOINT))
@@ -391,7 +741,12 @@ VSVersionInfo(
 """
 
 
-def verify_windows_payload(app_dir: Path) -> None:
+def verify_windows_payload(
+    app_dir: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
+    target = validate_windows_target(target)
     app_dir = app_dir.resolve()
     launcher = app_dir / f"{APP_NAME}.exe"
     internal = app_dir / "_internal"
@@ -429,6 +784,9 @@ def verify_windows_payload(app_dir: Path) -> None:
         f"{UPDATER_NAME}.exe",
         "update_url.txt",
     }
+    if target == WINDOWS_TARGET_WIN7:
+        allowed_root_files.update(WIN7_REQUIRED_UCRT_FILES)
+        allowed_root_files.update(WIN7_REQUIRED_VC_RUNTIME_FILES)
     unexpected_root_files = root_files - allowed_root_files
     if unexpected_root_files:
         raise RuntimeError(f"程序包根目录包含非白名单文件：{sorted(unexpected_root_files)}")
@@ -448,6 +806,145 @@ def verify_windows_payload(app_dir: Path) -> None:
     if len(readmes) != 1 or readmes[0].read_bytes() != README_FILE.read_bytes():
         raise RuntimeError("程序包必须且只能包含一份与仓库一致的 README.md。")
     verify_payload_pe_architecture(app_dir)
+    if target == WINDOWS_TARGET_WIN7:
+        verify_win7_runtime_payload(app_dir)
+
+
+def verify_win7_runtime_payload(app_dir: Path) -> None:
+    internal = app_dir / "_internal"
+    forbidden_runtime_names = {
+        path.name.casefold()
+        for path in app_dir.rglob("*")
+        if path.is_file() and path.name.casefold() in WIN7_FORBIDDEN_DLLS
+    }
+    if forbidden_runtime_names:
+        raise RuntimeError(
+            "Windows 7 程序包不得通过旁加载伪造缺失的系统 API："
+            f"{sorted(forbidden_runtime_names)}"
+        )
+    python_runtime = internal / "python38.dll"
+    if not python_runtime.is_file():
+        raise RuntimeError("Windows 7 程序包必须包含 python38.dll。")
+    unexpected_python = sorted(
+        path.name
+        for path in internal.glob("python3*.dll")
+        if path.name.casefold() != "python38.dll"
+    )
+    if unexpected_python:
+        raise RuntimeError(f"Windows 7 程序包混入其他 Python 运行时：{unexpected_python}")
+    _require_files(app_dir, WIN7_REQUIRED_UCRT_FILES, label="Win7 payload UCRT")
+    _require_files(
+        app_dir,
+        WIN7_REQUIRED_VC_RUNTIME_FILES,
+        label="Win7 payload Visual C++ runtime",
+    )
+    seven_zip_dir = internal / "third_party" / "7zip"
+    _require_files(seven_zip_dir, WIN7_REQUIRED_7ZIP_FILES, label="Win7 payload 7-Zip")
+    notice = seven_zip_dir / WIN7_THIRD_PARTY_NOTICE.name
+    if not notice.is_file() or notice.read_bytes() != WIN7_THIRD_PARTY_NOTICE.read_bytes():
+        raise RuntimeError("Windows 7 程序包缺少正确的 7-Zip 第三方许可说明。")
+
+
+def verify_win7_runtime_source_integrity(
+    *,
+    app_dir: Path,
+    updater: Path,
+    seven_zip_dir: Path,
+    ucrt_dir: Path,
+    vc_runtime_dir: Path,
+    archive_reader_cls=None,
+) -> None:
+    """Ensure PyInstaller did not replace the pinned Win7 compatibility runtimes."""
+    internal = app_dir / "_internal"
+    _require_matching_files(
+        source_dir=ucrt_dir,
+        payload_dir=app_dir,
+        names=WIN7_REQUIRED_UCRT_FILES,
+        label="app-local UCRT",
+    )
+    _require_matching_files(
+        source_dir=vc_runtime_dir,
+        payload_dir=app_dir,
+        names=WIN7_REQUIRED_VC_RUNTIME_FILES,
+        label="Visual C++ app-local runtime",
+    )
+    _require_matching_files(
+        source_dir=seven_zip_dir,
+        payload_dir=internal / "third_party" / "7zip",
+        names=WIN7_REQUIRED_7ZIP_FILES,
+        label="7-Zip",
+    )
+
+    updater_runtime_sources = tuple(
+        (name, ucrt_dir / name) for name in WIN7_REQUIRED_UCRT_FILES
+    ) + tuple(
+        (name, vc_runtime_dir / name) for name in WIN7_REQUIRED_VC_RUNTIME_FILES
+    )
+    _verify_onefile_embedded_files(
+        updater,
+        updater_runtime_sources,
+        archive_reader_cls=archive_reader_cls,
+    )
+
+
+def _require_matching_files(
+    *,
+    source_dir: Path,
+    payload_dir: Path,
+    names: tuple[str, ...],
+    label: str,
+) -> None:
+    for name in names:
+        source = source_dir / name
+        payload = payload_dir / name
+        if not source.is_file() or not payload.is_file():
+            raise RuntimeError(f"{label} 完整性检查缺少文件：{name}")
+        if payload.read_bytes() != source.read_bytes():
+            raise RuntimeError(f"{label} 未使用已锁定的源文件：{name}")
+
+
+def _verify_onefile_embedded_files(
+    executable: Path,
+    expected_sources: tuple[tuple[str, Path], ...],
+    *,
+    archive_reader_cls=None,
+) -> None:
+    if archive_reader_cls is None:
+        try:
+            from PyInstaller.archive.readers import CArchiveReader
+        except ImportError as exc:
+            raise RuntimeError("无法读取 Win7 Updater 内嵌运行库：缺少 PyInstaller。") from exc
+        archive_reader_cls = CArchiveReader
+
+    try:
+        archive = archive_reader_cls(str(executable))
+    except Exception as exc:
+        raise RuntimeError(f"无法读取 Win7 Updater 内嵌归档：{executable}") from exc
+
+    toc_names: dict[str, list[str]] = {}
+    for raw_name in archive.toc:
+        name = str(raw_name).replace("\\", "/")
+        while name.startswith("./"):
+            name = name[2:]
+        toc_names.setdefault(name.casefold(), []).append(str(raw_name))
+
+    for expected_name, source in expected_sources:
+        matches = toc_names.get(expected_name.casefold(), [])
+        if len(matches) != 1:
+            raise RuntimeError(
+                "Win7 Updater 内嵌运行库缺失或重复："
+                f"{expected_name}（匹配数 {len(matches)}）"
+            )
+        try:
+            embedded = archive.extract(matches[0])
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法提取 Win7 Updater 内嵌运行库：{expected_name}"
+            ) from exc
+        if not source.is_file() or embedded != source.read_bytes():
+            raise RuntimeError(
+                f"Win7 Updater 未使用已锁定的运行库源文件：{expected_name}"
+            )
 
 
 def verify_pe_x64(executable: Path) -> None:
@@ -459,18 +956,150 @@ def verify_pe_x64(executable: Path) -> None:
 
 
 def verify_payload_pe_architecture(app_dir: Path) -> None:
-    pe_files = sorted(
-        (
-            path
-            for path in app_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in {".exe", ".dll", ".pyd"}
-        ),
-        key=lambda path: path.as_posix(),
-    )
+    pe_files = _payload_pe_files(app_dir)
     if not pe_files:
         raise RuntimeError(f"程序目录未发现 Windows PE 文件：{app_dir}")
     for path in pe_files:
         verify_pe_x64(path)
+
+
+def _payload_pe_files(app_dir: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            (
+                path
+                for path in app_dir.rglob("*")
+                if path.is_file() and path.suffix.lower() in {".exe", ".dll", ".pyd"}
+            ),
+            key=lambda path: path.as_posix(),
+        )
+    )
+
+
+def verify_win7_pe_compatibility(pe_files: tuple[Path, ...]) -> None:
+    try:
+        import pefile
+    except ImportError as exc:
+        raise RuntimeError("Win7 PE 兼容检查缺少 pefile。") from exc
+
+    pe_files = tuple(pe_files)
+    payload_by_name: dict[str, Path] = {}
+    for path in pe_files:
+        payload_by_name.setdefault(path.name.casefold(), path)
+    runtime_exports = {
+        name.casefold(): _read_pe_exports(pefile, payload_by_name[name.casefold()])
+        for name in WIN7_REQUIRED_VC_RUNTIME_FILES
+        if name.casefold() in payload_by_name
+    }
+
+    violations: list[str] = []
+    for path in pe_files:
+        try:
+            pe = pefile.PE(str(path), fast_load=True)
+            pe.parse_data_directories(
+                directories=[
+                    pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+                    pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT"],
+                ]
+            )
+        except pefile.PEFormatError as exc:
+            raise RuntimeError(f"无法检查 Win7 PE 导入表：{path}：{exc}") from exc
+        try:
+            subsystem = (
+                int(pe.OPTIONAL_HEADER.MajorSubsystemVersion),
+                int(pe.OPTIONAL_HEADER.MinorSubsystemVersion),
+            )
+            # Microsoft's down-level app-local UCRT is explicitly supported on
+            # Windows 7, although its own PE headers report subsystem 10.0.
+            if (
+                subsystem > (6, 1)
+                and path.name.casefold() not in WIN7_REQUIRED_UCRT_FILE_KEYS
+            ):
+                violations.append(f"{path.name}: subsystem={subsystem[0]}.{subsystem[1]}")
+            entries = tuple(getattr(pe, "DIRECTORY_ENTRY_IMPORT", ())) + tuple(
+                getattr(pe, "DIRECTORY_ENTRY_DELAY_IMPORT", ())
+            )
+            for entry in entries:
+                dll_name = _decode_pe_name(getattr(entry, "dll", b""))
+                normalized_dll = dll_name.casefold()
+                if normalized_dll in WIN7_FORBIDDEN_DLLS:
+                    violations.append(f"{path.name}: {dll_name}")
+                if (
+                    _is_win7_app_local_vc_runtime(normalized_dll)
+                    and normalized_dll not in payload_by_name
+                ):
+                    violations.append(f"{path.name}: 缺少 app-local {dll_name}")
+                exported_names, exported_ordinals = runtime_exports.get(
+                    normalized_dll,
+                    (frozenset(), frozenset()),
+                )
+                for imported in getattr(entry, "imports", ()):
+                    raw_symbol = getattr(imported, "name", None)
+                    symbol = _decode_pe_name(raw_symbol)
+                    normalized = symbol.casefold()
+                    if (
+                        normalized in WIN7_FORBIDDEN_IMPORTS
+                        or normalized.startswith("pss")
+                        or normalized.startswith("pathcch")
+                    ):
+                        violations.append(f"{path.name}: {dll_name}!{symbol}")
+                    if normalized_dll in runtime_exports:
+                        ordinal = int(getattr(imported, "ordinal", 0) or 0)
+                        if raw_symbol is not None and raw_symbol not in exported_names:
+                            violations.append(
+                                f"{path.name}: {dll_name} 不导出 {symbol}"
+                            )
+                        elif raw_symbol is None and ordinal not in exported_ordinals:
+                            violations.append(
+                                f"{path.name}: {dll_name} 不导出序号 {ordinal}"
+                            )
+        finally:
+            pe.close()
+
+    if violations:
+        preview = "；".join(violations[:20])
+        suffix = "" if len(violations) <= 20 else f"；另有 {len(violations) - 20} 项"
+        raise RuntimeError(f"程序包包含 Windows 7 不支持的 PE 依赖：{preview}{suffix}")
+
+
+def _is_win7_app_local_vc_runtime(dll_name: str) -> bool:
+    return dll_name.startswith(
+        ("concrt140", "mfc140", "msvcp140", "vcomp140", "vcruntime140")
+    ) and dll_name.endswith(".dll")
+
+
+def _read_pe_exports(pefile_module, path: Path) -> tuple[frozenset[bytes], frozenset[int]]:
+    try:
+        pe = pefile_module.PE(str(path), fast_load=True)
+        pe.parse_data_directories(
+            directories=[
+                pefile_module.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]
+            ]
+        )
+    except pefile_module.PEFormatError as exc:
+        raise RuntimeError(f"无法检查 VC 运行库导出表：{path}：{exc}") from exc
+    try:
+        export_entry = getattr(pe, "DIRECTORY_ENTRY_EXPORT", None)
+        if export_entry is None:
+            raise RuntimeError(f"VC 运行库没有导出表：{path}")
+        symbols = tuple(getattr(export_entry, "symbols", ()))
+        names = frozenset(
+            symbol.name for symbol in symbols if getattr(symbol, "name", None) is not None
+        )
+        ordinals = frozenset(
+            int(symbol.ordinal) for symbol in symbols if getattr(symbol, "ordinal", None) is not None
+        )
+        return names, ordinals
+    finally:
+        pe.close()
+
+
+def _decode_pe_name(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("ascii", errors="replace")
+    return str(value)
 
 
 def read_pe_machine(executable: Path) -> int:
@@ -491,14 +1120,20 @@ def read_pe_machine(executable: Path) -> int:
         return struct.unpack("<H", machine_data)[0]
 
 
-def run_runtime_smoke(app_executable: Path, updater_executable: Path) -> None:
-    # Updater 使用 PyInstaller --windowed；argparse --help 在无控制台环境没有
-    # 稳定 stdout，因此这里只做 PE 架构检查。其替换/回滚逻辑由 unittest 覆盖。
+def run_runtime_smoke(
+    app_executable: Path,
+    updater_executable: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
+    target = validate_windows_target(target)
     verify_pe_x64(updater_executable)
     expected_version = read_project_version()
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_runtime_check_") as tmp:
         output_path = Path(tmp) / "result.txt"
         env = dict(os.environ)
+        if target == WINDOWS_TARGET_WIN7:
+            env.pop(WIN7_7ZIP_OVERRIDE_ENV, None)
         env["HR_TOOLKIT_CHECK_OUTPUT"] = str(output_path)
         _run([str(app_executable), "--version"], timeout=60, env=env)
         actual_version = output_path.read_text(encoding="utf-8").strip()
@@ -517,6 +1152,29 @@ def run_runtime_smoke(app_executable: Path, updater_executable: Path) -> None:
             raise RuntimeError(
                 f"打包程序 update-smoke-test 输出不正确：{update_smoke_result or '空'}"
             )
+        if target == WINDOWS_TARGET_WIN7:
+            updater_smoke_dir = Path(tmp) / "updater"
+            updater_smoke_dir.mkdir()
+            updater_smoke = updater_smoke_dir / updater_executable.name
+            shutil.copy2(updater_executable, updater_smoke)
+            for runtime_name in (
+                *WIN7_REQUIRED_UCRT_FILES,
+                *WIN7_REQUIRED_VC_RUNTIME_FILES,
+            ):
+                source = app_executable.parent / runtime_name
+                if source.is_symlink() or not source.is_file():
+                    raise RuntimeError(
+                        f"Win7 Updater 启动检查缺少 app-local 运行库：{runtime_name}"
+                    )
+                shutil.copy2(source, updater_smoke_dir / runtime_name)
+            _run([str(updater_smoke), "--smoke-test"], timeout=90, env=env)
+            updater_smoke_result = output_path.read_text(encoding="utf-8").strip()
+            expected_updater = f"HRToolkitUpdater {expected_version} smoke-test OK"
+            if updater_smoke_result != expected_updater:
+                raise RuntimeError(
+                    "打包更新程序 smoke-test 输出不正确："
+                    f"{updater_smoke_result or '空'}"
+                )
 
 
 def _is_template_payload_path(relative: Path) -> bool:

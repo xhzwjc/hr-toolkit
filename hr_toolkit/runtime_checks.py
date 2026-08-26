@@ -27,6 +27,9 @@ TEMPLATE_NAMES = (
 _RAR_RUNTIME_FIXTURE = base64.b64decode(
     "UmFyIRoHAQAzkrXlCgEFBgAFAQGAgACVrTL6KgIDC58ABJ8ApIMCvJeqS4AAAQxydW50aW1lLnhsc3gKAxPxW4hqhkEQMUhSVG9vbGtpdCBhcmNoaXZlIHJ1bnRpbWUgc21va2Udd1ZRAwUEAA=="
 )
+_SEVEN_ZIP_RUNTIME_FIXTURE = base64.b64decode(
+    "N3q8ryccAASuJxD0iAAAAAAAAAAUAAAAAAAAAGkm1z8BAB5IUlRvb2xraXQgYXJjaGl2ZSBydW50aW1lIHNtb2tlAOAAXgBdXQAAgTMHrg/QPBb8nzkQnG8VArnDFMcdhtRaWFWIWBRIxoCITwQTg7wuT9/dT/wnHngb888SGgIyduSDds/zn2STt2jHBoaB/DbbyKI+Dksb3jMZ88uaze/zjyAAAAAAFwYjAQllAAcLAQABISEBGAxfAAA="
+)
 
 
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -133,20 +136,10 @@ def smoke_test() -> None:
 
 
 def _smoke_test_archive_runtimes(root: Path) -> None:
-    import py7zr
-    from unrar.cffi.unrarlib import get_unrar_version
-
-    unrar_version = get_unrar_version()
-    if len(unrar_version) != 3 or unrar_version[0] <= 0:
-        raise RuntimeError(f"RAR 解压组件版本无效：{unrar_version}")
-
     root.mkdir(parents=True, exist_ok=True)
-    source = root / "runtime.xlsx"
     payload = b"HRToolkit archive runtime smoke"
-    source.write_bytes(payload)
     archive_path = root / "runtime.7z"
-    with py7zr.SevenZipFile(archive_path, "w") as archive:
-        archive.write(source, arcname=source.name)
+    archive_path.write_bytes(_SEVEN_ZIP_RUNTIME_FIXTURE)
     warnings: list[str] = []
     files = extract_archive_excel_files(archive_path, root / "extract", warnings)
     if warnings or len(files) != 1 or files[0].read_bytes() != payload:

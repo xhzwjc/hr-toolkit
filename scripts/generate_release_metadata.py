@@ -84,6 +84,8 @@ def release_asset_names(version: str, *, mac_variant: str) -> tuple[str, ...]:
     windows = (
         f"HRToolkit_{version}_x64-setup.exe",
         f"HRToolkit_{version}_x64.msi",
+        f"HRToolkit_{version}_win7_x64-setup.exe",
+        f"HRToolkit_{version}_win7_x64.msi",
     )
     if mac_variant == "universal2":
         mac = (f"HRToolkit_{version}_universal.dmg",)
@@ -215,12 +217,27 @@ def build_latest_manifest(
         else None
     )
     windows_installer = f"HRToolkit_{version}_x64-setup.exe"
+    win7_installer = f"HRToolkit_{version}_win7_x64-setup.exe"
+    modern_payload = _asset_payload(
+        assets_dir,
+        tag,
+        version,
+        windows_installer,
+        update_mode="auto",
+        download_base_url=download_base_url,
+        fallback_download_base_url=fallback_download_base_url,
+        primary_download_max_bytes=primary_download_max_bytes,
+        primary_download_asset_names=primary_asset_names,
+    )
     platforms = {
-        "windows": _asset_payload(
+        # windows 保留给旧版现代客户端；新客户端使用显式架构通道。
+        "windows": dict(modern_payload),
+        "windows-x64-modern": dict(modern_payload),
+        "windows-x64-win7": _asset_payload(
             assets_dir,
             tag,
             version,
-            windows_installer,
+            win7_installer,
             update_mode="auto",
             download_base_url=download_base_url,
             fallback_download_base_url=fallback_download_base_url,

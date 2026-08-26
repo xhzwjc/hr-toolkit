@@ -17,8 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from hr_toolkit import __version__
+
 
 UPDATE_LOG_FILE = "HRToolkit_update.log"
+UPDATER_SMOKE_ARGUMENT = "--smoke-test"
+UPDATER_CHECK_OUTPUT_ENV = "HR_TOOLKIT_CHECK_OUTPUT"
 LOG_MAX_BYTES = 1024 * 1024
 LOG_KEEP_BYTES = 256 * 1024
 ZIP_MAX_MEMBERS = 100_000
@@ -30,6 +34,11 @@ StatusCallback = Callable[[str], None]
 
 
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == [UPDATER_SMOKE_ARGUMENT]:
+        _emit_updater_smoke_result()
+        return 0
+
     parser = argparse.ArgumentParser(description="HR工具箱独立更新程序")
     parser.add_argument("--zip", type=Path, help="更新包 zip 路径")
     parser.add_argument("--installer", type=Path, help="安装包 EXE 路径")
@@ -39,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-file", type=Path, help="更新详细日志路径")
     parser.add_argument("--relaunch", action="store_true", help="更新完成后重新打开主程序")
     parser.add_argument("--ui", action="store_true", help="显示安装进度窗口")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
 
     log_file = _resolve_log_file(args)
     ui = _create_ui(log_file) if args.ui else None
@@ -57,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=worker, daemon=True).start()
     ui.run()
     return exit_code["value"]
+
+
+def _emit_updater_smoke_result() -> None:
+    result = f"HRToolkitUpdater {__version__} smoke-test OK"
+    if sys.stdout is not None:
+        print(result, flush=True)
+    output_path = os.environ.get(UPDATER_CHECK_OUTPUT_ENV, "").strip()
+    if output_path:
+        Path(output_path).write_text(result + "\n", encoding="utf-8")
 
 
 def _execute_update(args: argparse.Namespace, log_file: Path, status: StatusCallback | None) -> int:

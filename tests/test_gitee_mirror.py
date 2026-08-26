@@ -97,6 +97,7 @@ class GiteeMirrorTests(unittest.TestCase):
         for name in release_metadata.release_asset_names(self.VERSION, mac_variant="universal2"):
             (assets_dir / name).write_bytes(("payload:" + name).encode("utf-8"))
         windows_installer = f"HRToolkit_{self.VERSION}_x64-setup.exe"
+        win7_installer = f"HRToolkit_{self.VERSION}_win7_x64-setup.exe"
         release_metadata.generate_release_metadata(
             assets_dir,
             version=self.VERSION,
@@ -111,7 +112,7 @@ class GiteeMirrorTests(unittest.TestCase):
                 f"https://github.com/{self.GITHUB_REPOSITORY}/releases/download"
             ),
             primary_download_max_bytes=release_metadata.GITEE_ATTACHMENT_SAFE_MAX_BYTES,
-            primary_download_asset_names=(windows_installer,),
+            primary_download_asset_names=(windows_installer, win7_installer),
         )
 
     def test_validates_exact_gitee_assets_and_github_fallback(self) -> None:
@@ -130,6 +131,7 @@ class GiteeMirrorTests(unittest.TestCase):
                 set(names),
                 {
                     f"HRToolkit_{self.VERSION}_x64-setup.exe",
+                    f"HRToolkit_{self.VERSION}_win7_x64-setup.exe",
                     "latest.json",
                     "SHA256SUMS.txt",
                 },
@@ -137,6 +139,11 @@ class GiteeMirrorTests(unittest.TestCase):
             manifest = json.loads((assets_dir / "latest.json").read_text(encoding="utf-8"))
             self.assertTrue(
                 manifest["platforms"]["windows"]["file_url"].startswith("https://gitee.com/")
+            )
+            self.assertTrue(
+                manifest["platforms"]["windows-x64-win7"]["file_url"].startswith(
+                    "https://gitee.com/"
+                )
             )
             self.assertTrue(
                 manifest["platforms"]["macos"]["file_url"].startswith("https://github.com/")

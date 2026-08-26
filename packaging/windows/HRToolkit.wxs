@@ -15,7 +15,18 @@
     InstallerVersion="500"
     Compressed="yes">
     <SummaryInformation Description="HRToolkit 人事 Excel 自动化工具箱" />
-    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 HRToolkit。" />
+    <?if $(var.WindowsTarget) = "win7" ?>
+    <Launch
+      Condition="Installed OR ((VersionNT64 &gt;= 601) AND (VersionNT64 &lt; 603) AND ((VersionNT64 &gt; 601) OR ServicePackLevel &gt;= 1))"
+      Message="HRToolkit 兼容版仅支持 Windows 7 SP1 x64、Windows 8 x64 或对应的 Windows Server；Windows 8.1 及更高版本请安装现代版。" />
+    <?else?>
+    <Launch
+      Condition="Installed OR VersionNT64 &gt;= 603"
+      Message="HRToolkit 现代版仅支持 Windows 8.1 x64 或更高版本；Windows 7 请安装专用兼容版。" />
+    <?endif?>
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="已安装更高版本的 HRToolkit。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="medium" />
 
     <Feature Id="MainFeature" Title="HRToolkit" Level="1">

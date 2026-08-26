@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 import struct
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import build_update_assets
@@ -13,7 +15,9 @@ from scripts import build_macos
 from scripts import build_windows
 from scripts import build_windows_installers
 from scripts import release_windows
+from scripts import prepare_win7_runtime
 from scripts import verify_macos_bundle
+from hr_toolkit.app_update import WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES
 from hr_toolkit.runtime_checks import TEMPLATE_NAMES
 
 
@@ -40,13 +44,26 @@ class WindowsPackagingTests(unittest.TestCase):
                 work_dir=tmp_dir / "build",
                 version_file=tmp_dir / "version.txt",
             )
+            explicit_modern_main, explicit_modern_updater = build_windows.pyinstaller_commands(
+                version=self.version,
+                output_dir=tmp_dir / "dist",
+                work_dir=tmp_dir / "build",
+                version_file=tmp_dir / "version.txt",
+                target=build_windows.WINDOWS_TARGET_MODERN,
+            )
 
+        self.assertEqual(main, explicit_modern_main)
+        self.assertEqual(updater, explicit_modern_updater)
         self.assertIn("--onedir", main)
         self.assertIn("--windowed", main)
         self.assertNotIn("--onefile", main)
         self.assertIn("--onefile", updater)
         self.assertIn("--windowed", updater)
         self.assertNotIn("--onedir", updater)
+        self.assertIn(str(build_windows.WINDOWS_MANIFEST), main)
+        self.assertNotIn(str(build_windows.WINDOWS_WIN7_MANIFEST), main)
+        self.assertNotIn("--add-binary", main)
+        self.assertNotIn("--add-binary", updater)
         self.assertEqual(main[-1], str(build_windows.APP_ENTRYPOINT))
         self.assertEqual(updater[-1], str(build_windows.UPDATER_ENTRYPOINT))
 
@@ -82,6 +99,84 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertEqual(template_sources, {str(path) for path in build_windows.release_template_files()})
         self.assertFalse(any(value.startswith(str(build_windows.TEMPLATES_DIR) + ";") for value in data_values))
         self.assertFalse(any("附件" in value or "outputs" in value for value in data_values))
+
+    def test_win7_pyinstaller_lane_is_isolated_and_bundles_compatibility_runtimes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            seven_zip = tmp_dir / "7zip"
+            ucrt = tmp_dir / "ucrt"
+            vc_runtime = tmp_dir / "vc-runtime"
+            seven_zip.mkdir()
+            ucrt.mkdir()
+            vc_runtime.mkdir()
+            for name in build_windows.WIN7_REQUIRED_7ZIP_FILES:
+                (seven_zip / name).write_bytes(b"runtime")
+            for name in build_windows.WIN7_REQUIRED_UCRT_FILES:
+                (ucrt / name).write_bytes(b"runtime")
+            for name in build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES:
+                (vc_runtime / name).write_bytes(b"runtime")
+
+            main, updater = build_windows.pyinstaller_commands(
+                version=self.version,
+                output_dir=tmp_dir / "dist",
+                work_dir=tmp_dir / "build",
+                version_file=tmp_dir / "version.txt",
+                target=build_windows.WINDOWS_TARGET_WIN7,
+                seven_zip_dir=seven_zip,
+                ucrt_dir=ucrt,
+                vc_runtime_dir=vc_runtime,
+            )
+
+        self.assertIn(str(build_windows.WINDOWS_WIN7_MANIFEST), main)
+        self.assertNotIn("unrar.cffi.rarfile", main)
+        self.assertNotIn("unrar", main)
+        self.assertIn(str(seven_zip.resolve() / "7z.exe") + ";third_party/7zip", main)
+        self.assertIn(str(seven_zip.resolve() / "7z.dll") + ";third_party/7zip", main)
+        for name in build_windows.WIN7_REQUIRED_UCRT_FILES:
+            expected = str(ucrt.resolve() / name) + ";."
+            self.assertNotIn(expected, main)
+            self.assertIn(expected, updater)
+        for name in build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES:
+            expected = str(vc_runtime.resolve() / name) + ";."
+            self.assertNotIn(expected, main)
+            self.assertIn(expected, updater)
+
+    def test_win7_app_local_runtimes_are_staged_beside_main_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            internal = app_dir / "_internal"
+            ucrt_dir = tmp_dir / "ucrt"
+            vc_runtime_dir = tmp_dir / "vc-runtime"
+            internal.mkdir(parents=True)
+            ucrt_dir.mkdir()
+            vc_runtime_dir.mkdir()
+
+            for source_dir, label, names in (
+                (ucrt_dir, b"pinned-ucrt:", build_windows.WIN7_REQUIRED_UCRT_FILES),
+                (
+                    vc_runtime_dir,
+                    b"pinned-vc:",
+                    build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+                ),
+            ):
+                for name in names:
+                    (source_dir / name).write_bytes(label + name.encode("ascii"))
+                    (internal / name).write_bytes(b"runner-runtime")
+
+            build_windows.stage_win7_app_local_runtimes(
+                app_dir=app_dir,
+                ucrt_dir=ucrt_dir,
+                vc_runtime_dir=vc_runtime_dir,
+            )
+
+            for source_dir, names in (
+                (ucrt_dir, build_windows.WIN7_REQUIRED_UCRT_FILES),
+                (vc_runtime_dir, build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES),
+            ):
+                for name in names:
+                    self.assertEqual((app_dir / name).read_bytes(), (source_dir / name).read_bytes())
+                    self.assertFalse((internal / name).exists())
 
     def test_macos_spec_collects_7z_and_embedded_unrar_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,10 +243,101 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertEqual(retained.read_bytes(), retained_payload)
             build_windows.verify_windows_payload(app_dir)
 
+    def test_win7_frozen_smoke_forces_bundled_7zip_without_changing_modern(self) -> None:
+        observed_environments: list[dict[str, str]] = []
+
+        def fake_run(command: list[str], *, timeout=None, env=None) -> None:
+            del timeout
+            self.assertIsNotNone(env)
+            assert env is not None
+            observed_environments.append(dict(env))
+            output_path = Path(env["HR_TOOLKIT_CHECK_OUTPUT"])
+            if "--version" in command:
+                output_path.write_text(self.version, encoding="utf-8")
+            elif Path(command[0]).name == "HRToolkitUpdater.exe":
+                for runtime_name in (
+                    *build_windows.WIN7_REQUIRED_UCRT_FILES,
+                    *build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+                ):
+                    self.assertTrue((Path(command[0]).parent / runtime_name).is_file())
+                output_path.write_text(
+                    f"HRToolkitUpdater {self.version} smoke-test OK",
+                    encoding="utf-8",
+                )
+            elif "--smoke-test" in command:
+                output_path.write_text(
+                    f"HRToolkit {self.version} smoke-test OK",
+                    encoding="utf-8",
+                )
+            else:
+                output_path.write_text(
+                    f"HRToolkit {self.version} update-smoke-test OK; latest={self.version}",
+                    encoding="utf-8",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app = tmp_dir / "HRToolkit.exe"
+            updater = tmp_dir / "HRToolkitUpdater.exe"
+            self._write_fake_pe(updater, build_windows.PE_MACHINE_AMD64)
+            for runtime_name in (
+                *build_windows.WIN7_REQUIRED_UCRT_FILES,
+                *build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+            ):
+                (tmp_dir / runtime_name).write_bytes(b"runtime")
+            with (
+                patch.dict(
+                    build_windows.os.environ,
+                    {build_windows.WIN7_7ZIP_OVERRIDE_ENV: "C:/build-runtime/7z.exe"},
+                ),
+                patch.object(build_windows, "_run", side_effect=fake_run),
+            ):
+                build_windows.run_runtime_smoke(
+                    app,
+                    updater,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+                win7_environments = list(observed_environments)
+                observed_environments.clear()
+                build_windows.run_runtime_smoke(app, updater)
+                modern_environments = list(observed_environments)
+
+        self.assertEqual(len(win7_environments), 4)
+        self.assertTrue(
+            all(
+                build_windows.WIN7_7ZIP_OVERRIDE_ENV not in env
+                for env in win7_environments
+            )
+        )
+        self.assertEqual(len(modern_environments), 3)
+        self.assertTrue(
+            all(
+                env[build_windows.WIN7_7ZIP_OVERRIDE_ENV]
+                == "C:/build-runtime/7z.exe"
+                for env in modern_environments
+            )
+        )
+
     def test_windows_version_metadata_uses_requested_version(self) -> None:
         payload = build_windows.windows_version_info("0.2.1")
         self.assertIn("filevers=(0, 2, 1, 0)", payload)
         self.assertIn("StringStruct('ProductVersion', '0.2.1')", payload)
+
+    def test_wix_xml_indentation_has_a_python38_fallback(self) -> None:
+        root = ET.Element("root")
+        child = ET.SubElement(root, "child")
+        ET.SubElement(child, "leaf")
+        modern_tree = ET.ElementTree(copy.deepcopy(root))
+        fallback_tree = ET.ElementTree(copy.deepcopy(root))
+
+        build_windows_installers._indent_xml(modern_tree)
+        with patch.object(build_windows_installers.ET, "indent", None):
+            build_windows_installers._indent_xml(fallback_tree)
+
+        self.assertEqual(
+            ET.tostring(fallback_tree.getroot()),
+            ET.tostring(modern_tree.getroot()),
+        )
 
     def test_windows_release_job_forces_utf8_python_output(self) -> None:
         workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -208,16 +394,27 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("requirements-audit.txt", ci)
         self.assertIn("python -m pip_audit --local", ci)
         self.assertIn("constraints/python312-production.txt", ci)
+        self.assertIn("constraints/python38-win7.txt", ci)
+        self.assertIn('python-version: "3.8.10"', ci)
+
+        win7_constraints = (
+            build_windows.REPO_ROOT / "constraints" / "python38-win7.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("onnxruntime==1.11.1", win7_constraints)
+        self.assertIn("opencv-python==4.8.1.78", win7_constraints)
+        self.assertIn("pyinstaller==6.21.0", win7_constraints)
 
     def test_scheduled_windows_package_gate_runs_tests_and_ocr(self) -> None:
         workflow = (
             build_windows.REPO_ROOT / ".github" / "workflows" / "test-build.yml"
         ).read_text(encoding="utf-8")
         self.assertIn('- cron: "0 18 * * 0"', workflow)
-        self.assertIn('TARGET_PLATFORM="windows"', workflow)
+        self.assertIn('TARGET_PLATFORM="windows-all"', workflow)
         self.assertIn('RUN_TESTS="true"', workflow)
         self.assertIn("ocr_runtime_smoke_test", workflow)
         self.assertIn("scripts/release_windows.py", workflow)
+        self.assertIn("--target win7", workflow)
+        self.assertIn("prepare_win7_runtime.py", workflow)
 
     def test_release_and_test_build_use_real_parallel_macos_architectures(self) -> None:
         workflow_dir = build_windows.REPO_ROOT / ".github" / "workflows"
@@ -350,6 +547,217 @@ class WindowsPackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "不是 x64 PE"):
                 build_windows.verify_pe_x64(executable)
 
+    def test_win7_payload_requires_python38_ucrt_and_bundled_7zip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir, _updater = self._fake_app(Path(tmp))
+            internal = app_dir / "_internal"
+            self._write_fake_pe(internal / "python38.dll", build_windows.PE_MACHINE_AMD64)
+            for name in build_windows.WIN7_REQUIRED_UCRT_FILES:
+                self._write_fake_pe(app_dir / name, build_windows.PE_MACHINE_AMD64)
+            for name in build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES:
+                self._write_fake_pe(app_dir / name, build_windows.PE_MACHINE_AMD64)
+            seven_zip = internal / "third_party" / "7zip"
+            self._write_fake_pe(seven_zip / "7z.exe", build_windows.PE_MACHINE_AMD64)
+            self._write_fake_pe(seven_zip / "7z.dll", build_windows.PE_MACHINE_AMD64)
+            (seven_zip / "License.txt").write_text("license", encoding="utf-8")
+            (seven_zip / build_windows.WIN7_THIRD_PARTY_NOTICE.name).write_bytes(
+                build_windows.WIN7_THIRD_PARTY_NOTICE.read_bytes()
+            )
+
+            build_windows.verify_windows_payload(
+                app_dir,
+                target=build_windows.WINDOWS_TARGET_WIN7,
+            )
+            forbidden = internal / "api-ms-win-core-path-l1-1-0.dll"
+            self._write_fake_pe(forbidden, build_windows.PE_MACHINE_AMD64)
+            with self.assertRaisesRegex(RuntimeError, "旁加载伪造"):
+                build_windows.verify_windows_payload(
+                    app_dir,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+            forbidden.unlink()
+            (internal / "python38.dll").unlink()
+            with self.assertRaisesRegex(RuntimeError, "python38.dll"):
+                build_windows.verify_windows_payload(
+                    app_dir,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+
+    def test_win7_runtime_integrity_rejects_pyinstaller_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir, updater = self._fake_app(tmp_dir)
+            internal = app_dir / "_internal"
+            seven_zip_dir = tmp_dir / "sources" / "7zip"
+            ucrt_dir = tmp_dir / "sources" / "ucrt"
+            vc_runtime_dir = tmp_dir / "sources" / "vc-runtime"
+            archive_payloads: dict[str, bytes] = {}
+
+            for label, source_dir, payload_dir, names in (
+                (
+                    "7zip",
+                    seven_zip_dir,
+                    internal / "third_party" / "7zip",
+                    build_windows.WIN7_REQUIRED_7ZIP_FILES,
+                ),
+                (
+                    "ucrt",
+                    ucrt_dir,
+                    app_dir,
+                    build_windows.WIN7_REQUIRED_UCRT_FILES,
+                ),
+                (
+                    "vc",
+                    vc_runtime_dir,
+                    app_dir,
+                    build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+                ),
+            ):
+                source_dir.mkdir(parents=True, exist_ok=True)
+                payload_dir.mkdir(parents=True, exist_ok=True)
+                for name in names:
+                    payload = f"{label}:{name}".encode("utf-8")
+                    (source_dir / name).write_bytes(payload)
+                    (payload_dir / name).write_bytes(payload)
+                    if label in {"ucrt", "vc"}:
+                        archive_payloads[name] = payload
+
+            class FakeArchiveReader:
+                def __init__(self, _path: str):
+                    self.toc = {name: object() for name in archive_payloads}
+
+                def extract(self, name: str) -> bytes:
+                    return archive_payloads[name]
+
+            kwargs = {
+                "app_dir": app_dir,
+                "updater": updater,
+                "seven_zip_dir": seven_zip_dir,
+                "ucrt_dir": ucrt_dir,
+                "vc_runtime_dir": vc_runtime_dir,
+                "archive_reader_cls": FakeArchiveReader,
+            }
+            build_windows.verify_win7_runtime_source_integrity(**kwargs)
+
+            substituted = app_dir / build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES[0]
+            original = substituted.read_bytes()
+            substituted.write_bytes(b"newer system runtime")
+            with self.assertRaisesRegex(RuntimeError, "未使用已锁定"):
+                build_windows.verify_win7_runtime_source_integrity(**kwargs)
+            substituted.write_bytes(original)
+
+            runtime_name = build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES[0]
+            archive_payloads[runtime_name] = b"newer embedded runtime"
+            with self.assertRaisesRegex(RuntimeError, "Updater 未使用已锁定"):
+                build_windows.verify_win7_runtime_source_integrity(**kwargs)
+
+    def test_win7_pe_gate_rejects_post_win7_imports(self) -> None:
+        imported = SimpleNamespace(name=b"PssQuerySnapshot")
+        entry = SimpleNamespace(dll=b"KERNEL32.dll", imports=(imported,))
+
+        class FakePE:
+            OPTIONAL_HEADER = SimpleNamespace(
+                MajorSubsystemVersion=6,
+                MinorSubsystemVersion=1,
+            )
+            DIRECTORY_ENTRY_IMPORT = (entry,)
+            DIRECTORY_ENTRY_DELAY_IMPORT = ()
+
+            def parse_data_directories(self, *, directories):
+                self.directories = directories
+
+            def close(self):
+                pass
+
+        fake_pefile = SimpleNamespace(
+            DIRECTORY_ENTRY={
+                "IMAGE_DIRECTORY_ENTRY_IMPORT": 1,
+                "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT": 2,
+            },
+            PE=lambda _path, fast_load: FakePE(),
+            PEFormatError=ValueError,
+        )
+        with patch.dict("sys.modules", {"pefile": fake_pefile}):
+            with self.assertRaisesRegex(RuntimeError, "PssQuerySnapshot"):
+                build_windows.verify_win7_pe_compatibility((Path("runtime.dll"),))
+
+    def test_win7_pe_gate_requires_app_local_vc_dependencies(self) -> None:
+        entry = SimpleNamespace(
+            dll=b"MSVCP140.dll",
+            imports=(SimpleNamespace(name=b"?required@@", ordinal=None),),
+        )
+
+        class FakePE:
+            OPTIONAL_HEADER = SimpleNamespace(
+                MajorSubsystemVersion=6,
+                MinorSubsystemVersion=1,
+            )
+            DIRECTORY_ENTRY_IMPORT = (entry,)
+            DIRECTORY_ENTRY_DELAY_IMPORT = ()
+
+            def parse_data_directories(self, *, directories):
+                self.directories = directories
+
+            def close(self):
+                pass
+
+        fake_pefile = SimpleNamespace(
+            DIRECTORY_ENTRY={
+                "IMAGE_DIRECTORY_ENTRY_IMPORT": 1,
+                "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT": 2,
+            },
+            PE=lambda _path, fast_load: FakePE(),
+            PEFormatError=ValueError,
+        )
+        with patch.dict("sys.modules", {"pefile": fake_pefile}):
+            with self.assertRaisesRegex(RuntimeError, "缺少 app-local MSVCP140.dll"):
+                build_windows.verify_win7_pe_compatibility((Path("extension.pyd"),))
+
+    def test_win7_pe_gate_checks_symbols_against_pinned_vc_runtime(self) -> None:
+        required_symbol = b"?required@@"
+
+        class FakePE:
+            OPTIONAL_HEADER = SimpleNamespace(
+                MajorSubsystemVersion=6,
+                MinorSubsystemVersion=1,
+            )
+            DIRECTORY_ENTRY_DELAY_IMPORT = ()
+
+            def __init__(self, path: str):
+                if Path(path).name.casefold() == "msvcp140.dll":
+                    self.DIRECTORY_ENTRY_IMPORT = ()
+                    self.DIRECTORY_ENTRY_EXPORT = SimpleNamespace(
+                        symbols=(SimpleNamespace(name=b"?different@@", ordinal=1),)
+                    )
+                else:
+                    self.DIRECTORY_ENTRY_IMPORT = (
+                        SimpleNamespace(
+                            dll=b"MSVCP140.dll",
+                            imports=(SimpleNamespace(name=required_symbol, ordinal=None),),
+                        ),
+                    )
+
+            def parse_data_directories(self, *, directories):
+                self.directories = directories
+
+            def close(self):
+                pass
+
+        fake_pefile = SimpleNamespace(
+            DIRECTORY_ENTRY={
+                "IMAGE_DIRECTORY_ENTRY_IMPORT": 1,
+                "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT": 2,
+                "IMAGE_DIRECTORY_ENTRY_EXPORT": 3,
+            },
+            PE=lambda path, fast_load: FakePE(path),
+            PEFormatError=ValueError,
+        )
+        with patch.dict("sys.modules", {"pefile": fake_pefile}):
+            with self.assertRaisesRegex(RuntimeError, "不导出"):
+                build_windows.verify_win7_pe_compatibility(
+                    (Path("extension.pyd"), Path("msvcp140.dll"))
+                )
+
     def test_update_zip_and_windows_only_bridge_manifest_are_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
@@ -408,6 +816,54 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertFalse((app_dir / "HRToolkitUpdater.exe").exists())
             self.assertFalse((app_dir / "update_url.txt").exists())
 
+    def test_win7_bridge_manifest_uses_only_win7_update_channel(self) -> None:
+        filename = f"HRToolkit_{self.version}_win7_x64-setup.exe"
+        manifest = build_update_assets.legacy_server_manifest(
+            version=self.version,
+            filename=filename,
+            sha256="a" * 64,
+            notes=None,
+            mandatory=True,
+            target=build_windows.WINDOWS_TARGET_WIN7,
+        )
+        self.assertEqual(set(manifest["platforms"]), {"windows-x64-win7"})
+        self.assertNotIn("windows", manifest["platforms"])
+        self.assertTrue(
+            manifest["platforms"]["windows-x64-win7"]["file_url"].endswith(filename)
+        )
+
+    def test_win7_staged_payload_allows_only_pinned_root_runtimes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp)
+            for name in (
+                "HRToolkit.exe",
+                "HRToolkitUpdater.exe",
+                *build_windows.WIN7_REQUIRED_UCRT_FILES,
+                *build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+            ):
+                (payload / name).write_bytes(b"runtime")
+            (payload / "update_url.txt").write_text(
+                "\n".join(build_update_assets.UPDATE_MANIFEST_URLS) + "\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(build_update_assets, "verify_windows_payload"),
+                patch.object(build_update_assets, "verify_pe_x64"),
+            ):
+                build_update_assets.verify_staged_payload(
+                    payload,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+
+                extra = payload / "api-ms-win-core-path-l1-1-0.dll"
+                extra.write_bytes(b"forbidden")
+                with self.assertRaisesRegex(RuntimeError, "\u6839\u6587\u4ef6"):
+                    build_update_assets.verify_staged_payload(
+                        payload,
+                        target=build_windows.WINDOWS_TARGET_WIN7,
+                    )
+
     def test_installer_definitions_are_per_user_and_keep_payload_under_app_subdir(self) -> None:
         build_windows_installers.validate_installer_definitions()
         attributes = (build_windows.REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
@@ -417,6 +873,8 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("DefaultDirName={localappdata}\\Programs\\HRToolkit", iss)
         self.assertIn('DestDir: "{app}\\app"', iss)
         self.assertIn('Type: filesandordirs; Name: "{app}\\app"', iss)
+        self.assertIn("Check: ExistingPayloadIsWin7", iss)
+        self.assertIn("function ExistingPayloadIsWin7: Boolean;", iss)
         self.assertIn("SignTool={#SignToolName}", iss)
         self.assertIn("Compression=lzma2/max", iss)
         self.assertNotIn("Compression=lzma2/ultra64", iss)
@@ -432,6 +890,10 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIsNotNone(package)
         assert package is not None
         self.assertEqual(package.attrib["Scope"], "perUser")
+        major_upgrade = root.find(".//w:MajorUpgrade", namespace)
+        self.assertIsNotNone(major_upgrade)
+        assert major_upgrade is not None
+        self.assertEqual(major_upgrade.attrib["AllowSameVersionUpgrades"], "yes")
         media_template = root.find(".//w:MediaTemplate", namespace)
         self.assertIsNotNone(media_template)
         assert media_template is not None
@@ -477,6 +939,10 @@ class WindowsPackagingTests(unittest.TestCase):
             output_dir=Path("C:/assets"),
         )
         self.assertIn(f"/DMyAppVersion={self.version}", inno)
+        self.assertIn("/DInstallerSuffix=x64", inno)
+        self.assertIn("/DMinWindowsVersion=6.3", inno)
+        self.assertNotIn("/DWin7Compatibility=1", inno)
+        self.assertNotIn("/DCleanExistingPayload=1", inno)
         self.assertEqual(inno[-1], str(build_windows_installers.INNO_SCRIPT))
 
         wix = build_windows_installers.wix_build_command(
@@ -487,7 +953,26 @@ class WindowsPackagingTests(unittest.TestCase):
         )
         self.assertIn("x64", wix)
         self.assertIn(f"AppVersion={self.version}", wix)
+        self.assertIn("WindowsTarget=modern", wix)
         self.assertEqual(wix[-1], str(Path("C:/assets") / msi_name))
+
+        win7_exe, win7_msi = build_windows_installers.installer_asset_names(
+            self.version,
+            build_windows.WINDOWS_TARGET_WIN7,
+        )
+        self.assertEqual(win7_exe, f"HRToolkit_{self.version}_win7_x64-setup.exe")
+        self.assertEqual(win7_msi, f"HRToolkit_{self.version}_win7_x64.msi")
+        win7_inno = build_windows_installers.inno_compile_command(
+            compiler="ISCC.exe",
+            version=self.version,
+            payload_dir=Path("C:/payload"),
+            output_dir=Path("C:/assets"),
+            target=build_windows.WINDOWS_TARGET_WIN7,
+        )
+        self.assertIn("/DInstallerSuffix=win7_x64", win7_inno)
+        self.assertIn("/DMinWindowsVersion=6.1sp1", win7_inno)
+        self.assertIn("/DWin7Compatibility=1", win7_inno)
+        self.assertIn("/DCleanExistingPayload=1", win7_inno)
 
     def test_release_windows_only_orchestrates_three_stages_without_version_bump(self) -> None:
         commands = release_windows.stage_commands(
@@ -508,6 +993,22 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("git add", flat)
         self.assertNotIn("--publish-dir", flat)
 
+        win7_commands = release_windows.stage_commands(
+            version=self.version,
+            build_dir=Path("C:/build-win7"),
+            work_dir=Path("C:/work-win7"),
+            output_dir=Path("C:/assets-win7"),
+            target=build_windows.WINDOWS_TARGET_WIN7,
+            seven_zip_dir=Path("C:/runtime/7zip"),
+            ucrt_dir=Path("C:/runtime/ucrt"),
+            vc_runtime_dir=Path("C:/runtime/vc-runtime"),
+        )
+        win7_flat = "\n".join(" ".join(command) for _label, command in win7_commands)
+        self.assertEqual(win7_flat.count("--target win7"), 3)
+        self.assertIn("--seven-zip-dir", win7_flat)
+        self.assertIn("--ucrt-dir", win7_flat)
+        self.assertIn("--vc-runtime-dir", win7_flat)
+
     def test_release_workflow_mirrors_only_after_github_publish(self) -> None:
         workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
@@ -523,12 +1024,31 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("--upload-transport curl", mirror_job)
         self.assertIn('GITEE_MAX_ASSET_BYTES: "100000000"', mirror_job)
         self.assertIn('--primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe"', mirror_job)
+        self.assertIn(
+            '--primary-download-asset "HRToolkit_${VERSION}_win7_x64-setup.exe"',
+            mirror_job,
+        )
         self.assertIn('--max-asset-bytes "${GITEE_MAX_ASSET_BYTES}"', mirror_job)
         self.assertIn("http.postBuffer=1073741824", mirror_job)
         self.assertIn("http.version=HTTP/1.1", mirror_job)
         self.assertIn("push --atomic gitee", mirror_job)
         self.assertNotIn("git add", mirror_job)
         self.assertNotIn("git commit", mirror_job)
+
+    def test_clean_win7_acceptance_script_checks_installed_runtime_and_smoke(self) -> None:
+        script = (
+            build_windows.REPO_ROOT / "scripts" / "smoke_win7_installer.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn('Version -notlike "6.1.*"', script)
+        self.assertIn("ServicePackMajorVersion", script)
+        self.assertIn("python38.dll", script)
+        self.assertIn("vcruntime140_1.dll", script)
+        self.assertIn('(Join-Path $payload "ucrtbase.dll")', script)
+        self.assertNotIn('(Join-Path $internal "ucrtbase.dll")', script)
+        self.assertIn("api-ms-win-core-path-l1-1-0.dll", script)
+        self.assertIn("Remove-Item Env:\\HR_TOOLKIT_7ZIP_EXE", script)
+        self.assertIn('ArgumentList "--smoke-test"', script)
+        self.assertIn("HRToolkitUpdater $ExpectedVersion smoke-test OK", script)
 
     def test_gitee_source_sync_is_manual_and_never_publishes_a_release(self) -> None:
         workflow = (
@@ -563,9 +1083,88 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("--upload-transport curl", workflow)
         self.assertIn('GITEE_MAX_ASSET_BYTES: "100000000"', workflow)
         self.assertIn('--primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe"', workflow)
+        self.assertIn(
+            '--primary-download-asset "HRToolkit_${VERSION}_win7_x64-setup.exe"',
+            workflow,
+        )
         self.assertIn('--max-asset-bytes "${GITEE_MAX_ASSET_BYTES}"', workflow)
         self.assertNotIn("build_windows.py", workflow)
         self.assertNotIn("build_macos.py", workflow)
+
+    def test_win7_runtime_download_is_pinned_and_hash_verified(self) -> None:
+        self.assertEqual(prepare_win7_runtime.SEVEN_ZIP_VERSION, "26.02")
+        self.assertEqual(len(prepare_win7_runtime.SEVEN_ZIP_SHA256), 64)
+        self.assertIn("github.com/ip7z/7zip/releases/download/26.02", prepare_win7_runtime.SEVEN_ZIP_URL)
+        self.assertEqual(prepare_win7_runtime.UCRT_VERSION, "10.0.14393.795")
+        self.assertEqual(len(prepare_win7_runtime.UCRT_SHA256), 64)
+        self.assertIn("download.microsoft.com", prepare_win7_runtime.UCRT_URL)
+        self.assertIn(
+            "948a611cd2aca64b1e5113ffb7b95d5f.cab",
+            prepare_win7_runtime.UCRT_URL,
+        )
+        self.assertEqual(len(build_windows.WIN7_REQUIRED_UCRT_FILES), 41)
+        self.assertNotIn(
+            "api-ms-win-core-path-l1-1-0.dll",
+            build_windows.WIN7_REQUIRED_UCRT_FILES,
+        )
+        self.assertEqual(prepare_win7_runtime.VC_REDIST_VERSION, "14.29.30157")
+        self.assertEqual(len(prepare_win7_runtime.VC_REDIST_SHA256), 64)
+        self.assertIn("download.visualstudio.microsoft.com", prepare_win7_runtime.VC_REDIST_URL)
+        self.assertEqual(
+            set(WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES),
+            set(build_windows.WIN7_REQUIRED_UCRT_FILES)
+            | set(build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES),
+        )
+        self.assertEqual(
+            build_windows.WIN7_PINNED_DISTRIBUTIONS["onnxruntime"],
+            "1.11.1",
+        )
+        constraints = (
+            build_windows.REPO_ROOT / "constraints" / "python38-win7.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("onnxruntime==1.11.1", constraints)
+        self.assertNotIn("onnxruntime==1.14.1", constraints)
+
+    def test_win7_ucrt_archive_files_are_discovered_by_embedded_dll_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            extracted = Path(tmp) / "extracted"
+            extracted.mkdir()
+            expected = {
+                "api-ms-win-core-console-l1-1-0.dll": extracted / "fil-api-set",
+                "ucrtbase.dll": extracted / "fil-ucrtbase",
+            }
+            for name, path in expected.items():
+                self._write_fake_pe(path, build_windows.PE_MACHINE_AMD64)
+                with path.open("ab") as handle:
+                    handle.write(name.encode("utf-16le"))
+
+            with patch.object(
+                prepare_win7_runtime,
+                "WIN7_REQUIRED_UCRT_FILES",
+                tuple(expected),
+            ):
+                selected = prepare_win7_runtime._discover_ucrt_files(extracted)
+
+        self.assertEqual(selected, expected)
+
+    def test_win7_build_rejects_drift_from_compatibility_dependency_versions(self) -> None:
+        expected = build_windows.WIN7_PINNED_DISTRIBUTIONS
+        with patch.object(
+            build_windows.importlib_metadata,
+            "version",
+            side_effect=lambda distribution: expected[distribution],
+        ):
+            build_windows._ensure_win7_pinned_distributions()
+
+        with patch.object(
+            build_windows.importlib_metadata,
+            "version",
+            side_effect=lambda distribution: (
+                "1.12.1" if distribution == "onnxruntime" else expected[distribution]
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "onnxruntime=1.12.1"):
+                build_windows._ensure_win7_pinned_distributions()
 
     def test_installer_output_magic_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

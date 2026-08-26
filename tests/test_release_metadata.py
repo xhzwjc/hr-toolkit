@@ -74,8 +74,20 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertEqual(manifest["version"], self.VERSION)
             self.assertTrue(manifest["mandatory"])
             self.assertEqual(manifest["notes"], ["一次性桥接版本"])
-            self.assertEqual(set(manifest["platforms"]), {"windows", "macos"})
+            self.assertEqual(
+                set(manifest["platforms"]),
+                {"windows", "windows-x64-modern", "windows-x64-win7", "macos"},
+            )
             self.assertEqual(manifest["platforms"]["windows"]["update_mode"], "auto")
+            self.assertEqual(
+                manifest["platforms"]["windows"],
+                manifest["platforms"]["windows-x64-modern"],
+            )
+            self.assertTrue(
+                manifest["platforms"]["windows-x64-win7"]["file_url"].endswith(
+                    "_win7_x64-setup.exe"
+                )
+            )
             self.assertEqual(manifest["platforms"]["macos"]["update_mode"], "manual")
             self.assertEqual(
                 manifest["platforms"]["macos"]["file_url"],
@@ -105,7 +117,16 @@ class ReleaseMetadataTests(unittest.TestCase):
             )
 
             platforms = json.loads(latest_path.read_text(encoding="utf-8"))["platforms"]
-            self.assertEqual(set(platforms), {"windows", "macos-arm64", "macos-x64"})
+            self.assertEqual(
+                set(platforms),
+                {
+                    "windows",
+                    "windows-x64-modern",
+                    "windows-x64-win7",
+                    "macos-arm64",
+                    "macos-x64",
+                },
+            )
             self.assertEqual(platforms["macos-arm64"]["update_mode"], "manual")
             self.assertTrue(platforms["macos-arm64"]["file_url"].endswith("_arm64.dmg"))
             self.assertTrue(platforms["macos-x64"]["file_url"].endswith("_x64.dmg"))
@@ -134,7 +155,9 @@ class ReleaseMetadataTests(unittest.TestCase):
 
             manifest = json.loads(latest_path.read_text(encoding="utf-8"))
             windows = manifest["platforms"]["windows"]
+            win7 = manifest["platforms"]["windows-x64-win7"]
             self.assertTrue(windows["file_url"].startswith("https://gitee.com/"))
+            self.assertTrue(win7["file_url"].startswith("https://gitee.com/"))
             self.assertEqual(
                 windows["fallback_urls"],
                 [
@@ -152,6 +175,7 @@ class ReleaseMetadataTests(unittest.TestCase):
             assets_dir = Path(temporary)
             self._write_assets(assets_dir, "universal2")
             windows_installer = f"HRToolkit_{self.VERSION}_x64-setup.exe"
+            win7_installer = f"HRToolkit_{self.VERSION}_win7_x64-setup.exe"
 
             latest_path, _checksums_path, _names = release_metadata.generate_release_metadata(
                 assets_dir,
@@ -169,7 +193,7 @@ class ReleaseMetadataTests(unittest.TestCase):
                     "https://github.com/xhzwjc/hr-toolkit/releases/download"
                 ),
                 primary_download_max_bytes=100_000_000,
-                primary_download_asset_names=(windows_installer,),
+                primary_download_asset_names=(windows_installer, win7_installer),
             )
 
             platforms = json.loads(latest_path.read_text(encoding="utf-8"))["platforms"]
@@ -177,6 +201,9 @@ class ReleaseMetadataTests(unittest.TestCase):
                 platforms["windows"]["file_url"].startswith("https://gitee.com/")
             )
             self.assertEqual(len(platforms["windows"]["fallback_urls"]), 1)
+            self.assertTrue(
+                platforms["windows-x64-win7"]["file_url"].startswith("https://gitee.com/")
+            )
             self.assertTrue(
                 platforms["macos"]["file_url"].startswith("https://github.com/")
             )
@@ -198,7 +225,7 @@ class ReleaseMetadataTests(unittest.TestCase):
                     "https://github.com/xhzwjc/hr-toolkit/releases/download"
                 ),
                 primary_download_max_bytes=1,
-                primary_download_asset_names=(windows_installer,),
+                primary_download_asset_names=(windows_installer, win7_installer),
             )
             windows = json.loads(latest_path.read_text(encoding="utf-8"))["platforms"][
                 "windows"

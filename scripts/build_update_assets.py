@@ -20,10 +20,19 @@ if str(SCRIPT_DIR) not in sys.path:
 from build_windows import (
     APP_NAME,
     UPDATER_NAME,
+    WIN7_REQUIRED_UCRT_FILES,
+    WIN7_REQUIRED_VC_RUNTIME_FILES,
+    WINDOWS_TARGET_MODERN,
+    WINDOWS_TARGET_WIN7,
+    WINDOWS_TARGETS,
+    _payload_pe_files,
     run_runtime_smoke,
     validate_build_version,
+    validate_windows_target,
+    verify_win7_pe_compatibility,
     verify_pe_x64,
     verify_windows_payload,
+    windows_setup_asset_name,
 )
 
 
@@ -40,6 +49,7 @@ UPDATE_MANIFEST_URLS = (
     GITHUB_LATEST_MANIFEST_URL,
 )
 LEGACY_MANIFEST_NAME = "legacy-server-latest.json"
+WIN7_LEGACY_MANIFEST_NAME = "legacy-server-latest-win7.json"
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
@@ -53,6 +63,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True, type=Path, help="更新资产输出目录")
     parser.add_argument("--notes", nargs="*", default=None, help="旧服务器桥接更新说明")
     parser.add_argument("--optional", action="store_true", help="旧服务器桥接清单标记为可选更新")
+    parser.add_argument(
+        "--target",
+        choices=WINDOWS_TARGETS,
+        default=WINDOWS_TARGET_MODERN,
+        help="modern 保持现有更新资产；win7 生成独立的 Windows 7 更新资产",
+    )
     parser.add_argument(
         "--skip-runtime-smoke",
         action="store_true",
@@ -69,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         notes=args.notes,
         mandatory=not args.optional,
         runtime_smoke=not args.skip_runtime_smoke,
+        target=args.target,
     )
     print(f"Windows 安装更新包：{setup_path}")
     print(f"旧服务器桥接清单：{manifest_path}")
@@ -84,23 +101,31 @@ def build_update_assets(
     notes: list[str] | None = None,
     mandatory: bool = True,
     runtime_smoke: bool = True,
+    target: str = WINDOWS_TARGET_MODERN,
 ) -> tuple[Path, Path]:
     validate_build_version(version)
+    target = validate_windows_target(target)
     output_dir.mkdir(parents=True, exist_ok=True)
-    setup_name = f"HRToolkit_{version}_x64-setup.exe"
+    setup_name = windows_setup_asset_name(version, target)
     setup_path = output_dir / setup_name
-    manifest_path = output_dir / LEGACY_MANIFEST_NAME
+    manifest_path = output_dir / legacy_manifest_name(target)
 
     if runtime_smoke:
         with tempfile.TemporaryDirectory(prefix="hr_toolkit_windows_payload_") as tmp:
             payload_dir = Path(tmp) / APP_NAME
-            stage_windows_payload(app_dir=app_dir, updater=updater, target_dir=payload_dir)
+            stage_windows_payload(
+                app_dir=app_dir,
+                updater=updater,
+                target_dir=payload_dir,
+                target=target,
+            )
             run_runtime_smoke(
                 payload_dir / f"{APP_NAME}.exe",
                 payload_dir / f"{UPDATER_NAME}.exe",
+                target=target,
             )
     else:
-        verify_windows_update_sources(app_dir=app_dir, updater=updater)
+        verify_windows_update_sources(app_dir=app_dir, updater=updater, target=target)
 
     digest = sha256_file(setup_path) if setup_path.exists() else ("0" * 64)
     manifest = legacy_server_manifest(
@@ -109,13 +134,21 @@ def build_update_assets(
         sha256=digest,
         notes=notes,
         mandatory=mandatory,
+        target=target,
     )
     _write_json_atomically(manifest_path, manifest)
     return setup_path, manifest_path
 
 
-def stage_windows_payload(*, app_dir: Path, updater: Path, target_dir: Path) -> Path:
-    verify_windows_update_sources(app_dir=app_dir, updater=updater)
+def stage_windows_payload(
+    *,
+    app_dir: Path,
+    updater: Path,
+    target_dir: Path,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> Path:
+    target = validate_windows_target(target)
+    verify_windows_update_sources(app_dir=app_dir, updater=updater, target=target)
     if target_dir.exists():
         raise RuntimeError(f"staging 目录必须不存在：{target_dir}")
 
@@ -125,20 +158,33 @@ def stage_windows_payload(*, app_dir: Path, updater: Path, target_dir: Path) -> 
         "\n".join(UPDATE_MANIFEST_URLS) + "\n",
         encoding="utf-8",
     )
-    verify_staged_payload(target_dir)
+    verify_staged_payload(target_dir, target=target)
     return target_dir
 
 
-def verify_windows_update_sources(*, app_dir: Path, updater: Path) -> None:
-    verify_windows_payload(app_dir)
+def verify_windows_update_sources(
+    *,
+    app_dir: Path,
+    updater: Path,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
+    target = validate_windows_target(target)
+    verify_windows_payload(app_dir, target=target)
     verify_pe_x64(app_dir / f"{APP_NAME}.exe")
     verify_pe_x64(updater)
+    if target == WINDOWS_TARGET_WIN7:
+        verify_win7_pe_compatibility((*_payload_pe_files(app_dir), updater))
     if updater.name.lower() != f"{UPDATER_NAME}.exe".lower():
         raise RuntimeError(f"更新程序名称必须为 {UPDATER_NAME}.exe：{updater}")
 
 
-def verify_staged_payload(payload_dir: Path) -> None:
-    verify_windows_payload(payload_dir)
+def verify_staged_payload(
+    payload_dir: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> None:
+    target = validate_windows_target(target)
+    verify_windows_payload(payload_dir, target=target)
     verify_pe_x64(payload_dir / f"{APP_NAME}.exe")
     verify_pe_x64(payload_dir / f"{UPDATER_NAME}.exe")
     root_files = {path.name for path in payload_dir.iterdir() if path.is_file()}
@@ -147,6 +193,9 @@ def verify_staged_payload(payload_dir: Path) -> None:
         f"{UPDATER_NAME}.exe",
         "update_url.txt",
     }
+    if target == WINDOWS_TARGET_WIN7:
+        expected_root_files.update(WIN7_REQUIRED_UCRT_FILES)
+        expected_root_files.update(WIN7_REQUIRED_VC_RUNTIME_FILES)
     if root_files != expected_root_files:
         raise RuntimeError(
             f"Windows 更新 payload 根文件不符合白名单，实际={sorted(root_files)}"
@@ -158,6 +207,11 @@ def verify_staged_payload(payload_dir: Path) -> None:
     )
     if update_urls != UPDATE_MANIFEST_URLS:
         raise RuntimeError(f"update_url.txt 地址不正确：{update_urls}")
+
+
+def legacy_manifest_name(target: str = WINDOWS_TARGET_MODERN) -> str:
+    target = validate_windows_target(target)
+    return WIN7_LEGACY_MANIFEST_NAME if target == WINDOWS_TARGET_WIN7 else LEGACY_MANIFEST_NAME
 
 
 def update_zip_name(version: str) -> str:
@@ -172,8 +226,10 @@ def legacy_server_manifest(
     sha256: str,
     notes: list[str] | None,
     mandatory: bool,
+    target: str = WINDOWS_TARGET_MODERN,
 ) -> dict:
     validate_build_version(version)
+    target = validate_windows_target(target)
     if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256.lower()):
         raise ValueError("sha256 必须是 64 位十六进制字符串。")
     gitee_release_url = (
@@ -185,12 +241,13 @@ def legacy_server_manifest(
     normalized_notes = [str(note).strip() for note in (notes or []) if str(note).strip()]
     if not normalized_notes:
         normalized_notes = [f"升级 HRToolkit 至 {version}"]
+    platform_name = "windows-x64-win7" if target == WINDOWS_TARGET_WIN7 else "windows"
     return {
         "version": version,
         "mandatory": bool(mandatory),
         "notes": normalized_notes,
         "platforms": {
-            "windows": {
+            platform_name: {
                 "version": version,
                 "file_url": gitee_release_url,
                 "fallback_urls": [github_release_url],

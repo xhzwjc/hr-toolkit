@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
 import stat
+import subprocess
+import sys
 import tarfile
+import tempfile
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -10,6 +14,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .excel_compat import is_supported_excel_file
+from .paths import path_is_relative_to
 
 
 _ZIP_UTF8_FLAG = 0x0800
@@ -39,6 +44,9 @@ ARCHIVE_MAX_COMPRESSION_RATIO = 200
 ARCHIVE_RATIO_CHECK_MIN_BYTES = 1024 * 1024
 ARCHIVE_COPY_BUFFER_BYTES = 1024 * 1024
 ARCHIVE_MIN_FREE_SPACE_BYTES = 128 * 1024 * 1024
+ARCHIVE_7ZIP_TIMEOUT_SECONDS = 180
+ARCHIVE_7ZIP_ENV = "HR_TOOLKIT_7ZIP_EXE"
+ARCHIVE_7ZIP_PASSWORD_SENTINEL = "__HR_TOOLKIT_NO_PASSWORD__"
 
 
 @dataclass(frozen=True)
@@ -226,7 +234,17 @@ def _extract_rar(archive_path: Path, extract_dir: Path, temp_dir: Path, warnings
     try:
         from unrar.cffi.unrarlib import FLAGS_RHDF_DIRECTORY, RarArchive
     except ImportError as exc:  # pragma: no cover - 安装/打包检查覆盖
-        raise RuntimeError("RAR 解压组件未安装完整") from exc
+        seven_zip = _bundled_7zip_executable()
+        if seven_zip is None:
+            raise RuntimeError("RAR 解压组件未安装完整") from exc
+        _extract_with_7zip_cli(
+            seven_zip,
+            archive_path,
+            extract_dir,
+            temp_dir,
+            warnings,
+        )
+        return
 
     members: list[_ArchiveMember] = []
     with RarArchive.open_for_processing(archive_path) as archive:
@@ -303,7 +321,32 @@ def _extract_7z(archive_path: Path, extract_dir: Path, temp_dir: Path, warnings:
     try:
         import py7zr
     except ImportError as exc:  # pragma: no cover - 安装/打包检查覆盖
-        raise RuntimeError("7Z 解压组件未安装完整") from exc
+        seven_zip = _bundled_7zip_executable()
+        if seven_zip is None:
+            raise RuntimeError("7Z 解压组件未安装完整") from exc
+        _extract_with_7zip_cli(
+            seven_zip,
+            archive_path,
+            extract_dir,
+            temp_dir,
+            warnings,
+        )
+        return
+
+    # Python 3.8 可用的 py7zr 0.22 尚未提供 WriterFactory。Win7 构建随包
+    # 携带官方 7-Zip，旧运行时只走该兼容分支；现代构建继续使用现有流式实现。
+    if not hasattr(py7zr, "WriterFactory"):
+        seven_zip = _bundled_7zip_executable()
+        if seven_zip is None:
+            raise RuntimeError("7Z 解压组件版本过旧，且未找到兼容运行时")
+        _extract_with_7zip_cli(
+            seven_zip,
+            archive_path,
+            extract_dir,
+            temp_dir,
+            warnings,
+        )
+        return
 
     with py7zr.SevenZipFile(archive_path, mode="r") as archive:
         if archive.password_protected:
@@ -348,6 +391,246 @@ def _extract_7z(archive_path: Path, extract_dir: Path, temp_dir: Path, warnings:
         except Exception:
             factory.abort()
             raise
+
+
+def _bundled_7zip_executable() -> Path | None:
+    candidates: list[Path] = []
+    override = os.environ.get(ARCHIVE_7ZIP_ENV, "").strip()
+    if override:
+        candidates.append(Path(override).expanduser())
+
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        root = Path(bundle_root)
+        candidates.extend(
+            (
+                root / "third_party" / "7zip" / "7z.exe",
+                root / "third_party" / "7zip" / "7zz",
+            )
+        )
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _extract_with_7zip_cli(
+    executable: Path,
+    archive_path: Path,
+    extract_dir: Path,
+    temp_dir: Path,
+    warnings: list[str],
+) -> None:
+    listing = _run_7zip_cli(
+        executable,
+        [
+            "l",
+            "-slt",
+            "-sccUTF-8",
+            f"-p{ARCHIVE_7ZIP_PASSWORD_SENTINEL}",
+            "--",
+            str(archive_path.resolve()),
+        ],
+    )
+    members = _parse_7zip_slt(listing)
+    plans = _validate_archive_members(
+        archive_path,
+        members,
+        temp_dir,
+        warnings,
+        archive_compressed_bytes=archive_path.stat().st_size,
+    )
+    for plan in plans:
+        if plan.member.is_dir:
+            _target_for_plan(extract_dir, plan).mkdir(parents=True, exist_ok=True)
+
+    selected = [plan.member.name for plan in plans if not plan.member.is_dir]
+    if not selected:
+        return
+
+    list_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix="hr_toolkit_7zip_members_",
+            suffix=".txt",
+            dir=temp_dir,
+            delete=False,
+        ) as handle:
+            for name in selected:
+                if "\r" in name or "\n" in name:
+                    raise ValueError("压缩包成员名称包含不支持的换行符")
+                handle.write(name + "\n")
+            list_path = Path(handle.name)
+
+        _run_7zip_cli(
+            executable,
+            [
+                "x",
+                "-y",
+                "-bd",
+                "-bb0",
+                "-sccUTF-8",
+                "-scsUTF-8",
+                "-spd",
+                f"-p{ARCHIVE_7ZIP_PASSWORD_SENTINEL}",
+                f"-o{extract_dir.resolve()}",
+                str(archive_path.resolve()),
+                f"@{list_path.resolve()}",
+            ],
+        )
+    finally:
+        if list_path is not None:
+            list_path.unlink(missing_ok=True)
+
+    _verify_7zip_extracted_files(extract_dir, plans)
+
+
+def _parse_7zip_slt(output: str) -> list[_ArchiveMember]:
+    marker = "\n----------\n"
+    if marker not in output:
+        raise ValueError("7-Zip 未返回可验证的文件列表")
+    member_output = output.split(marker, 1)[1].strip("\n")
+    if not member_output:
+        return []
+
+    members: list[_ArchiveMember] = []
+    for block in member_output.split("\n\n"):
+        fields: dict[str, str] = {}
+        for line in block.splitlines():
+            if not line:
+                continue
+            if " = " not in line:
+                raise ValueError("7-Zip 文件列表包含无法解析的成员")
+            key, value = line.split(" = ", 1)
+            if key in fields:
+                raise ValueError(f"7-Zip 文件列表包含重复字段：{key}")
+            fields[key] = value
+
+        name = fields.get("Path", "")
+        if not name or "\r" in name or "\n" in name:
+            raise ValueError("7-Zip 文件列表包含无效成员名称")
+        if fields.get("Encrypted") == "+":
+            raise ValueError("暂不支持带密码的压缩包")
+
+        is_dir = fields.get("Folder") == "+"
+        attributes = fields.get("Attributes", "")
+        link_target = next(
+            (
+                fields.get(key, "").strip()
+                for key in ("Symbolic Link", "Hard Link", "Copy Link")
+                if fields.get(key, "").strip()
+            ),
+            "",
+        )
+        posix_type = _7zip_posix_file_type(attributes)
+        is_link = bool(link_target) or posix_type == "l"
+        is_special = (
+            posix_type in {"b", "c", "p", "s"}
+            or fields.get("Alternate Stream") == "+"
+            or fields.get("Anti") == "+"
+        )
+        members.append(
+            _ArchiveMember(
+                token=name,
+                name=name,
+                file_size=_7zip_size(fields.get("Size"), name),
+                compress_size=_7zip_optional_size(fields.get("Packed Size"), name),
+                is_dir=is_dir,
+                is_link=is_link,
+                is_regular=is_dir or (not is_link and not is_special),
+            )
+        )
+    return members
+
+
+def _7zip_posix_file_type(attributes: str) -> str | None:
+    for token in attributes.split():
+        if len(token) >= 10 and token[0] in {"-", "b", "c", "d", "l", "p", "s"}:
+            return token[0]
+    return None
+
+
+def _7zip_size(value: str | None, name: str) -> int:
+    if value is None or not value.strip().isdigit():
+        raise ValueError(f"7-Zip 文件列表缺少有效大小：{name}")
+    return int(value.strip())
+
+
+def _7zip_optional_size(value: str | None, name: str) -> int | None:
+    if value is None or not value.strip():
+        return None
+    if not value.strip().isdigit():
+        raise ValueError(f"7-Zip 文件列表包含无效压缩大小：{name}")
+    return int(value.strip())
+
+
+def _run_7zip_cli(executable: Path, arguments: list[str]) -> str:
+    command = [str(executable), *arguments]
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=ARCHIVE_7ZIP_TIMEOUT_SECONDS,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"7-Zip 无法启动或执行超时：{exc}") from exc
+    if result.returncode != 0:
+        lowered = result.stdout.casefold()
+        if "password" in lowered or "encrypted" in lowered:
+            raise ValueError("暂不支持带密码的压缩包")
+        raise RuntimeError(f"7-Zip 处理失败（退出码 {result.returncode}）")
+    return result.stdout
+
+
+def _verify_7zip_extracted_files(
+    extract_dir: Path,
+    plans: list[_ArchiveMemberPlan],
+) -> None:
+    expected = {
+        "/".join(plan.parts).casefold(): plan
+        for plan in plans
+        if not plan.member.is_dir
+    }
+    actual: set[str] = set()
+    actual_total = 0
+    for path in extract_dir.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"7-Zip 解压结果包含链接：{path.name}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f"7-Zip 解压结果包含特殊文件：{path.name}")
+        relative = path.relative_to(extract_dir)
+        key = "/".join(part.casefold() for part in relative.parts)
+        plan = expected.get(key)
+        if plan is None or key in actual:
+            raise ValueError(f"7-Zip 解压了未通过安全校验的成员：{relative.as_posix()}")
+        size = path.stat().st_size
+        if size != plan.member.file_size:
+            raise ValueError(f"压缩包成员实际大小不一致：{plan.member.name}")
+        actual_total += size
+        if actual_total > ARCHIVE_MAX_TOTAL_BYTES:
+            raise ValueError("解压后的文件大小超过安全上限")
+        actual.add(key)
+
+    missing = sorted(set(expected) - actual)
+    if missing:
+        raise ValueError(f"7-Zip 未解压预期成员：{expected[missing[0]].member.name}")
 
 
 def _extract_tar(archive_path: Path, extract_dir: Path, temp_dir: Path, warnings: list[str]) -> None:
@@ -460,7 +743,7 @@ def _validate_archive_free_space(temp_dir: Path, required_bytes: int) -> None:
 def _target_for_plan(extract_dir: Path, plan: _ArchiveMemberPlan) -> Path:
     extract_root = extract_dir.resolve()
     target = extract_dir.joinpath(*plan.parts).resolve()
-    if not target.is_relative_to(extract_root):
+    if not path_is_relative_to(target, extract_root):
         raise ValueError(f"压缩包成员路径不安全：{plan.member.name}")
     return target
 

@@ -16,6 +16,7 @@ from hr_toolkit.runtime_checks import (
     run_headless_command,
     smoke_test,
 )
+from hr_toolkit.update_runner import main as update_runner_main
 
 
 class RuntimeChecksTest(unittest.TestCase):
@@ -105,6 +106,19 @@ class RuntimeChecksTest(unittest.TestCase):
             self.assertEqual(
                 output.read_text(encoding="utf-8"),
                 f"HRToolkit {__version__} update-smoke-test OK; latest=0.2.1\n",
+            )
+
+    def test_updater_smoke_command_is_headless_and_machine_verifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "updater-smoke.txt"
+            os.environ[CHECK_OUTPUT_ENV] = str(output)
+            try:
+                self.assertEqual(update_runner_main(["--smoke-test"]), 0)
+            finally:
+                os.environ.pop(CHECK_OUTPUT_ENV, None)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"),
+                f"HRToolkitUpdater {__version__} smoke-test OK\n",
             )
 
     def test_module_entrypoint_reports_version_without_starting_gui(self) -> None:

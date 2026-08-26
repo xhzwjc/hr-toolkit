@@ -10,6 +10,12 @@
 #ifndef SetupIconFile
   #error SetupIconFile must be provided by build_windows_installers.py
 #endif
+#ifndef InstallerSuffix
+  #error InstallerSuffix must be provided by build_windows_installers.py
+#endif
+#ifndef MinWindowsVersion
+  #error MinWindowsVersion must be provided by build_windows_installers.py
+#endif
 
 #define MyAppName "HRToolkit"
 #define MyAppPublisher "xhzwjc"
@@ -27,8 +33,12 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion={#MinWindowsVersion}
+#ifdef Win7Compatibility
+OnlyBelowVersion=6.3
+#endif
 OutputDir={#OutputDir}
-OutputBaseFilename=HRToolkit_{#MyAppVersion}_x64-setup
+OutputBaseFilename=HRToolkit_{#MyAppVersion}_{#InstallerSuffix}-setup
 SetupIconFile={#SetupIconFile}
 UninstallDisplayIcon={app}\app\{#MyAppExeName}
 Compression=lzma2/max
@@ -58,6 +68,15 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 ; HRToolkitUpdater 只替换 sys.executable.parent，因此不会删除 unins*.exe。
 Source: "{#SourceDir}\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+#ifdef CleanExistingPayload
+; Win7 首次安装会替换原现代 payload，避免 Python 3.12 DLL 残留混用。
+Type: filesandordirs; Name: "{app}\app"
+#else
+; 仅当现代包替换已安装的 Win7 payload 时清理；普通现代版安装不受影响。
+Type: filesandordirs; Name: "{app}\app"; Check: ExistingPayloadIsWin7
+#endif
+
 [Icons]
 Name: "{userprograms}\HRToolkit"; Filename: "{app}\app\{#MyAppExeName}"; WorkingDir: "{app}\app"
 Name: "{userdesktop}\HRToolkit"; Filename: "{app}\app\{#MyAppExeName}"; WorkingDir: "{app}\app"; Tasks: desktopicon
@@ -69,3 +88,11 @@ Filename: "{app}\app\{#MyAppExeName}"; Description: "启动 HRToolkit"; Flags: n
 ; 自更新可能改变 payload 文件集合，卸载时递归清理 app 子目录。
 Type: filesandordirs; Name: "{app}\app"
 Type: dirifempty; Name: "{app}"
+
+#ifndef CleanExistingPayload
+[Code]
+function ExistingPayloadIsWin7: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\app\_internal\python38.dll'));
+end;
+#endif

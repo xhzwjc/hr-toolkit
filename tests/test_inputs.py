@@ -9,11 +9,13 @@ import unittest
 import warnings as warnings_module
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from openpyxl import Workbook
 import py7zr
 
+from hr_toolkit.common import inputs as inputs_module
 from hr_toolkit.common.inputs import (
     SUPPORTED_ARCHIVE_SUFFIX_SET,
     archive_stem,
@@ -253,6 +255,58 @@ class ExtractZipExcelFilesTest(unittest.TestCase):
 
 
 class ArchiveFormatCompatibilityTest(unittest.TestCase):
+    def test_python38_py7zr_uses_bundled_7zip_compatibility_path(self) -> None:
+        legacy_py7zr = SimpleNamespace(SevenZipFile=object)
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            executable = root / "7z.exe"
+            executable.write_bytes(b"runtime")
+            with (
+                patch.dict("sys.modules", {"py7zr": legacy_py7zr}),
+                patch.object(
+                    inputs_module,
+                    "_bundled_7zip_executable",
+                    return_value=executable,
+                ),
+                patch.object(inputs_module, "_extract_with_7zip_cli") as extractor,
+            ):
+                inputs_module._extract_7z(
+                    root / "input.7z",
+                    root / "extract",
+                    root,
+                    [],
+                )
+
+        extractor.assert_called_once()
+        self.assertEqual(extractor.call_args.args[0], executable)
+
+    def test_7zip_listing_parser_marks_links_and_preserves_sizes(self) -> None:
+        listing = """7-Zip 26.02
+
+----------
+Path = normal.xlsx
+Size = 12
+Packed Size = 8
+Folder = -
+Attributes = A
+Encrypted = -
+
+Path = link.xlsx
+Size = 11
+Packed Size = 7
+Folder = -
+Attributes = lrwxrwxrwx
+Symbolic Link = normal.xlsx
+Encrypted = -
+"""
+        members = inputs_module._parse_7zip_slt(listing)
+
+        self.assertEqual([member.name for member in members], ["normal.xlsx", "link.xlsx"])
+        self.assertEqual(members[0].file_size, 12)
+        self.assertEqual(members[0].compress_size, 8)
+        self.assertFalse(members[0].is_link)
+        self.assertTrue(members[1].is_link)
+
     def test_supported_suffixes_and_multisuffix_stems_are_explicit(self) -> None:
         self.assertEqual(
             SUPPORTED_ARCHIVE_SUFFIX_SET,

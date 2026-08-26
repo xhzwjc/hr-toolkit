@@ -1,0 +1,25 @@
+HRToolkit Windows 7 compatibility build - third-party runtime notice
+
+This build includes unmodified 7-Zip 26.02 x64 runtime files (7z.exe and
+7z.dll) for archive extraction on Windows 7 SP1.
+
+7-Zip Copyright (C) Igor Pavlov.
+7-Zip is licensed mainly under GNU LGPL version 2.1 or later. Some parts use
+the BSD 3-clause License, and the unRAR code has an additional restriction.
+The complete upstream license text is included as License.txt beside the
+runtime files.
+
+Project and source:
+https://www.7-zip.org/
+https://github.com/ip7z/7zip/tree/26.02
+
+This build also includes app-local Microsoft Visual C++ 2015-2019 x64 runtime
+files from Redistributable version 14.29.30157 and app-local Universal CRT files
+from Microsoft Windows SDK version 10.0.14393.795. These files are redistributed
+for use by this application under the applicable Microsoft software license
+terms.
+
+Microsoft deployment documentation:
+https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files
+https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
+https://learn.microsoft.com/cpp/windows/universal-crt-deployment

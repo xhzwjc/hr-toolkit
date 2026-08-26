@@ -48,6 +48,52 @@ UPDATE_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
 UPDATE_PACKAGE_MAX_BYTES = 4 * 1024 * 1024 * 1024
 UPDATE_UPDATER_MAX_BYTES = 256 * 1024 * 1024
 UPDATE_ZIP_MAX_COMPRESSION_RATIO = 1000
+WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES = (
+    "api-ms-win-core-console-l1-1-0.dll",
+    "api-ms-win-core-datetime-l1-1-0.dll",
+    "api-ms-win-core-debug-l1-1-0.dll",
+    "api-ms-win-core-errorhandling-l1-1-0.dll",
+    "api-ms-win-core-file-l1-1-0.dll",
+    "api-ms-win-core-file-l1-2-0.dll",
+    "api-ms-win-core-file-l2-1-0.dll",
+    "api-ms-win-core-handle-l1-1-0.dll",
+    "api-ms-win-core-heap-l1-1-0.dll",
+    "api-ms-win-core-interlocked-l1-1-0.dll",
+    "api-ms-win-core-libraryloader-l1-1-0.dll",
+    "api-ms-win-core-localization-l1-2-0.dll",
+    "api-ms-win-core-memory-l1-1-0.dll",
+    "api-ms-win-core-namedpipe-l1-1-0.dll",
+    "api-ms-win-core-processenvironment-l1-1-0.dll",
+    "api-ms-win-core-processthreads-l1-1-0.dll",
+    "api-ms-win-core-processthreads-l1-1-1.dll",
+    "api-ms-win-core-profile-l1-1-0.dll",
+    "api-ms-win-core-rtlsupport-l1-1-0.dll",
+    "api-ms-win-core-string-l1-1-0.dll",
+    "api-ms-win-core-synch-l1-1-0.dll",
+    "api-ms-win-core-synch-l1-2-0.dll",
+    "api-ms-win-core-sysinfo-l1-1-0.dll",
+    "api-ms-win-core-timezone-l1-1-0.dll",
+    "api-ms-win-core-util-l1-1-0.dll",
+    "api-ms-win-crt-conio-l1-1-0.dll",
+    "api-ms-win-crt-convert-l1-1-0.dll",
+    "api-ms-win-crt-environment-l1-1-0.dll",
+    "api-ms-win-crt-filesystem-l1-1-0.dll",
+    "api-ms-win-crt-heap-l1-1-0.dll",
+    "api-ms-win-crt-locale-l1-1-0.dll",
+    "api-ms-win-crt-math-l1-1-0.dll",
+    "api-ms-win-crt-multibyte-l1-1-0.dll",
+    "api-ms-win-crt-private-l1-1-0.dll",
+    "api-ms-win-crt-process-l1-1-0.dll",
+    "api-ms-win-crt-runtime-l1-1-0.dll",
+    "api-ms-win-crt-stdio-l1-1-0.dll",
+    "api-ms-win-crt-string-l1-1-0.dll",
+    "api-ms-win-crt-time-l1-1-0.dll",
+    "api-ms-win-crt-utility-l1-1-0.dll",
+    "ucrtbase.dll",
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+)
 
 
 class UpdateError(RuntimeError):
@@ -345,6 +391,9 @@ def launch_update_replacement(
     else:
         _append_update_log(log_file, f"使用更新包中的更新程序：{temp_updater}")
 
+    if _stage_win7_updater_app_local_runtimes(app_dir, temp_updater.parent):
+        _append_update_log(log_file, "已为 Win7 临时更新程序复制 app-local UCRT/VC 运行库。")
+
     if not sys.platform.startswith("win"):
         temp_updater.chmod(temp_updater.stat().st_mode | 0o111)
 
@@ -366,6 +415,17 @@ def launch_update_replacement(
     ]
     _append_update_log(log_file, "更新程序参数：" + " ".join(args[1:]))
     subprocess.Popen(args, cwd=str(app_dir.parent), close_fds=True)
+
+
+def _stage_win7_updater_app_local_runtimes(app_dir: Path, target_dir: Path) -> bool:
+    if not sys.platform.startswith("win") or _windows_platform_key() != "windows-x64-win7":
+        return False
+    for name in WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES:
+        source = app_dir / name
+        if source.is_symlink() or not source.is_file():
+            raise UpdateError(f"Win7 更新运行库缺失或不是普通文件：{name}")
+        shutil.copy2(source, target_dir / name)
+    return True
 
 
 def find_updater_executable(app_dir: Path) -> Path:
@@ -569,10 +629,29 @@ def is_newer_version(remote_version: str, current_version: str) -> bool:
 
 def platform_key() -> str:
     if sys.platform.startswith("win"):
-        return "windows"
+        return _windows_platform_key()
     if sys.platform == "darwin":
         return "macos"
     return "linux"
+
+
+def _windows_platform_key() -> str:
+    try:
+        version = sys.getwindowsversion()
+        platform_version = getattr(version, "platform_version", ())
+        if len(platform_version) >= 2:
+            major_minor = (int(platform_version[0]), int(platform_version[1]))
+        else:
+            major_minor = (int(version.major), int(version.minor))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        # 非 Windows 单元测试或异常运行时保守选择现代通道，不把现代机器
+        # 错误降级到已经冻结依赖的 Win7 构建。
+        return "windows-x64-modern"
+    # Python 3.12 requires Windows 8.1 or newer. Keep Windows 7 SP1 and
+    # Windows 8/Server 2012 on the frozen Python 3.8 compatibility lane.
+    if (6, 1) <= major_minor < (6, 3):
+        return "windows-x64-win7"
+    return "windows-x64-modern"
 
 
 def _platform_payload(manifest: dict[str, Any], platform: str) -> dict[str, Any]:
@@ -588,9 +667,15 @@ def _platform_payload(manifest: dict[str, Any], platform: str) -> dict[str, Any]
         else:
             architecture_aliases = ()
         aliases = architecture_aliases + ("macos", "darwin", "mac")
+    elif platform == "windows-x64-win7":
+        # Win7 兼容包绝不能退回通用 windows 项，否则会重新下载 Python 3.12
+        # 现代包并在下次启动时触发 KERNEL32.dll 入口点错误。
+        aliases = ("windows-x64-win7", "windows-win7")
+    elif platform == "windows-x64-modern":
+        aliases = ("windows-x64-modern", "windows", "win", "win32")
     else:
         aliases = {
-            "windows": ("windows", "win", "win32"),
+            "windows": ("windows", "windows-x64-modern", "win", "win32"),
             "linux": ("linux",),
         }.get(platform, (platform,))
     for key in aliases:

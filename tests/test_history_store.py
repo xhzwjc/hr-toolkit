@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from hr_toolkit.common.paths import path_is_relative_to
 from hr_toolkit.history_store import (
     DATA_DIR_ENV,
     SCHEMA_SQL,
@@ -296,7 +297,7 @@ class HistoryStoreTests(unittest.TestCase):
         recovered = reopened.get_task(task_id)
         assert recovered is not None
         self.assertTrue(recovered.task_dir.is_dir())
-        self.assertTrue(recovered.task_dir.is_relative_to(reopened.records_dir))
+        self.assertTrue(path_is_relative_to(recovered.task_dir, reopened.records_dir))
         self.assertFalse(marker.exists())
 
     def test_pending_trash_move_is_normalized_before_database_rebuild(self) -> None:
@@ -325,7 +326,7 @@ class HistoryStoreTests(unittest.TestCase):
         reopened = HistoryStore(self.store.root)
         recovered = reopened.get_task(task_id)
         assert recovered is not None
-        self.assertTrue(recovered.task_dir.is_relative_to(reopened.records_dir))
+        self.assertTrue(path_is_relative_to(recovered.task_dir, reopened.records_dir))
         self.assertFalse(marker.exists())
 
     def test_move_to_trash_rejects_broad_or_malformed_task_directory(self) -> None:

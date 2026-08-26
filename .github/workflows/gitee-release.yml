@@ -96,7 +96,8 @@ jobs:
             --release-url "https://gitee.com/${GITEE_REPOSITORY}/releases/tag/${TAG}" \
             --fallback-download-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download" \
             --primary-download-max-bytes "${GITEE_MAX_ASSET_BYTES}" \
-            --primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe"
+            --primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe" \
+            --primary-download-asset "HRToolkit_${VERSION}_win7_x64-setup.exe"
           python scripts/publish_gitee_release.py \
             --version "${VERSION}" \
             --tag "${TAG}" \

@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from openpyxl import Workbook
 
+from hr_toolkit.common.paths import path_is_relative_to
 from hr_toolkit.gui import HRToolkitApp, make_result_output_dir
 from hr_toolkit.project_store import CATEGORY_RESULTS, CATEGORY_UPLOADS, ProjectStore
 from hr_toolkit.tools.folder_rename import (
@@ -84,7 +85,7 @@ class HistoryGuiIntegrationTests(unittest.TestCase):
             def fake_tool(input_path: Path, output_dir: Path) -> _FakeResult:
                 self.assertNotEqual(input_path, source)
                 self.assertEqual(input_path.read_bytes(), b"input")
-                self.assertTrue(output_dir.is_relative_to(project_store.root))
+                self.assertTrue(path_is_relative_to(output_dir, project_store.root))
                 (output_dir / "结果.xlsx").write_bytes(input_path.read_bytes())
                 return _FakeResult(output_dir)
 
@@ -312,8 +313,8 @@ class HistoryGuiIntegrationTests(unittest.TestCase):
             ):
                 self.assertNotEqual(root_dir, source)
                 self.assertNotEqual(excel_path, roster)
-                self.assertTrue(root_dir.is_relative_to(project_store.root))
-                self.assertTrue(excel_path.is_relative_to(project_store.root))
+                self.assertTrue(path_is_relative_to(root_dir, project_store.root))
+                self.assertTrue(path_is_relative_to(excel_path, project_store.root))
                 self.assertEqual(excel_path.read_bytes(), roster_bytes)
                 return rename_files_by_excel(
                     root_dir,

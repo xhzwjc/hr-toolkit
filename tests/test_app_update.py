@@ -10,6 +10,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hr_toolkit.app_update import (
@@ -17,6 +18,7 @@ from hr_toolkit.app_update import (
     DEFAULT_UPDATE_MANIFEST_URLS,
     GITEE_LATEST_RELEASE_API_URL,
     GITHUB_LATEST_MANIFEST_URL,
+    WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES,
     UpdateCancelledError,
     UpdateError,
     check_for_update,
@@ -27,6 +29,7 @@ from hr_toolkit.app_update import (
     launch_update_replacement,
     load_update_manifest,
     parse_update_manifest,
+    platform_key,
     resolve_download_url,
     sha256_file,
     trim_log_file,
@@ -74,6 +77,117 @@ class AppUpdateTests(unittest.TestCase):
         self.assertEqual(update.sha256, "abc123")
         self.assertEqual(update.notes, ("修复问题",))
         self.assertEqual(update.update_mode, "auto")
+
+    def test_windows_platform_key_separates_win7_from_modern_windows(self) -> None:
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(
+                sys,
+                "getwindowsversion",
+                return_value=SimpleNamespace(major=6, minor=1),
+                create=True,
+            ),
+        ):
+            self.assertEqual(platform_key(), "windows-x64-win7")
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(
+                sys,
+                "getwindowsversion",
+                return_value=SimpleNamespace(major=6, minor=2),
+                create=True,
+            ),
+        ):
+            self.assertEqual(platform_key(), "windows-x64-win7")
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(
+                sys,
+                "getwindowsversion",
+                return_value=SimpleNamespace(major=6, minor=3),
+                create=True,
+            ),
+        ):
+            self.assertEqual(platform_key(), "windows-x64-modern")
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(
+                sys,
+                "getwindowsversion",
+                return_value=SimpleNamespace(major=10, minor=0),
+                create=True,
+            ),
+        ):
+            self.assertEqual(platform_key(), "windows-x64-modern")
+
+        # 兼容性清单可能让旧 GetVersionEx 字段报告 6.1；Python 提供的
+        # platform_version 才是实际内核版本，应优先保持现代更新通道。
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(
+                sys,
+                "getwindowsversion",
+                return_value=SimpleNamespace(
+                    major=6,
+                    minor=1,
+                    platform_version=(10, 0, 26100),
+                ),
+                create=True,
+            ),
+        ):
+            self.assertEqual(platform_key(), "windows-x64-modern")
+
+    def test_windows_update_channels_select_matching_installer(self) -> None:
+        manifest = {
+            "version": "0.6.0",
+            "platforms": {
+                "windows": {"file_url": "modern.exe", "sha256": "modern"},
+                "windows-x64-modern": {
+                    "file_url": "modern-explicit.exe",
+                    "sha256": "modern-explicit",
+                },
+                "windows-x64-win7": {
+                    "file_url": "win7.exe",
+                    "sha256": "win7",
+                },
+            },
+        }
+        modern = parse_update_manifest(
+            manifest,
+            "https://example.test/latest.json",
+            "windows-x64-modern",
+        )
+        win7 = parse_update_manifest(
+            manifest,
+            "https://example.test/latest.json",
+            "windows-x64-win7",
+        )
+        legacy_caller = parse_update_manifest(
+            manifest,
+            "https://example.test/latest.json",
+            "windows",
+        )
+
+        self.assertEqual(modern.file_url, "https://example.test/modern-explicit.exe")
+        self.assertEqual(win7.file_url, "https://example.test/win7.exe")
+        self.assertEqual(legacy_caller.file_url, "https://example.test/modern.exe")
+
+    def test_win7_update_channel_never_falls_back_to_modern_installer(self) -> None:
+        manifest = {
+            "version": "0.6.0",
+            "platforms": {
+                "windows": {"file_url": "modern.exe", "sha256": "modern"},
+            },
+        }
+        with self.assertRaisesRegex(UpdateError, "windows-x64-win7"):
+            parse_update_manifest(
+                manifest,
+                "https://example.test/latest.json",
+                "windows-x64-win7",
+            )
 
     def test_parse_manifest_keeps_gitee_primary_and_github_fallback(self) -> None:
         update = parse_update_manifest(
@@ -733,6 +847,50 @@ class AppUpdateTests(unittest.TestCase):
             self.assertIn("--installer", args)
             self.assertIn(str(installer), args)
             self.assertNotIn("--zip", args)
+
+    def test_win7_temporary_updater_keeps_app_local_runtime_beside_exe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            app_dir.mkdir()
+            (app_dir / "HRToolkitUpdater.exe").write_bytes(b"updater")
+            for name in WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES:
+                (app_dir / name).write_bytes(b"pinned:" + name.encode("ascii"))
+            installer = tmp_dir / "HRToolkit_0.6.0_win7_x64-setup.exe"
+            installer.write_bytes(b"MZ")
+            temp_updater_dir = tmp_dir / "temp-updater"
+            temp_updater_dir.mkdir()
+
+            with (
+                patch.object(sys, "platform", "win32"),
+                patch.object(
+                    sys,
+                    "getwindowsversion",
+                    return_value=SimpleNamespace(major=6, minor=1),
+                    create=True,
+                ),
+                patch(
+                    "hr_toolkit.app_update.tempfile.mkdtemp",
+                    return_value=str(temp_updater_dir),
+                ),
+                patch("subprocess.Popen"),
+            ):
+                launch_update_replacement(
+                    package_path=installer,
+                    app_dir=app_dir,
+                    launcher_path=app_dir / "HRToolkit.exe",
+                    wait_pid=1234,
+                )
+
+            self.assertEqual(
+                (temp_updater_dir / "HRToolkitUpdater.exe").read_bytes(),
+                b"updater",
+            )
+            for name in WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES:
+                self.assertEqual(
+                    (temp_updater_dir / name).read_bytes(),
+                    (app_dir / name).read_bytes(),
+                )
 
 
 if __name__ == "__main__":

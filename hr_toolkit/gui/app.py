@@ -36,6 +36,7 @@ from hr_toolkit.common.inputs import (
     archive_suffix,
     is_supported_archive_file,
 )
+from hr_toolkit.common.paths import path_is_relative_to
 from hr_toolkit.history_store import (
     HISTORY_PAGE_SIZE,
     HistoryStore,
@@ -9725,7 +9726,10 @@ class HRToolkitApp:
             return
         out_candidate = Path(output_text).resolve()
         try:
-            if out_candidate == lib_path.resolve() or out_candidate.is_relative_to(lib_path.resolve()):
+            if out_candidate == lib_path.resolve() or path_is_relative_to(
+                out_candidate,
+                lib_path.resolve(),
+            ):
                 messagebox.showwarning(
                     "保存目录无效",
                     "保存目录不能设在资料库目录内部（会导致循环嵌套复制）。\n请选择一个位于资料库外部的独立保存文件夹。",
@@ -9972,7 +9976,7 @@ class HRToolkitApp:
                         parent
                         for parent in (archived_paths[0].parent, *archived_paths[0].parents)
                         if parent != detail.input_dir
-                        and parent.is_relative_to(detail.input_dir)
+                        and path_is_relative_to(parent, detail.input_dir)
                         and parent.name == source_name
                     ),
                     None,
