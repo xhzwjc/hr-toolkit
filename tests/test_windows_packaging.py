@@ -1456,6 +1456,20 @@ class WindowsPackagingTests(unittest.TestCase):
             msi.write_bytes(build_windows_installers.MSI_MAGIC + b"\0" * 16)
             build_windows_installers.verify_installer_outputs(exe, msi)
 
+    def test_win7_inno_output_directory_is_absolute_before_it_exists(self) -> None:
+        relative_output = Path("artifacts") / "windows-win7-not-created"
+        command = build_windows_installers.inno_compile_command(
+            compiler="ISCC.exe",
+            version=self.version,
+            payload_dir=Path("C:/payload"),
+            output_dir=relative_output,
+            target=build_windows.WINDOWS_TARGET_WIN7,
+        )
+        output_argument = next(
+            value for value in command if value.startswith("/DOutputDir=")
+        )
+        self.assertTrue(Path(output_argument.split("=", 1)[1]).is_absolute())
+
     def _fake_app(self, root: Path) -> tuple[Path, Path]:
         app_dir = root / "HRToolkit"
         templates = app_dir / "_internal" / "hr_toolkit" / "templates"

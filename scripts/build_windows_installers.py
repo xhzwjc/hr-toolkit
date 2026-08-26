@@ -128,6 +128,10 @@ def build_windows_installers(
     validate_build_version(version)
     target = validate_windows_target(target)
     validate_installer_definitions()
+    # Python 3.8 on Windows may leave a non-existent path relative after
+    # Path.resolve(). Inno interprets a relative OutputDir from the .iss file's
+    # directory, so normalize it without requiring the directory to exist.
+    output_dir = Path(os.path.abspath(output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
     exe_name, msi_name = installer_asset_names(version, target)
     exe_path = output_dir / exe_name
@@ -185,12 +189,13 @@ def inno_compile_command(
 ) -> list[str]:
     validate_build_version(version)
     target = validate_windows_target(target)
+    absolute_output_dir = Path(os.path.abspath(output_dir))
     command = [
         compiler,
         "/Qp",
         f"/DMyAppVersion={version}",
         f"/DSourceDir={payload_dir}",
-        f"/DOutputDir={output_dir}",
+        f"/DOutputDir={absolute_output_dir}",
         f"/DSetupIconFile={WINDOWS_ICON}",
         f"/DInstallerSuffix={windows_asset_suffix(target)}",
         f"/DMinWindowsVersion={_inno_min_windows_version(target)}",
