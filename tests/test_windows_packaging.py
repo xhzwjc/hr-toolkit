@@ -681,6 +681,44 @@ class WindowsPackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "PssQuerySnapshot"):
                 build_windows.verify_win7_pe_compatibility((Path("runtime.dll"),))
 
+    def test_win7_pe_gate_rejects_unbundled_api_sets(self) -> None:
+        entry = SimpleNamespace(
+            dll=b"api-ms-win-core-future-l1-1-0.dll",
+            imports=(),
+        )
+
+        class FakePE:
+            OPTIONAL_HEADER = SimpleNamespace(
+                MajorSubsystemVersion=6,
+                MinorSubsystemVersion=1,
+            )
+            DIRECTORY_ENTRY_IMPORT = (entry,)
+            DIRECTORY_ENTRY_DELAY_IMPORT = ()
+
+            def parse_data_directories(self, *, directories):
+                self.directories = directories
+
+            def close(self):
+                pass
+
+        fake_pefile = SimpleNamespace(
+            DIRECTORY_ENTRY={
+                "IMAGE_DIRECTORY_ENTRY_IMPORT": 1,
+                "IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT": 2,
+            },
+            PE=lambda _path, fast_load: FakePE(),
+            PEFormatError=ValueError,
+        )
+        with patch.dict("sys.modules", {"pefile": fake_pefile}):
+            with self.assertRaisesRegex(RuntimeError, "未随包提供"):
+                build_windows.verify_win7_pe_compatibility((Path("runtime.dll"),))
+            build_windows.verify_win7_pe_compatibility(
+                (
+                    Path("runtime.dll"),
+                    Path("api-ms-win-core-future-l1-1-0.dll"),
+                )
+            )
+
     def test_win7_pe_gate_requires_app_local_vc_dependencies(self) -> None:
         entry = SimpleNamespace(
             dll=b"MSVCP140.dll",
@@ -974,6 +1012,67 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("/DWin7Compatibility=1", win7_inno)
         self.assertIn("/DCleanExistingPayload=1", win7_inno)
 
+    def test_win7_installer_smoke_skips_only_on_unsupported_windows(self) -> None:
+        modern_windows = SimpleNamespace(
+            major=10,
+            minor=0,
+            platform_version=(10, 0, 26100),
+            service_pack_major=0,
+        )
+        with (
+            patch.object(build_windows_installers, "ensure_windows_runtime"),
+            patch.object(
+                build_windows_installers.sys,
+                "getwindowsversion",
+                return_value=modern_windows,
+                create=True,
+            ),
+            patch.object(build_windows_installers, "_smoke_test_inno") as smoke_inno,
+            patch.object(build_windows_installers, "_smoke_test_msi") as smoke_msi,
+        ):
+            build_windows_installers.smoke_test_installers(
+                Path("win7.exe"),
+                Path("win7.msi"),
+                target=build_windows.WINDOWS_TARGET_WIN7,
+            )
+            smoke_inno.assert_not_called()
+            smoke_msi.assert_not_called()
+
+            build_windows_installers.smoke_test_installers(
+                Path("modern.exe"),
+                Path("modern.msi"),
+                target=build_windows.WINDOWS_TARGET_MODERN,
+            )
+            smoke_inno.assert_called_once()
+            smoke_msi.assert_called_once()
+
+    def test_win7_installer_smoke_runs_on_windows7_sp1(self) -> None:
+        win7_sp1 = SimpleNamespace(
+            major=6,
+            minor=1,
+            platform_version=(6, 1, 7601),
+            service_pack_major=1,
+        )
+        with (
+            patch.object(build_windows_installers, "ensure_windows_runtime"),
+            patch.object(
+                build_windows_installers.sys,
+                "getwindowsversion",
+                return_value=win7_sp1,
+                create=True,
+            ),
+            patch.object(build_windows_installers, "_smoke_test_inno") as smoke_inno,
+            patch.object(build_windows_installers, "_smoke_test_msi") as smoke_msi,
+        ):
+            build_windows_installers.smoke_test_installers(
+                Path("win7.exe"),
+                Path("win7.msi"),
+                target=build_windows.WINDOWS_TARGET_WIN7,
+            )
+
+        smoke_inno.assert_called_once()
+        smoke_msi.assert_called_once()
+
     def test_release_windows_only_orchestrates_three_stages_without_version_bump(self) -> None:
         commands = release_windows.stage_commands(
             version=self.version,
@@ -1124,6 +1223,42 @@ class WindowsPackagingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("onnxruntime==1.11.1", constraints)
         self.assertNotIn("onnxruntime==1.14.1", constraints)
+
+    def test_vc_redist_layout_uses_its_documented_current_directory(self) -> None:
+        subprocess_calls = []
+
+        def fake_download(_url, destination, _expected_sha256):
+            destination.write_bytes(b"pinned VC redist")
+
+        def fake_run(command, **kwargs):
+            subprocess_calls.append((command, kwargs))
+            if "/layout" in command:
+                layout_dir = Path(kwargs["cwd"])
+                package_dir = layout_dir / "packages" / "vcRuntimeMinimum_amd64"
+                package_dir.mkdir(parents=True)
+                (package_dir / "vc_runtimeMinimum_x64.msi").write_bytes(b"msi")
+            return SimpleNamespace(returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(
+                    prepare_win7_runtime,
+                    "_download_verified",
+                    side_effect=fake_download,
+                ),
+                patch.object(
+                    prepare_win7_runtime.subprocess,
+                    "run",
+                    side_effect=fake_run,
+                ),
+                patch.object(prepare_win7_runtime, "_replace_with_discovered_files"),
+            ):
+                prepare_win7_runtime._prepare_vc_runtime(Path(tmp) / "vc-runtime")
+
+        layout_command, layout_options = subprocess_calls[0]
+        self.assertEqual(layout_command[1:], ["/layout", "/quiet", "/norestart"])
+        self.assertEqual(Path(layout_options["cwd"]).name, "layout")
+        self.assertEqual(subprocess_calls[1][0][0], "msiexec.exe")
 
     def test_win7_ucrt_archive_files_are_discovered_by_embedded_dll_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

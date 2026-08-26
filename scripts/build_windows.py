@@ -182,6 +182,7 @@ WIN7_FORBIDDEN_DLLS = frozenset(
         "api-ms-win-core-path-l1-1-1.dll",
     }
 )
+WIN7_API_SET_PREFIXES = ("api-ms-win-", "ext-ms-win-")
 WIN7_FORBIDDEN_IMPORTS = frozenset(
     {
         "copyfile2",
@@ -1024,6 +1025,11 @@ def verify_win7_pe_compatibility(pe_files: tuple[Path, ...]) -> None:
                 normalized_dll = dll_name.casefold()
                 if normalized_dll in WIN7_FORBIDDEN_DLLS:
                     violations.append(f"{path.name}: {dll_name}")
+                if (
+                    normalized_dll.startswith(WIN7_API_SET_PREFIXES)
+                    and normalized_dll not in payload_by_name
+                ):
+                    violations.append(f"{path.name}: 未随包提供 {dll_name}")
                 if (
                     _is_win7_app_local_vc_runtime(normalized_dll)
                     and normalized_dll not in payload_by_name

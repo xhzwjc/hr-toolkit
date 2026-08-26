@@ -131,8 +131,10 @@ def _prepare_vc_runtime(target_dir: Path) -> None:
         _download_verified(VC_REDIST_URL, installer, VC_REDIST_SHA256)
         layout_dir = temporary_dir / "layout"
         layout_dir.mkdir()
+        # VC_redist /layout writes its payload into the current directory.
         subprocess.run(
-            [str(installer), "/layout", str(layout_dir), "/quiet", "/norestart"],
+            [str(installer), "/layout", "/quiet", "/norestart"],
+            cwd=layout_dir,
             check=True,
             timeout=180,
         )

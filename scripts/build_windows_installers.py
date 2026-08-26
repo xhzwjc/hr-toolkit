@@ -366,10 +366,32 @@ def smoke_test_installers(
 ) -> None:
     target = validate_windows_target(target)
     ensure_windows_runtime()
+    if target == WINDOWS_TARGET_WIN7 and not _supports_win7_installer_smoke():
+        print(
+            "跳过 Win7 EXE/MSI 安装冒烟：当前 Windows 不在安装器支持的 "
+            "Windows 7 SP1/Windows 8 范围内；真实验收由干净 Win7 SP1 环境完成。"
+        )
+        return
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_installer_smoke_") as tmp:
         root = Path(tmp)
         _smoke_test_inno(exe_path, root / "inno", target=target)
         _smoke_test_msi(msi_path, root / "msi", target=target)
+
+
+def _supports_win7_installer_smoke() -> bool:
+    try:
+        version = sys.getwindowsversion()
+        platform_version = getattr(version, "platform_version", ())
+        if len(platform_version) >= 2:
+            major_minor = (int(platform_version[0]), int(platform_version[1]))
+        else:
+            major_minor = (int(version.major), int(version.minor))
+        service_pack_major = int(getattr(version, "service_pack_major", 0))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return False
+    return major_minor == (6, 2) or (
+        major_minor == (6, 1) and service_pack_major >= 1
+    )
 
 
 def resolve_inno_compiler(explicit: str | None = None) -> str:
