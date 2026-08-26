@@ -111,9 +111,17 @@ class ExcelHelperTest(unittest.TestCase):
             self.assertEqual(before_size, after_size, "源文件大小绝不能发生改变")
 
     def test_open_template_resource_falls_back_without_files_api(self) -> None:
-        with patch.object(package_resources.resources, "files", None):
+        with (
+            patch.object(package_resources.resources, "files", None),
+            patch.object(
+                package_resources.resources,
+                "open_binary",
+                wraps=package_resources.resources.open_binary,
+            ) as open_binary,
+        ):
             with open_template_resource("data_statistics_template.xlsx") as handle:
                 self.assertEqual(handle.read(2), b"PK")
+        self.assertIs(open_binary.call_args.args[0], package_resources._template_package)
 
 
 def _style_signature(cell) -> tuple:
