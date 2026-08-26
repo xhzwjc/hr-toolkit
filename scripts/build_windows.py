@@ -31,6 +31,8 @@ WINDOWS_ICON = REPO_ROOT / "packaging" / "windows" / "HRToolkit.ico"
 WIN7_THIRD_PARTY_NOTICE = (
     REPO_ROOT / "packaging" / "windows" / "win7" / "THIRD-PARTY-NOTICES.txt"
 )
+WIN7_PYINSTALLER_HOOKS_DIR = REPO_ROOT / "packaging" / "windows" / "win7" / "hooks"
+WIN7_PYINSTALLER_HOOK = WIN7_PYINSTALLER_HOOKS_DIR / "hook-hr_toolkit.py"
 README_FILE = REPO_ROOT / "README.md"
 TEMPLATES_DIR = REPO_ROOT / "hr_toolkit" / "templates"
 
@@ -404,6 +406,8 @@ def validate_win7_runtime_sources(
         raise RuntimeError(f"缺少 Win7 第三方许可说明：{WIN7_THIRD_PARTY_NOTICE}")
     if not WINDOWS_WIN7_MANIFEST.is_file():
         raise RuntimeError(f"缺少 Win7 应用清单：{WINDOWS_WIN7_MANIFEST}")
+    if not WIN7_PYINSTALLER_HOOK.is_file():
+        raise RuntimeError(f"缺少 Win7 PyInstaller 钩子：{WIN7_PYINSTALLER_HOOK}")
     return resolved_7zip, resolved_ucrt, resolved_vc_runtime
 
 
@@ -616,6 +620,8 @@ def pyinstaller_commands(
         "--version-file",
         str(version_file),
     ]
+    if target == WINDOWS_TARGET_WIN7:
+        common.extend(["--additional-hooks-dir", str(WIN7_PYINSTALLER_HOOKS_DIR)])
     main = [
         *common,
         "--name",
@@ -686,6 +692,7 @@ def pyinstaller_commands(
         str(work_dir / UPDATER_NAME),
     ]
     if target == WINDOWS_TARGET_WIN7:
+        updater.extend(["--additional-hooks-dir", str(WIN7_PYINSTALLER_HOOKS_DIR)])
         assert ucrt_dir is not None
         for runtime_name in WIN7_REQUIRED_UCRT_FILES:
             updater.extend(["--add-binary", f"{ucrt_dir / runtime_name};."])
@@ -827,6 +834,18 @@ def verify_win7_runtime_payload(app_dir: Path) -> None:
             "Windows 7 程序包不得通过旁加载伪造缺失的系统 API："
             f"{sorted(forbidden_runtime_names)}"
         )
+    unexpected_api_sets = sorted(
+        str(path.relative_to(app_dir))
+        for path in app_dir.rglob("*")
+        if path.is_file()
+        and path.name.casefold().startswith(WIN7_API_SET_PREFIXES)
+        and path.name.casefold() not in WIN7_REQUIRED_UCRT_FILE_KEYS
+    )
+    if unexpected_api_sets:
+        raise RuntimeError(
+            "Windows 7 程序包混入未锁定的系统 API Set："
+            f"{unexpected_api_sets}"
+        )
     _require_files(
         internal,
         WIN7_REQUIRED_PYTHON_RUNTIME_FILES,
@@ -955,6 +974,19 @@ def _verify_onefile_embedded_files(
             raise RuntimeError(
                 f"Win7 Updater 未使用已锁定的运行库源文件：{expected_name}"
             )
+
+    unexpected_api_sets = sorted(
+        raw_name
+        for normalized_name, raw_names in toc_names.items()
+        if normalized_name.rsplit("/", 1)[-1].startswith(WIN7_API_SET_PREFIXES)
+        and normalized_name.rsplit("/", 1)[-1] not in WIN7_REQUIRED_UCRT_FILE_KEYS
+        for raw_name in raw_names
+    )
+    if unexpected_api_sets:
+        raise RuntimeError(
+            "Win7 Updater 内嵌了未锁定的系统 API Set："
+            f"{unexpected_api_sets}"
+        )
 
 
 def verify_pe_x64(executable: Path) -> None:

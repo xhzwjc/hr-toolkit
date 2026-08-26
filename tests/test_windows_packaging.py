@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import runpy
 import struct
 import tempfile
 import unittest
@@ -65,6 +66,8 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn(str(build_windows.WINDOWS_WIN7_MANIFEST), main)
         self.assertNotIn("--add-binary", main)
         self.assertNotIn("--add-binary", updater)
+        self.assertNotIn("--additional-hooks-dir", main)
+        self.assertNotIn("--additional-hooks-dir", updater)
         self.assertEqual(main[-1], str(build_windows.APP_ENTRYPOINT))
         self.assertEqual(updater[-1], str(build_windows.UPDATER_ENTRYPOINT))
 
@@ -129,6 +132,18 @@ class WindowsPackagingTests(unittest.TestCase):
             )
 
         self.assertIn(str(build_windows.WINDOWS_WIN7_MANIFEST), main)
+        expected_hook_option = [
+            "--additional-hooks-dir",
+            str(build_windows.WIN7_PYINSTALLER_HOOKS_DIR),
+        ]
+        self.assertIn(
+            expected_hook_option,
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
+        self.assertIn(
+            expected_hook_option,
+            [updater[index : index + 2] for index in range(len(updater) - 1)],
+        )
         self.assertNotIn("unrar.cffi.rarfile", main)
         self.assertNotIn("unrar", main)
         self.assertIn(str(seven_zip.resolve() / "7z.exe") + ";third_party/7zip", main)
@@ -178,6 +193,22 @@ class WindowsPackagingTests(unittest.TestCase):
                 for name in names:
                     self.assertEqual((app_dir / name).read_bytes(), (source_dir / name).read_bytes())
                     self.assertFalse((internal / name).exists())
+
+    def test_win7_pyinstaller_hook_rejects_recursive_host_api_sets(self) -> None:
+        fake_dylib = SimpleNamespace(include_library=lambda _name: True)
+        with patch.dict(
+            "sys.modules",
+            {"PyInstaller.depend": SimpleNamespace(dylib=fake_dylib)},
+        ):
+            runpy.run_path(str(build_windows.WIN7_PYINSTALLER_HOOK))
+
+        self.assertFalse(
+            fake_dylib.include_library("C:/Windows/System32/api-ms-win-core-fibers-l1-1-0.dll")
+        )
+        self.assertFalse(
+            fake_dylib.include_library("C:/Windows/System32/ext-ms-win-example-l1-1-0.dll")
+        )
+        self.assertTrue(fake_dylib.include_library("C:/Windows/System32/KERNEL32.dll"))
 
     def test_macos_spec_collects_7z_and_embedded_unrar_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -578,6 +609,14 @@ class WindowsPackagingTests(unittest.TestCase):
                     target=build_windows.WINDOWS_TARGET_WIN7,
                 )
             forbidden.unlink()
+            unpinned_api_set = internal / "api-ms-win-core-fibers-l1-1-0.dll"
+            self._write_fake_pe(unpinned_api_set, build_windows.PE_MACHINE_AMD64)
+            with self.assertRaisesRegex(RuntimeError, "未锁定的系统 API Set"):
+                build_windows.verify_windows_payload(
+                    app_dir,
+                    target=build_windows.WINDOWS_TARGET_WIN7,
+                )
+            unpinned_api_set.unlink()
             self._write_fake_pe(internal / "python39.dll", build_windows.PE_MACHINE_AMD64)
             with self.assertRaisesRegex(RuntimeError, "其他 Python 运行时"):
                 build_windows.verify_windows_payload(
@@ -654,6 +693,11 @@ class WindowsPackagingTests(unittest.TestCase):
                 "archive_reader_cls": FakeArchiveReader,
             }
             build_windows.verify_win7_runtime_source_integrity(**kwargs)
+
+            archive_payloads["api-ms-win-core-fibers-l1-1-0.dll"] = b"modern host forwarder"
+            with self.assertRaisesRegex(RuntimeError, "Updater 内嵌了未锁定"):
+                build_windows.verify_win7_runtime_source_integrity(**kwargs)
+            del archive_payloads["api-ms-win-core-fibers-l1-1-0.dll"]
 
             substituted = app_dir / build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES[0]
             original = substituted.read_bytes()
