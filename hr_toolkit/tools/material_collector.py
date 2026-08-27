@@ -55,7 +55,7 @@ def _get_ocr_engine():
 
 # OCR 智能索引缓存：写入资料库根目录的隐藏 JSON 文件
 _OCR_CACHE_FILE_NAME = ".hr_material_index_cache.json"
-_OCR_CACHE_VERSION = 3
+_OCR_CACHE_VERSION = 4
 _OCR_CACHE_TEXT_SNIPPET_MAX = 4096
 _OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
@@ -1111,8 +1111,8 @@ def _lookup_ocr_cache(
     file_path: Path,
     employee_key: str = "",
     rel_path: str = "",
-) -> tuple[str, str, str, str, str] | None:
-    """按文件内容哈希指纹查询缓存；命中则返回 (material, method, sub, name, id_hash)。
+) -> tuple[str, str, str, str, str, str, bool] | None:
+    """按内容指纹查询缓存，并返回分类、脱敏 OCR 文字与分析状态。
 
     只要文件二进制内容没变，无论文件名如何修改、移动到何处，都能 100% 瞬间命中。
     """
@@ -1134,6 +1134,8 @@ def _lookup_ocr_cache(
         entry.get("subtype") or "",
         entry.get("extracted_name") or "",
         entry.get("extracted_id_hash") or "",
+        entry.get("ocr_text") or "",
+        entry.get("analysis_state") == "complete",
     )
 
 
@@ -1147,16 +1149,18 @@ def _store_ocr_cache(
     extracted_id: str,
     employee_key: str = "",
     rel_path: str = "",
+    *,
+    extracted_text: str = "",
+    analysis_complete: bool | None = None,
 ) -> None:
-    """OCR 成功后按文件内容哈希指纹回写缓存条目。"""
+    """OCR 分析完成后按内容指纹缓存标准分类及脱敏文字。"""
     fingerprint = _compute_file_fingerprint(file_path)
     if fingerprint is None:
         return
     size, mtime, sha = fingerprint
 
     cache_key = f"{sha[:24]}_{size}"
-    entries: dict[str, Any] = cache.setdefault("entries", {})
-    entries[cache_key] = {
+    entry = {
         "content_hash": sha[:24],
         "source_size": size,
         "source_mtime": mtime,
@@ -1168,6 +1172,12 @@ def _store_ocr_cache(
         "verified_at": _beijing_now_str(),
         "sample_filename": file_path.name,
     }
+    if analysis_complete is not None:
+        entry["analysis_state"] = "complete" if analysis_complete else "incomplete"
+        entry["ocr_text"] = _sanitize_cached_text(extracted_text)
+        entry["index_scope"] = LIBRARY_MODE_PERSON_FOLDER
+    entries: dict[str, Any] = cache.setdefault("entries", {})
+    entries[cache_key] = entry
 
 
 _DOC_CONTENT_PATTERNS: dict[str, list[str]] = {
@@ -1238,6 +1248,23 @@ def _extract_phone(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def _classify_requested_material_text(
+    text: str,
+    requested_types: list[str] | None,
+    *,
+    method_prefix: str,
+) -> tuple[str | None, str, str]:
+    """按当前请求的完整材料名称匹配正文，不扩展或猜测同义词。"""
+    full_text = str(text or "")
+    compact_text = re.sub(r"\s+", "", full_text)
+    for requested in sorted(requested_types or [], key=len, reverse=True):
+        material = str(requested or "").strip()
+        compact_material = re.sub(r"\s+", "", material)
+        if compact_material and compact_material in compact_text:
+            return material, f"{method_prefix}_custom", ""
+    return None, "", ""
+
+
 def _classify_text_content(
     text: str,
     *,
@@ -1277,7 +1304,7 @@ def _classify_text_content(
     ):
         return "身份证", f"{method_prefix}_id_front", "正面"
 
-    # 自定义材料只接受正文中的完整名称，避免随机文件名造成跨人员误判。
+    # 平铺资料库保持既有完整名称匹配规则；文件夹模式单独兼容 OCR 分行。
     for requested in sorted(requested_types or [], key=len, reverse=True):
         if requested and requested in full_text:
             return requested, f"{method_prefix}_custom", ""
@@ -1335,32 +1362,31 @@ def _analyze_ocr_file(
     return material, method, subtype, extracted_name, extracted_id, full_text, names, analysis_complete
 
 
-def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
-    """通过本地离线 OCR 识别图片文字并进行材料分类与信息提取。
-
-    Returns: (material_type or None, match_method, subtype_label, extracted_name, extracted_id)
-    例如: ('身份证', 'ocr_id_front', '正面', '姜默蒙', '130527199211020552')
-    """
+def _analyze_folder_ocr_file(
+    file_path: Path,
+    requested_types: list[str] | None = None,
+) -> tuple[str | None, str, str, str, str, str, bool]:
+    """保持既有标准材料规则，并返回可供自定义材料重分类的 OCR 文字。"""
     engine = _get_ocr_engine()
     if engine is None:
-        return None, "", "", "", ""
+        return None, "", "", "", "", "", False
 
     target_input: str | bytes = str(file_path)
     if file_path.suffix.lower() == ".pdf":
         img_bytes = _extract_pdf_image_bytes(file_path)
         if not img_bytes:
-            return None, "", "", "", ""
+            return None, "", "", "", "", "", False
         target_input = img_bytes
 
     try:
         with _OCR_LOCK:
             result, _ = engine(target_input)
         if not result:
-            return None, "", "", "", ""
+            return None, "", "", "", "", "", True
         texts = [item[1] for item in result]
         full_text = " ".join(texts)
     except Exception:
-        return None, "", "", "", ""
+        return None, "", "", "", "", "", False
 
     extracted_name = ""
     extracted_id = ""
@@ -1378,51 +1404,81 @@ def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
                 extracted_name = texts[idx + 1].strip()
                 break
 
+    material: str | None = None
+    method = ""
+    subtype = ""
     if (
         "特种作业操作证" in full_text or "特种作业" in full_text
         or "特种设备作业" in full_text or "特种作业人员" in full_text
     ):
-        return "特种证书", "ocr_special_cert", "", extracted_name, extracted_id
-    if (
+        material, method = "特种证书", "ocr_special_cert"
+    elif (
         "安全生产考核" in full_text or "安全考核合格" in full_text
         or "建安C证" in full_text or "建安A证" in full_text
         or "建安B证" in full_text or "安全员" in full_text
     ):
-        return "安全员证", "ocr_safety_cert", "", extracted_name, extracted_id
-    if (
+        material, method = "安全员证", "ocr_safety_cert"
+    elif (
         "劳动合同" in full_text or "用工合同" in full_text
         or ("甲方" in full_text and "乙方" in full_text and (
             "劳动" in full_text or "报酬" in full_text or "工作内容" in full_text
         ))
     ):
-        return "劳动合同", "ocr_contract", "", extracted_name, extracted_id
-    if (
+        material, method = "劳动合同", "ocr_contract"
+    elif (
         "毕业证书" in full_text or "学位证书" in full_text or "学信网" in full_text
         or "学历证书" in full_text or "普通高等学校" in full_text
     ):
-        return "学历证明", "ocr_degree", "", extracted_name, extracted_id
-    if (
+        material, method = "学历证明", "ocr_degree"
+    elif (
         "机动车驾驶证" in full_text or "驾驶证" in full_text
         or "职业资格证书" in full_text or "职业资格" in full_text
     ):
-        return "资格证书", "ocr_certificate", "", extracted_name, extracted_id
-    if re.search(r"\d{16,19}", full_text) and (
+        material, method = "资格证书", "ocr_certificate"
+    elif re.search(r"\d{16,19}", full_text) and (
         "银行" in full_text or "银联" in full_text or "Bank" in full_text
     ):
-        return "银行卡", "ocr_bank", "", extracted_name, extracted_id
-    if "居民身份证" in full_text or (
+        material, method = "银行卡", "ocr_bank"
+    elif "居民身份证" in full_text or (
         "签发机关" in full_text and "有效期限" in full_text
         and "特种" not in full_text and "安全" not in full_text
     ):
-        return "身份证", "ocr_id_back", "反面", extracted_name, extracted_id
-    if (
+        material, method, subtype = "身份证", "ocr_id_back", "反面"
+    elif (
         "公民身份号码" in full_text
         or ("姓名" in full_text and ("住址" in full_text or "民族" in full_text or "出生" in full_text))
         or extracted_id
     ):
-        return "身份证", "ocr_id_front", "正面", extracted_name, extracted_id
+        material, method, subtype = "身份证", "ocr_id_front", "正面"
+    else:
+        custom_types = [
+            material_type
+            for material_type in (requested_types or [])
+            if material_type not in MATERIAL_SYNONYMS
+        ]
+        material, method, subtype = _classify_requested_material_text(
+            full_text,
+            custom_types,
+            method_prefix="ocr",
+        )
 
-    return None, "", "", extracted_name, extracted_id
+    return (
+        material,
+        method,
+        subtype,
+        extracted_name,
+        extracted_id,
+        full_text,
+        True,
+    )
+
+
+def _classify_by_ocr(file_path: Path) -> tuple[str | None, str, str, str, str]:
+    """通过本地离线 OCR 识别图片文字并执行既有标准材料分类。"""
+    material, method, subtype, name, extracted_id, _text, _complete = (
+        _analyze_folder_ocr_file(file_path)
+    )
+    return material, method, subtype, name, extracted_id
 
 
 def _classify_material_type(
@@ -1472,6 +1528,18 @@ def _classify_material_type(
             for kw in content_keywords:
                 if kw in doc_text:
                     return mat_type, "doc_content", "", "", "", False
+        custom_types = [
+            material_type
+            for material_type in requested_types
+            if material_type not in MATERIAL_SYNONYMS
+        ]
+        custom_mat, custom_method, custom_subtype = _classify_requested_material_text(
+            doc_text,
+            custom_types,
+            method_prefix="doc_content",
+        )
+        if custom_mat:
+            return custom_mat, custom_method, custom_subtype, "", "", False
 
     # 4. 本地离线 OCR 视觉图文识别（针对纯哈希/随机命名的图片或扫描版 PDF）
     ext = file_path.suffix.lower()
@@ -1480,21 +1548,56 @@ def _classify_material_type(
         if use_cache and cache is not None:
             hit = _lookup_ocr_cache(cache, file_path, employee_key=employee_key, rel_path=rel_path)
             if hit is not None:
+                mat, method, sub, name, _id_hash, cached_text, analysis_complete = hit
+                if mat in MATERIAL_SYNONYMS:
+                    if cache_stats is not None:
+                        cache_stats["hits"] = cache_stats.get("hits", 0) + 1
+                    return mat, method, sub, name, "", True
+                if analysis_complete:
+                    custom_types = [
+                        material_type
+                        for material_type in requested_types
+                        if material_type not in MATERIAL_SYNONYMS
+                    ]
+                    cached_mat, cached_method, cached_sub = _classify_requested_material_text(
+                        cached_text,
+                        custom_types,
+                        method_prefix="cached_text",
+                    )
+                    if cache_stats is not None:
+                        cache_stats["hits"] = cache_stats.get("hits", 0) + 1
+                    return cached_mat, cached_method, cached_sub, name, "", True
                 if cache_stats is not None:
-                    cache_stats["hits"] = cache_stats.get("hits", 0) + 1
-                mat, method, sub, name, _id_hash = hit
-                return mat, method, sub, name, "", True
+                    cache_stats["invalidated"] = cache_stats.get("invalidated", 0) + 1
             if cache_stats is not None:
                 cache_stats["misses"] = cache_stats.get("misses", 0) + 1
 
         # 4b. 缓存未命中或不可用 → 真实 OCR
-        ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id = _classify_by_ocr(file_path)
+        (
+            ocr_mat,
+            ocr_method,
+            ocr_sub,
+            ocr_name,
+            ocr_id,
+            ocr_text,
+            analysis_complete,
+        ) = _analyze_folder_ocr_file(file_path, requested_types=requested_types)
+        if use_cache and cache is not None and analysis_complete:
+            stores_standard_result = ocr_mat in MATERIAL_SYNONYMS
+            _store_ocr_cache(
+                cache,
+                file_path,
+                ocr_mat if stores_standard_result else "其他材料",
+                ocr_method if stores_standard_result else "unrecognized",
+                ocr_sub if stores_standard_result else "",
+                ocr_name,
+                ocr_id,
+                employee_key=employee_key,
+                rel_path=rel_path,
+                extracted_text=ocr_text,
+                analysis_complete=True,
+            )
         if ocr_mat:
-            # 4c. 仅在成功识别时回写缓存（以内容哈希为主键）
-            if use_cache and cache is not None:
-                _store_ocr_cache(cache, file_path,
-                                 ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id,
-                                 employee_key=employee_key, rel_path=rel_path)
             return ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id, False
 
     return None, "", "", "", "", False
@@ -2403,7 +2506,7 @@ def collect_employee_materials(
                 )
             else:
                 warnings.append(
-                    f"OCR 智能索引缓存：命中 {cache_stats['hits']} 次，跳过实时识别 {cache_stats['misses']} 次"
+                    f"OCR 智能索引缓存：命中 {cache_stats['hits']} 次，实时识别 {cache_stats['misses']} 次"
                     + (f"，缓存文件：{cache_path}" if cache_path else "")
                 )
 
@@ -2549,7 +2652,7 @@ def _collect_all_from_folders(
                                 employee_key=employee_key, rel_path=rel_p,
                             )
                         if cached is not None:
-                            _, _, _, ocr_name, _ = cached
+                            _, _, _, ocr_name, _, _, _ = cached
                             cache_hit = True
                             if cache_stats is not None:
                                 cache_stats["hits"] += 1

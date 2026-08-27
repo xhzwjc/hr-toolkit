@@ -526,6 +526,95 @@ class TestOCRCacheHelpers(unittest.TestCase):
 class TestOCRCacheIO(unittest.TestCase):
     """缓存读写与生命周期。"""
 
+    def test_folder_custom_material_rename_reclassifies_cached_ocr_text(self) -> None:
+        """自定义名称改成图片真实标题后复用文字缓存，不重复 OCR。"""
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class CountingEngine:
+                call_count = 0
+
+                def __call__(self, path):
+                    type(self).call_count += 1
+                    return (
+                        [
+                            [None, "员工手册"],
+                            [None, "签收单"],
+                            [None, "姓名张三"],
+                        ],
+                        None,
+                    )
+
+            mc._OCR_ENGINE = CountingEngine()
+            mc._OCR_ATTEMPTED = True
+
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                library = root / "资料库"
+                employee_dir = library / "张三"
+                employee_dir.mkdir(parents=True)
+                source = employee_dir / "a5d6e67cd.jpg"
+                source.write_bytes(b"customer-jpg-fixture")
+                source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+
+                first = collect_employee_materials(
+                    library,
+                    root / "输出1",
+                    roster_source="张三",
+                    material_types=["员工手册领用单"],
+                )
+                first_ocr_calls = CountingEngine.call_count
+                self.assertEqual(first.matched_file_count, 0)
+                self.assertEqual(first_ocr_calls, 1)
+
+                cache_path = library / _OCR_CACHE_FILE_NAME
+                cache = _load_ocr_cache(cache_path)
+                self.assertEqual(len(cache["entries"]), 1)
+                entry = next(iter(cache["entries"].values()))
+                self.assertEqual(entry["material_type"], "其他材料")
+                self.assertIn("员工手册签收单", entry["ocr_text"].replace(" ", ""))
+                self.assertNotEqual(entry["material_type"], "员工手册领用单")
+
+                second = collect_employee_materials(
+                    library,
+                    root / "输出2",
+                    roster_source="张三",
+                    material_types=["员工手册签收单"],
+                )
+                self.assertEqual(CountingEngine.call_count, first_ocr_calls)
+                self.assertEqual(second.ocr_cache_hits, 1)
+                self.assertEqual(second.ocr_cache_misses, 0)
+                self.assertEqual(second.matched_file_count, 1)
+                self.assertEqual(second.matches[0].material_type, "员工手册签收单")
+                copied = root / "输出2" / "张三" / "张三_员工手册签收单.jpg"
+                self.assertTrue(copied.is_file())
+                self.assertEqual(
+                    hashlib.sha256(copied.read_bytes()).hexdigest(),
+                    source_sha,
+                )
+                cached_after_match = next(
+                    iter(_load_ocr_cache(cache_path)["entries"].values())
+                )
+                self.assertEqual(cached_after_match["material_type"], "其他材料")
+
+                third = collect_employee_materials(
+                    library,
+                    root / "输出3",
+                    roster_source="张三",
+                    material_types=["员工手册领用单"],
+                )
+                self.assertEqual(CountingEngine.call_count, first_ocr_calls)
+                self.assertEqual(third.matched_file_count, 0)
+                self.assertEqual(
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                    source_sha,
+                )
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
     def test_cache_written_after_successful_recognition(self) -> None:
         """首次跑应创建 .hr_material_index_cache.json。"""
         with tempfile.TemporaryDirectory() as td:
@@ -595,7 +684,7 @@ class TestOCRCacheIO(unittest.TestCase):
 
                 out1 = Path(td) / "输出1"
                 # 首次：建立缓存（OCR 调用计数应有值）
-                collect_employee_materials(
+                first_result = collect_employee_materials(
                     lib, out1,
                     roster_source="张三",
                     material_types=["身份证"],
@@ -613,6 +702,11 @@ class TestOCRCacheIO(unittest.TestCase):
                 self.assertEqual(CountingEngine.call_count, first_count,
                                  "二次跑不应再调用 OCR")
                 self.assertGreaterEqual(result.ocr_cache_hits, 1)
+                self.assertEqual(result.matches[0].material_type, "身份证")
+                self.assertEqual(
+                    result.matches[0].matched_by,
+                    first_result.matches[0].matched_by,
+                )
         finally:
             mc._OCR_ENGINE = real_engine
             mc._OCR_ATTEMPTED = real_attempted
@@ -991,6 +1085,33 @@ class TestOCRCacheIO(unittest.TestCase):
             self.assertTrue((out / "李四" / "李四_入职证明.pdf").exists())
             self.assertTrue((out / "李四" / "李四_保密协议.docx").exists())
 
+    def test_folder_custom_material_uses_current_document_text_name(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            employee_dir = root / "资料库" / "张三"
+            employee_dir.mkdir(parents=True)
+            source = employee_dir / "a5d6e67cd.txt"
+            source.write_text("员工手册 签收单\n姓名：张三", encoding="utf-8")
+
+            first = collect_employee_materials(
+                root / "资料库",
+                root / "输出1",
+                roster_source="张三",
+                material_types=["员工手册领用单"],
+            )
+            second = collect_employee_materials(
+                root / "资料库",
+                root / "输出2",
+                roster_source="张三",
+                material_types=["员工手册签收单"],
+            )
+
+            self.assertEqual(first.matched_file_count, 0)
+            self.assertEqual(second.matched_file_count, 1)
+            self.assertEqual(second.matches[0].matched_by, "doc_content_custom")
+            copied = root / "输出2" / "张三" / "张三_员工手册签收单.txt"
+            self.assertEqual(copied.read_bytes(), source.read_bytes())
+
     def test_multipage_contract_and_reverse_order_id_card(self) -> None:
         """测试多页合同全量提取不被早停截断，以及身份证反面先被扫描时依然完整提取正反双面。"""
         with tempfile.TemporaryDirectory() as td:
@@ -1283,7 +1404,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             self.assertEqual(self.engine_type.call_count, first_calls)
             migrated = json.loads(cache_path.read_text(encoding="utf-8"))
-            self.assertEqual(migrated["version"], 3)
+            self.assertEqual(migrated["version"], 4)
             self.assertIn("source_change_token", migrated["paths"]["000.png"])
             self.assertNotIn("source_ctime_ns", migrated["paths"]["000.png"])
 
