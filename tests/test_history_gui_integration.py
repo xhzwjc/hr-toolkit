@@ -18,6 +18,7 @@ from hr_toolkit.tools.folder_rename import (
     FILE_TYPE_PDF,
     rename_files_by_excel,
 )
+from hr_toolkit.tools.archive_import import export_company_archive_tables
 
 
 class _FakeResult:
@@ -43,6 +44,45 @@ class _Value:
 
 
 class HistoryGuiIntegrationTests(unittest.TestCase):
+    def test_archive_export_wires_progress_and_safe_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_root:
+            root = Path(temp_root)
+            summary = root / "档案汇总.xlsx"
+            summary.write_bytes(b"xlsx")
+            result_dir = root / "result"
+            cancel_event = threading.Event()
+
+            app = HRToolkitApp.__new__(HRToolkitApp)
+            app.input_path = _Value(str(summary))
+            app.summary_path = _Value("")
+            app.output_dir = _Value(str(root))
+            app.change_input_paths = [summary]
+            app._tool_run_token = 7
+            app._run_cancel_events = {7: cancel_event}
+            app.status_queue = queue.Queue()
+            app._prepare_result_output_dir = Mock(return_value=result_dir)
+            app._begin_tool_run = Mock()
+            app._clear_log = Mock()
+            app._write_log = Mock()
+            app._start_tool_worker = Mock()
+
+            with patch("hr_toolkit.gui.app.messagebox.showwarning") as showwarning:
+                app._run_archive_export()
+
+            showwarning.assert_not_called()
+            call = app._start_tool_worker.call_args
+            self.assertIs(call.args[0], export_company_archive_tables)
+            progress_callback = call.kwargs["progress_callback"]
+            cancelled = call.kwargs["cancelled"]
+            progress_callback(100, 6000, "正在生成性能公司档案：100/6000")
+            self.assertEqual(
+                app.status_queue.get_nowait(),
+                ("progress", 7, "正在生成性能公司档案：100/6000"),
+            )
+            self.assertFalse(cancelled())
+            cancel_event.set()
+            self.assertTrue(cancelled())
+
     def test_result_directory_failure_is_explained_before_processing_starts(self) -> None:
         app = HRToolkitApp.__new__(HRToolkitApp)
         app.root = object()

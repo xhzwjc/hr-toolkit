@@ -12,10 +12,43 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import PatternFill
 
-from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
+from hr_toolkit.tools.archive_import import (
+    _find_footer_start_row,
+    export_company_archive_tables,
+    import_archive_transfers,
+)
 
 
 class ArchiveImportTest(unittest.TestCase):
+    def test_footer_scan_reads_worksheet_dimensions_once(self) -> None:
+        class CountingSheet:
+            title = "性能公司"
+
+            def __init__(self) -> None:
+                self.max_row_reads = 0
+                self.max_column_reads = 0
+
+            @property
+            def max_row(self) -> int:
+                self.max_row_reads += 1
+                return 6003
+
+            @property
+            def max_column(self) -> int:
+                self.max_column_reads += 1
+                return 37
+
+            @staticmethod
+            def cell(row_index: int, col_index: int):
+                value = "对应行" if row_index == 6003 and col_index == 1 else None
+                return type("Cell", (), {"value": value})()
+
+        ws = CountingSheet()
+
+        self.assertEqual(_find_footer_start_row(ws, 4), 6003)
+        self.assertEqual(ws.max_row_reads, 1)
+        self.assertEqual(ws.max_column_reads, 1)
+
     def test_import_archive_transfers_by_company_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -491,6 +524,54 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(wb.sheetnames, ["公司3"])
             self.assertEqual(wb["公司3"].cell(4, 2).value, "张五")
             wb.close()
+
+    def test_export_reports_progress_without_changing_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary = root / "档案汇总.xlsx"
+            output_dir = root / "output"
+            _write_summary_file(summary)
+            progress: list[tuple[int, int, str]] = []
+
+            result = export_company_archive_tables(
+                summary,
+                output_dir,
+                progress_callback=lambda current, total, message: progress.append((current, total, message)),
+            )
+
+            self.assertEqual(len(result.output_files), 2)
+            self.assertTrue(progress)
+            self.assertEqual(progress[-1][0], progress[-1][1])
+            self.assertTrue(any("保存" in message for _current, _total, message in progress))
+
+    def test_export_cancellation_stops_before_writing_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary = root / "档案汇总.xlsx"
+            output_dir = root / "output"
+            _write_summary_file(summary)
+            workbook = load_workbook(summary)
+            workbook.remove(workbook["公司2"])
+            workbook.save(summary)
+            workbook.close()
+            source_sha256 = _sha256(summary)
+            cancel_requested = False
+
+            def progress(current: int, total: int, message: str) -> None:
+                nonlocal cancel_requested
+                if total > 0 and current >= total and message.startswith("正在生成"):
+                    cancel_requested = True
+
+            with self.assertRaisesRegex(RuntimeError, "本次处理已停止"):
+                export_company_archive_tables(
+                    summary,
+                    output_dir,
+                    progress_callback=progress,
+                    cancelled=lambda: cancel_requested,
+                )
+
+            self.assertEqual(_sha256(summary), source_sha256)
+            self.assertFalse(output_dir.exists() and any(output_dir.glob("*.xlsx")))
 
     def test_export_appends_existing_archive_and_creates_missing_company_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

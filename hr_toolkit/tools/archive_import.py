@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
@@ -147,6 +147,10 @@ DIRECT_FIELD_MAP = {
 FORMULA_HEADERS = {"出生日期", "年齡", "年龄", "入职公式", "出生年月公式", "档案号"}
 BLANK_HEADERS = {"序号", "档案柜号"}
 SOURCE_SKIP_HEADERS = {HEADER_COMPANY, "出生日期", "年齡", "年龄", "入职公式", "出生年月公式"}
+ARCHIVE_PROGRESS_INTERVAL = 200
+
+ArchiveProgressCallback = Callable[[int, int, str], None]
+ArchiveCancelCallback = Callable[[], bool]
 
 
 @dataclass(frozen=True)
@@ -323,6 +327,8 @@ def export_company_archive_tables(
     *,
     existing_archive_path: str | Path | list[str | Path] | None = None,
     dry_run: bool = False,
+    progress_callback: ArchiveProgressCallback | None = None,
+    cancelled: ArchiveCancelCallback | None = None,
 ) -> ArchiveExportResult:
     summary_paths = _normalize_input_paths(summary_path)
     display_summary = summary_paths[0] if len(summary_paths) == 1 else summary_paths[0].parent
@@ -337,12 +343,20 @@ def export_company_archive_tables(
             raise FileNotFoundError(f"已有公司档案表文件、压缩包或文件夹不存在：{path}")
 
     warnings: list[str] = []
+    _check_archive_cancelled(cancelled)
     with tempfile.TemporaryDirectory(prefix="hr_archive_export_") as temp_root:
         temp_dir = Path(temp_root)
         summary_files = _find_excel_input_files(summary_paths, temp_dir, warnings)
         if not summary_files:
             raise ValueError("未找到 .xlsx 或 .xls 档案汇总表。")
-        records = _read_archive_summary_records(summary_files, warnings)
+        _report_archive_progress(progress_callback, 0, 0, "正在读取档案汇总表...", force=True)
+        records = _read_archive_summary_records(
+            summary_files,
+            warnings,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+        _check_archive_cancelled(cancelled)
         company_counts = _count_by_company(records)
         existing_files = _find_excel_input_files(existing_paths, temp_dir, warnings) if existing_paths else []
         existing_by_company = _find_existing_company_archives(existing_files, company_counts.keys(), warnings)
@@ -357,13 +371,36 @@ def export_company_archive_tables(
             warnings=warnings,
         )
         if dry_run:
+            _report_archive_progress(
+                progress_callback,
+                len(records),
+                len(records),
+                f"档案数据检查完成：{len(records)} 条",
+                force=True,
+            )
             return result
         if not company_counts:
             raise ValueError("档案汇总表中没有可生成档案表的公司数据。")
 
+        total_records = len(records)
+        _report_archive_progress(
+            progress_callback,
+            0,
+            total_records,
+            f"已读取 {total_records} 条档案，开始生成公司档案表...",
+            force=True,
+        )
+        _check_archive_cancelled(cancelled)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_files: list[Path] = []
+        completed_records = 0
         for company, company_records in _group_by_company(records).items():
+            _check_archive_cancelled(cancelled)
+
+            def company_progress(current: int, _total: int, message: str) -> None:
+                if progress_callback is not None:
+                    progress_callback(completed_records + current, total_records, message)
+
             output_file = output_dir / f"{_safe_filename(company)}-档案表.xlsx"
             write_result = _write_company_archive_file(
                 company,
@@ -372,14 +409,49 @@ def export_company_archive_tables(
                 output_file,
                 temp_dir,
                 warnings,
+                progress_callback=company_progress,
+                cancelled=cancelled,
             )
             output_files.append(output_file)
             result.created_count += 1 if write_result["created"] else 0
             result.inserted_count += write_result["inserted_count"]
             result.updated_count += write_result["updated_count"]
             result.skipped_count += write_result["skipped_count"]
+            completed_records += len(company_records)
+            _report_archive_progress(
+                progress_callback,
+                completed_records,
+                total_records,
+                f"已保存 {company} 档案表：{completed_records}/{total_records}",
+                force=True,
+            )
         result.output_files = output_files
         return result
+
+
+def _check_archive_cancelled(cancelled: ArchiveCancelCallback | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
+
+
+def _report_archive_progress(
+    progress_callback: ArchiveProgressCallback | None,
+    current: int,
+    total: int,
+    message: str,
+    *,
+    force: bool = False,
+) -> None:
+    if progress_callback is None:
+        return
+    should_report = (
+        force
+        or current == 0
+        or (total > 0 and current >= total)
+        or (current > 0 and current % ARCHIVE_PROGRESS_INTERVAL == 0)
+    )
+    if should_report:
+        progress_callback(current, total, message)
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
@@ -467,17 +539,19 @@ def _read_transfer_file(file_path: Path) -> tuple[list[ArchiveTransferRecord], l
             raise ValueError(f"{file_path.name} 缺少字段：{'、'.join(missing)}")
         records: list[ArchiveTransferRecord] = []
         source_title = _cell_text(ws.cell(1, 1).value)
-        for row_index in range(header_row + 1, ws.max_row + 1):
+        max_row = ws.max_row
+        instruction_scan_column_count = min(ws.max_column, 8)
+        for row_index in range(header_row + 1, max_row + 1):
             values = {header: ws.cell(row_index, col_index).value for header, col_index in headers.items()}
             company = _cell_text(values.get(HEADER_COMPANY))
             name = _cell_text(values.get(HEADER_NAME))
             id_card = _normalize_id_card(values.get(HEADER_ID_CARD))
             if not company and not name and not id_card:
-                if _is_instruction_row(ws, row_index):
+                if _is_instruction_row(ws, row_index, scan_column_count=instruction_scan_column_count):
                     continue
                 continue
             if not company or not name or not id_card:
-                if _is_instruction_row(ws, row_index):
+                if _is_instruction_row(ws, row_index, scan_column_count=instruction_scan_column_count):
                     continue
                 warnings.append(f"{file_path.name} 第 {row_index} 行缺少公司、姓名或身份证，已跳过。")
                 continue
@@ -606,8 +680,10 @@ def _detect_archive_layout(ws: Worksheet) -> ArchiveSheetLayout:
 
 def _find_header_row(ws: Worksheet, required_headers: tuple[str, ...]) -> int:
     normalized_required = {_normalize_header(header) for header in required_headers}
-    for row_index in range(1, min(ws.max_row, 20) + 1):
-        headers = {_normalize_header(ws.cell(row_index, col_index).value) for col_index in range(1, ws.max_column + 1)}
+    max_row = min(ws.max_row, 20)
+    max_column = ws.max_column
+    for row_index in range(1, max_row + 1):
+        headers = {_normalize_header(ws.cell(row_index, col_index).value) for col_index in range(1, max_column + 1)}
         if normalized_required.issubset(headers):
             return row_index
     raise ValueError(f"{ws.title} 未找到表头：{'、'.join(required_headers)}")
@@ -615,7 +691,8 @@ def _find_header_row(ws: Worksheet, required_headers: tuple[str, ...]) -> int:
 
 def _read_headers(ws: Worksheet, header_row: int) -> dict[str, int]:
     headers: dict[str, int] = {}
-    for col_index in range(1, ws.max_column + 1):
+    max_column = ws.max_column
+    for col_index in range(1, max_column + 1):
         value = ws.cell(header_row, col_index).value
         if value in (None, ""):
             continue
@@ -625,18 +702,24 @@ def _read_headers(ws: Worksheet, header_row: int) -> dict[str, int]:
 
 def _last_header_column(ws: Worksheet, header_row: int) -> int:
     last_col = 1
-    for col_index in range(1, ws.max_column + 1):
+    max_column = ws.max_column
+    for col_index in range(1, max_column + 1):
         if ws.cell(header_row, col_index).value not in (None, ""):
             last_col = col_index
     return last_col
 
 
 def _find_footer_start_row(ws: Worksheet, start_row: int) -> int:
-    for row_index in range(start_row, ws.max_row + 1):
-        row_text = " ".join(_cell_text(ws.cell(row_index, col_index).value) for col_index in range(1, min(ws.max_column, 6) + 1))
+    max_row = ws.max_row
+    scan_column_count = min(ws.max_column, 6)
+    for row_index in range(start_row, max_row + 1):
+        row_text = " ".join(
+            _cell_text(ws.cell(row_index, col_index).value)
+            for col_index in range(1, scan_column_count + 1)
+        )
         if any(keyword in row_text for keyword in ("对应行", "汇总表中的公司", "交接档案室", "备注：")):
             return row_index
-    return ws.max_row + 1
+    return max_row + 1
 
 
 def _clear_archive_data_rows(ws: Worksheet) -> None:
@@ -658,7 +741,16 @@ def _existing_records(ws: Worksheet, layout: ArchiveSheetLayout) -> dict[str, in
     return records
 
 
-def _append_archive_rows(ws: Worksheet, layout: ArchiveSheetLayout, records: list[ArchiveTransferRecord]) -> None:
+def _append_archive_rows(
+    ws: Worksheet,
+    layout: ArchiveSheetLayout,
+    records: list[ArchiveTransferRecord],
+    *,
+    progress_start: int = 0,
+    progress_total: int | None = None,
+    progress_callback: ArchiveProgressCallback | None = None,
+    cancelled: ArchiveCancelCallback | None = None,
+) -> None:
     template_row = _template_row(ws, layout)
     template_snapshot = snapshot_row(ws, template_row, layout.max_column)
     target_rows = _blank_data_rows(ws, layout)
@@ -667,11 +759,22 @@ def _append_archive_rows(ws: Worksheet, layout: ArchiveSheetLayout, records: lis
         insert_at = layout.footer_start_row
         insert_rows(ws, insert_at, remaining_count)
         target_rows.extend(range(insert_at, insert_at + remaining_count))
-    for row_index, record in zip(target_rows, records):
+    total = progress_total if progress_total is not None else len(records)
+    for record_index, (row_index, record) in enumerate(zip(target_rows, records), start=1):
+        if record_index == 1 or record_index % ARCHIVE_PROGRESS_INTERVAL == 0:
+            _check_archive_cancelled(cancelled)
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
         _clear_archive_record_values(ws, layout, row_index)
         _write_archive_record(ws, layout, row_index, record)
         _format_archive_data_row(ws, layout, row_index)
+        completed = progress_start + record_index
+        _report_archive_progress(
+            progress_callback,
+            completed,
+            total,
+            f"正在生成 {record.company} 档案：{completed}/{total}",
+        )
+    _check_archive_cancelled(cancelled)
 
 
 def _clear_archive_record_values(ws: Worksheet, layout: ArchiveSheetLayout, row_index: int) -> None:
@@ -1008,14 +1111,22 @@ def _format_archive_data_row(
         )
 
 
-def _normalize_archive_output_sheet(ws: Worksheet, layout: ArchiveSheetLayout) -> None:
+def _normalize_archive_output_sheet(
+    ws: Worksheet,
+    layout: ArchiveSheetLayout,
+    *,
+    cancelled: ArchiveCancelCallback | None = None,
+) -> None:
     name_col = layout.headers.get(HEADER_NAME)
     id_col = layout.headers.get(HEADER_ID_CARD)
     if name_col is None or id_col is None:
         return
     for row_index in range(layout.data_start_row, layout.footer_start_row):
+        if row_index == layout.data_start_row or row_index % ARCHIVE_PROGRESS_INTERVAL == 0:
+            _check_archive_cancelled(cancelled)
         if _has_value(ws.cell(row_index, name_col).value) or _has_value(ws.cell(row_index, id_col).value):
             _format_archive_data_row(ws, layout, row_index, clear_fill=False)
+    _check_archive_cancelled(cancelled)
     _apply_archive_column_widths(ws, layout)
 
 
@@ -1072,9 +1183,16 @@ def _copy_default_company_archive_template(temp_dir: Path) -> Path:
     return target
 
 
-def _read_archive_summary_records(summary_files: list[Path], warnings: list[str]) -> list[ArchiveTransferRecord]:
+def _read_archive_summary_records(
+    summary_files: list[Path],
+    warnings: list[str],
+    *,
+    progress_callback: ArchiveProgressCallback | None = None,
+    cancelled: ArchiveCancelCallback | None = None,
+) -> list[ArchiveTransferRecord]:
     records: list[ArchiveTransferRecord] = []
     for summary_file in summary_files:
+        _check_archive_cancelled(cancelled)
         workbook = load_workbook(summary_file, data_only=False)
         try:
             for ws in workbook.worksheets:
@@ -1086,6 +1204,8 @@ def _read_archive_summary_records(summary_files: list[Path], warnings: list[str]
                     warnings.append(f"{summary_file.name} 的 {ws.title} 未识别到档案表表头，已跳过。")
                     continue
                 for row_index in range(layout.data_start_row, layout.footer_start_row):
+                    if row_index == layout.data_start_row or row_index % ARCHIVE_PROGRESS_INTERVAL == 0:
+                        _check_archive_cancelled(cancelled)
                     name = _cell_text(ws.cell(row_index, layout.headers[HEADER_NAME]).value)
                     id_card = _normalize_id_card(ws.cell(row_index, layout.headers[HEADER_ID_CARD]).value)
                     if not name and not id_card:
@@ -1093,7 +1213,13 @@ def _read_archive_summary_records(summary_files: list[Path], warnings: list[str]
                     if not name or not id_card:
                         warnings.append(f"{summary_file.name} 的 {ws.title} 第 {row_index} 行缺少姓名或身份证，已跳过。")
                         continue
-                    values = {header: ws.cell(row_index, col_index).value for header, col_index in layout.headers.items()}
+                    # 空字段后续既不会写入，也不会参与合并；不把它们保存在每条
+                    # 记录的字典里，可显著降低数千行档案生成时的常驻内存。
+                    values = {
+                        header: value
+                        for header, col_index in layout.headers.items()
+                        if _has_value(value := ws.cell(row_index, col_index).value)
+                    }
                     values[HEADER_COMPANY] = ws.title
                     records.append(
                         ArchiveTransferRecord(
@@ -1105,6 +1231,12 @@ def _read_archive_summary_records(summary_files: list[Path], warnings: list[str]
                             source_title=ws.title,
                             source_row=row_index,
                         )
+                    )
+                    _report_archive_progress(
+                        progress_callback,
+                        len(records),
+                        0,
+                        f"正在读取档案汇总数据：已读取 {len(records)} 条",
                     )
         finally:
             workbook.close()
@@ -1168,7 +1300,11 @@ def _write_company_archive_file(
     output_file: Path,
     temp_dir: Path,
     warnings: list[str],
+    *,
+    progress_callback: ArchiveProgressCallback | None = None,
+    cancelled: ArchiveCancelCallback | None = None,
 ) -> dict[str, int | bool]:
+    _check_archive_cancelled(cancelled)
     source_file = existing_file or _copy_default_company_archive_template(temp_dir)
     workbook = load_workbook(source_file)
     created = existing_file is None
@@ -1181,9 +1317,25 @@ def _write_company_archive_file(
         if ws["A1"].value:
             ws["A1"].value = f"{company}人员档案编号表"
         layout = _detect_archive_layout(ws)
-        write_counts = _append_or_merge_archive_records(ws, layout, records, warnings)
-        _normalize_archive_output_sheet(ws, layout)
+        write_counts = _append_or_merge_archive_records(
+            ws,
+            layout,
+            records,
+            warnings,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+        _normalize_archive_output_sheet(ws, layout, cancelled=cancelled)
+        _report_archive_progress(
+            progress_callback,
+            len(records),
+            len(records),
+            f"正在保存 {company} 档案表...",
+            force=True,
+        )
+        _check_archive_cancelled(cancelled)
         workbook.save(output_file)
+        _check_archive_cancelled(cancelled)
         return {
             "created": created,
             "inserted_count": write_counts["inserted_count"],
@@ -1214,12 +1366,18 @@ def _append_or_merge_archive_records(
     layout: ArchiveSheetLayout,
     records: list[ArchiveTransferRecord],
     warnings: list[str],
+    *,
+    progress_callback: ArchiveProgressCallback | None = None,
+    cancelled: ArchiveCancelCallback | None = None,
 ) -> dict[str, int]:
     existing = _existing_records(ws, layout)
     new_records: dict[str, ArchiveTransferRecord] = {}
     updated_count = 0
     skipped_count = 0
-    for record in records:
+    completed_count = 0
+    for record_index, record in enumerate(records, start=1):
+        if record_index == 1 or record_index % ARCHIVE_PROGRESS_INTERVAL == 0:
+            _check_archive_cancelled(cancelled)
         existing_row = existing.get(record.id_card)
         if existing_row is not None:
             if _cell_text(ws.cell(existing_row, layout.headers[HEADER_NAME]).value) != record.name:
@@ -1228,15 +1386,39 @@ def _append_or_merge_archive_records(
                 updated_count += 1
             else:
                 skipped_count += 1
+            completed_count += 1
+            _report_archive_progress(
+                progress_callback,
+                completed_count,
+                len(records),
+                f"正在合并 {record.company} 档案：{completed_count}/{len(records)}",
+            )
             continue
         if record.id_card in new_records:
             new_records[record.id_card] = _merge_archive_records(new_records[record.id_card], record)
             warnings.append(f"{record.company} 身份证 {record.id_card} 在汇总表中重复，已合并为一条。")
             skipped_count += 1
+            completed_count += 1
+            _report_archive_progress(
+                progress_callback,
+                completed_count,
+                len(records),
+                f"正在合并 {record.company} 档案：{completed_count}/{len(records)}",
+            )
             continue
         new_records[record.id_card] = record
     if new_records:
-        _append_archive_rows(ws, layout, list(new_records.values()))
+        _append_archive_rows(
+            ws,
+            layout,
+            list(new_records.values()),
+            progress_start=completed_count,
+            progress_total=len(records),
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+    else:
+        _check_archive_cancelled(cancelled)
     return {
         "inserted_count": len(new_records),
         "updated_count": updated_count,
@@ -1375,8 +1557,18 @@ def _normalize_header(value: Any) -> str:
     return _HEADER_WHITESPACE.sub("", str(value or "").strip())
 
 
-def _is_instruction_row(ws: Worksheet, row_index: int) -> bool:
-    row_text = " ".join(_cell_text(ws.cell(row_index, col_index).value) for col_index in range(1, min(ws.max_column, 8) + 1))
+def _is_instruction_row(
+    ws: Worksheet,
+    row_index: int,
+    *,
+    scan_column_count: int | None = None,
+) -> bool:
+    if scan_column_count is None:
+        scan_column_count = min(ws.max_column, 8)
+    row_text = " ".join(
+        _cell_text(ws.cell(row_index, col_index).value)
+        for col_index in range(1, scan_column_count + 1)
+    )
     return any(keyword in row_text for keyword in ("备注：", "对应", "不用手动填写", "归档档案", "同一行", "如有交接清单", "其他档案"))
 
 

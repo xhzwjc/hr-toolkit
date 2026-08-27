@@ -9842,7 +9842,25 @@ class HRToolkitApp:
         self._clear_log()
         self._write_log("开始生成档案表，请稍候...")
 
-        self._start_tool_worker(export_company_archive_tables, input_paths, output_dir, existing_archive_path=existing_path)
+        run_token = self._tool_run_token
+        cancel_event = self._run_cancel_events.get(run_token)
+        last_progress_message: str | None = None
+
+        def archive_progress(_current: int, _total: int, message: str) -> None:
+            nonlocal last_progress_message
+            if message == last_progress_message:
+                return
+            last_progress_message = message
+            self.status_queue.put(("progress", run_token, message))
+
+        self._start_tool_worker(
+            export_company_archive_tables,
+            input_paths,
+            output_dir,
+            existing_archive_path=existing_path,
+            progress_callback=archive_progress,
+            cancelled=cancel_event.is_set if cancel_event is not None else None,
+        )
 
     def _run_folder_rename(self) -> None:
         input_text = self.input_path.get().strip()
@@ -10130,7 +10148,7 @@ class HRToolkitApp:
         sources: list[SourceSpec] = []
         output_dir: Path | None = None
         for name, value in bound.arguments.items():
-            if name == "progress_callback":
+            if name in {"progress_callback", "cancelled"}:
                 continue
             if name == "output_dir" and value is not None:
                 output_dir = Path(value).expanduser()
