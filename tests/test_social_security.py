@@ -46,12 +46,22 @@ class SocialSecurityTest(unittest.TestCase):
             self.assertEqual(detail_ws.cell(zhang_row, 2).value, "北京春苗")
             self.assertEqual(detail_ws.cell(zhang_row, 3).value, "抚州")
             self.assertEqual(detail_ws.cell(zhang_row, 8).value, "202605")
-            self.assertEqual(detail_ws.cell(zhang_row, 11).value, 240)
-            self.assertEqual(detail_ws.cell(zhang_row, 13).value, 480)
+            self.assertEqual(detail_ws.cell(zhang_row, 11).value, f"=ROUND(I{zhang_row}*J{zhang_row},2)")
+            self.assertEqual(detail_ws.cell(zhang_row, 13).value, f"=ROUND(I{zhang_row}*L{zhang_row},2)")
+            self.assertEqual(detail_ws.cell(zhang_row, 10).number_format, "0.00%")
+            self.assertEqual(detail_ws.cell(zhang_row, 67).number_format, "0.00_ ")
             self.assertEqual(detail_ws.cell(zhang_row, 73).value, 20)
             self.assertEqual(detail_ws.cell(li_row, 2).value, "唐人数智")
             self.assertEqual(detail_ws.cell(li_row, 8).value, "202604")
-            self.assertEqual(detail_ws.cell(li_row, 26).value, 36)
+            self.assertEqual(detail_ws.cell(li_row, 26).value, f"=ROUND(X{li_row}*Y{li_row},2)")
+            template_wb = load_workbook(
+                Path(__file__).resolve().parents[1] / "hr_toolkit" / "templates" / "social_security_detail_template.xlsx",
+                data_only=False,
+            )
+            template_ws = template_wb["社保明细表模板"]
+            for col_index in range(1, 77):
+                self.assertEqual(detail_ws.cell(zhang_row, col_index)._style, template_ws.cell(4, col_index)._style)
+            template_wb.close()
             detail_wb.close()
 
             split_detail = next(path for path in result.detail_output_files if path.name == "北京抚州-社保明细表.xlsx")
@@ -139,36 +149,42 @@ class SocialSecurityTest(unittest.TestCase):
             output_dir = root / "output"
             roster = root / "参保人员花名册.xlsx"
             input_dir.mkdir()
-            _write_roster(roster)
+            _write_roster(
+                roster,
+                extra_rows=[
+                    ["王五", "360111199003030033", "正常", date(2026, 2, 1), "唐人四川", "唐人数智科技股份有限公司", "四川项目部", "项目（成都）", "成本二", 30],
+                ],
+            )
             zhang = ("张三", "360111199001010011")
             li = ("李四", "360111199002020022")
+            wang = ("王五", "360111199003030033")
             _write_single_kind_rows(
                 input_dir / "2026-01——工伤保险（单位缴纳部分）职工明细.xlsx",
-                [(*li, 4588, 0.001, 4.58)],
+                [(*li, 4588, 0.001, 4.58), (*wang, 4588, 0.001, 4.58)],
             )
             _write_single_kind_rows(
                 input_dir / "2026-02——工伤保险（单位缴纳部分）职工明细.xlsx",
-                [(*li, 4588, 0.001, 4.58)],
+                [(*li, 4588, 0.001, 4.58), (*wang, 4588, 0.001, 4.58)],
             )
             _write_single_kind_rows(
                 input_dir / "2026-03——工伤保险（单位缴纳部分）职工明细.xlsx",
-                [(*li, 4588, 0.001, 4.58), (*zhang, 4588, 0.003, 13.76)],
+                [(*li, 4588, 0.001, 4.58), (*wang, 4588, 0.001, 4.58), (*zhang, 4588, 0.003, 13.76)],
             )
             _write_single_kind_rows(
                 input_dir / "2026-04——工伤保险（单位缴纳部分）职工明细.xlsx",
-                [(*li, 4588, 0.003, 13.76), (*zhang, 4588, 0.003, 13.76)],
+                [(*li, 4588, 0.003, 13.76), (*wang, 4588, 0.003, 13.76), (*zhang, 4588, 0.003, 13.76)],
             )
 
             result = generate_social_security_reports(input_dir, roster, output_dir)
 
             self.assertEqual(len(result.source_files), 4)
-            self.assertEqual(result.source_record_count, 6)
-            self.assertEqual(result.detail_record_count, 2)
-            self.assertEqual(result.period_counts, {"202604": 1, "202603-202604": 1})
+            self.assertEqual(result.source_record_count, 10)
+            self.assertEqual(result.detail_record_count, 3)
+            self.assertEqual(result.period_counts, {"202604": 2, "202603-202604": 1})
             self.assertNotIn("待确认历史缴费", "\n".join(result.warnings))
             wb = load_workbook(result.detail_output_file, data_only=False)
             ws = wb["社保明细表"]
-            rows = {ws.cell(row, 6).value: row for row in range(4, 6)}
+            rows = {ws.cell(row, 6).value: row for row in range(4, 7)}
             li_row = rows[li[1]]
             zhang_row = rows[zhang[1]]
             self.assertEqual(ws["A1"].value, "唐人数智2026年4月社保明细表")
@@ -176,19 +192,30 @@ class SocialSecurityTest(unittest.TestCase):
             self.assertEqual(ws["BJ2"].value, "个人社保\n补缴合计")
             self.assertEqual(ws["BK2"].value, "单位社保\n补缴合计")
             self.assertEqual(ws.cell(li_row, 8).value, "202604")
-            self.assertEqual(ws.cell(li_row, 26).value, 13.76)
+            self.assertEqual(ws.cell(li_row, 26).value, f"=ROUND(X{li_row}*Y{li_row},2)")
             self.assertEqual(ws.cell(li_row, 54).value, 4588)
             self.assertEqual(ws.cell(li_row, 55).value, 0.001)
             self.assertEqual(ws.cell(li_row, 55).number_format, "0.00%")
             self.assertEqual(ws.cell(li_row, 56).value, 13.74)
-            self.assertEqual(ws.cell(li_row, 62).value, f"=SUM(AT{li_row},AY{li_row},BG{li_row})")
-            self.assertEqual(ws.cell(li_row, 63).value, f"=SUM(AV{li_row},BA{li_row},BD{li_row},BI{li_row})")
-            self.assertEqual(ws.cell(li_row, 76).value, "补差：202601-202603（工伤）")
+            self.assertIsNone(ws.cell(li_row, 62).value)
+            self.assertEqual(ws.cell(li_row, 63).value, f"=AV{li_row}+BA{li_row}+BD{li_row}+BI{li_row}")
+            self.assertEqual(
+                ws.cell(li_row, 68).value,
+                f"=M{li_row}+R{li_row}+W{li_row}+Z{li_row}+AK{li_row}+BK{li_row}+AC{li_row}+BN{li_row}",
+            )
+            self.assertEqual(ws.cell(li_row, 67).value, f"=K{li_row}+P{li_row}+U{li_row}+AI{li_row}+BJ{li_row}")
+            self.assertEqual(ws.cell(li_row, 69).value, f"=BO{li_row}+BP{li_row}")
+            self.assertEqual(ws.cell(li_row, 74).value, f"=ROUND((BQ{li_row}+BU{li_row})*6.72%,2)")
+            self.assertEqual(ws.cell(li_row, 75).value, f"=BQ{li_row}+BU{li_row}+BV{li_row}")
+            self.assertIsNone(ws.cell(li_row, 76).value)
             self.assertEqual(ws.cell(zhang_row, 8).value, "202603-202604")
-            self.assertEqual(ws.cell(zhang_row, 26).value, 27.52)
+            self.assertEqual(ws.cell(zhang_row, 26).value, f"=ROUND(X{zhang_row}*Y{zhang_row},2)")
             self.assertIsNone(ws.cell(zhang_row, 56).value)
-            self.assertIsNone(ws.cell(zhang_row, 63).value)
-            self.assertEqual(ws.cell(zhang_row, 76).value, "补缴：202603（工伤）")
+            self.assertEqual(
+                ws.cell(zhang_row, 63).value,
+                13.76,
+            )
+            self.assertIsNone(ws.cell(zhang_row, 76).value)
             wb.close()
 
     def test_explicit_difference_marker_handles_single_history_month(self) -> None:
@@ -212,12 +239,122 @@ class SocialSecurityTest(unittest.TestCase):
             ws = wb["社保明细表"]
             self.assertEqual(ws["A1"].value, "北京春苗2026年4月社保明细表")
             self.assertEqual(ws["H4"].value, "202604")
-            self.assertEqual(ws["Z4"].value, 13.76)
+            self.assertEqual(ws["Z4"].value, "=ROUND(X4*Y4,2)")
             self.assertEqual(ws["BB4"].value, 4588)
             self.assertEqual(ws["BC4"].value, 0.001)
             self.assertEqual(ws["BC4"].number_format, "0.00%")
             self.assertEqual(ws["BD4"].value, 4.58)
-            self.assertEqual(ws["BX4"].value, "补差：202603（工伤）")
+            self.assertEqual(ws["BK4"].value, "=AV4+BA4+BD4+BI4")
+            self.assertIsNone(ws["BX4"].value)
+            wb.close()
+
+    def test_explicit_arrears_marker_never_moves_amount_to_difference_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "北京春苗抚州账户2026年4月社保单位缴费明细.xlsx"
+            output_dir = root / "output"
+            roster = root / "参保人员花名册.xlsx"
+            _write_roster(roster)
+            _write_long_payment_rows_with_nature(
+                source,
+                [
+                    ["张三", "360111199001010011", "工伤保险费", "工伤保险", date(2026, 3, 1), 4588, 0.001, 4.58, "补缴"],
+                    ["张三", "360111199001010011", "工伤保险费", "工伤保险", date(2026, 4, 1), 4588, 0.003, 13.76, "正常缴费"],
+                ],
+            )
+
+            result = generate_social_security_reports(source, roster, output_dir)
+
+            self.assertEqual(result.warnings, [])
+            wb = load_workbook(result.detail_output_file, data_only=False)
+            ws = wb["社保明细表"]
+            self.assertEqual(ws["Z4"].value, "=ROUND(X4*Y4,2)")
+            self.assertIsNone(ws["BD4"].value)
+            self.assertEqual(ws["BK4"].value, 4.58)
+            self.assertIsNone(ws["BX4"].value)
+            wb.close()
+
+    def test_explicit_arrears_and_difference_remain_separate_for_same_person(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "北京春苗抚州账户2026年4月社保单位缴费明细.xlsx"
+            output_dir = root / "output"
+            roster = root / "参保人员花名册.xlsx"
+            _write_roster(roster)
+            _write_long_payment_rows_with_nature(
+                source,
+                [
+                    ["张三", "360111199001010011", "工伤保险费", "工伤保险", date(2026, 2, 1), 4588, 0.003, 13.76, "补缴"],
+                    ["张三", "360111199001010011", "工伤保险费", "工伤保险", date(2026, 3, 1), 4588, 0.001, 4.58, "调整补收"],
+                    ["张三", "360111199001010011", "工伤保险费", "工伤保险", date(2026, 4, 1), 4588, 0.003, 13.76, "正常缴费"],
+                ],
+            )
+
+            result = generate_social_security_reports(source, roster, output_dir)
+
+            self.assertEqual(result.warnings, [])
+            wb = load_workbook(result.detail_output_file, data_only=False)
+            ws = wb["社保明细表"]
+            self.assertEqual(ws["Z4"].value, "=ROUND(X4*Y4,2)")
+            self.assertEqual(ws["BD4"].value, 4.58)
+            self.assertEqual(ws["BK4"].value, 18.34)
+            self.assertIsNone(ws["BX4"].value)
+            wb.close()
+
+    def test_unsupported_difference_category_is_kept_visible_in_normal_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "北京春苗抚州账户2026年4月社保单位缴费明细.xlsx"
+            output_dir = root / "output"
+            roster = root / "参保人员花名册.xlsx"
+            _write_roster(roster)
+            _write_long_payment_rows_with_nature(
+                source,
+                [
+                    ["张三", "360111199001010011", "大病医疗保险费", "大病医疗保险", date(2026, 3, 1), 4588, 0.001, 5, "补差"],
+                    ["张三", "360111199001010011", "大病医疗保险费", "大病医疗保险", date(2026, 4, 1), 4588, 0.005, 25, "正常缴费"],
+                ],
+            )
+
+            result = generate_social_security_reports(source, roster, output_dir)
+
+            self.assertIn("模板没有对应补差明细列", "\n".join(result.warnings))
+            wb = load_workbook(result.detail_output_file, data_only=False)
+            ws = wb["社保明细表"]
+            self.assertEqual(ws["AK4"].value, 30)
+            self.assertIsNone(ws["BI4"].value)
+            self.assertIsNone(ws["BK4"].value)
+            self.assertIsNone(ws["BX4"].value)
+            wb.close()
+
+    def test_does_not_guess_single_person_historical_rate_change_as_difference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "唐人四川2026年4月社保单位缴费明细"
+            output_dir = root / "output"
+            roster = root / "参保人员花名册.xlsx"
+            input_dir.mkdir()
+            _write_roster(roster)
+            person = ("李四", "360111199002020022")
+            for month in (1, 2):
+                _write_single_kind_rows(
+                    input_dir / f"2026-{month:02d}——工伤保险（单位缴纳部分）职工明细.xlsx",
+                    [(*person, 4588, 0.001, 4.58)],
+                )
+            _write_single_kind_rows(
+                input_dir / "2026-04——工伤保险（单位缴纳部分）职工明细.xlsx",
+                [(*person, 4588, 0.003, 13.76)],
+            )
+
+            result = generate_social_security_reports(input_dir, roster, output_dir)
+
+            self.assertIn("待确认历史缴费", "\n".join(result.warnings))
+            wb = load_workbook(result.detail_output_file, data_only=False)
+            ws = wb["社保明细表"]
+            self.assertEqual(ws["Z4"].value, 22.92)
+            self.assertIsNone(ws["BD4"].value)
+            self.assertIsNone(ws["BK4"].value)
+            self.assertIsNone(ws["BX4"].value)
             wb.close()
 
     def test_combined_wide_file_keeps_its_bill_month(self) -> None:
@@ -231,6 +368,8 @@ class SocialSecurityTest(unittest.TestCase):
 
             result = generate_social_security_reports(source, roster, output_dir)
 
+            self.assertEqual(result.source_record_count, 10)
+            self.assertEqual(result.detail_record_count, 1)
             self.assertEqual(result.period_counts, {"202605": 1})
             self.assertNotIn("待确认历史缴费", "\n".join(result.warnings))
             wb = load_workbook(result.detail_output_file, data_only=False)
@@ -238,7 +377,33 @@ class SocialSecurityTest(unittest.TestCase):
             self.assertEqual(ws["A1"].value, "唐人数智2026年5月社保明细表")
             self.assertEqual(ws["H4"].value, "202605")
             self.assertEqual(ws["M4"].value, 100)
-            self.assertEqual(ws["R4"].value, 50)
+            self.assertEqual(ws["K4"].value, 50)
+            self.assertEqual(ws["R4"].value, 120)
+            self.assertEqual(ws["P4"].value, 20)
+            self.assertEqual(ws["W4"].value, 10)
+            self.assertEqual(ws["U4"].value, 5)
+            self.assertEqual(ws["Z4"].value, 8)
+            self.assertEqual(ws["AK4"].value, 5)
+            self.assertEqual(ws["AI4"].value, 2)
+            self.assertIsNone(ws["BX4"].value)
+            wb.close()
+
+    def test_wide_history_without_nature_or_basis_is_not_guessed_as_arrears(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "唐人四川2026年5月社保单位缴费明细.xlsx"
+            output_dir = root / "output"
+            roster = root / "参保人员花名册.xlsx"
+            _write_roster(roster)
+            _write_wide_amount_only_history_file(source)
+
+            result = generate_social_security_reports(source, roster, output_dir)
+
+            self.assertIn("待确认历史缴费", "\n".join(result.warnings))
+            wb = load_workbook(result.detail_output_file, data_only=False)
+            ws = wb["社保明细表"]
+            self.assertEqual(ws["M4"].value, 200)
+            self.assertIsNone(ws["BK4"].value)
             self.assertIsNone(ws["BX4"].value)
             wb.close()
 
@@ -264,7 +429,7 @@ class SocialSecurityTest(unittest.TestCase):
             wb.close()
 
 
-def _write_roster(path: Path) -> None:
+def _write_roster(path: Path, extra_rows: list[list[object]] | None = None) -> None:
     workbook = Workbook()
     ws = workbook.active
     ws.title = "花名册"
@@ -286,6 +451,7 @@ def _write_roster(path: Path) -> None:
         ["张三", "360111199001010011", "正常", date(2026, 1, 1), "北京春苗抚州", "春苗人力资源（北京）有限公司", "抚州项目部", "项目（上饶市）", "成本一", 20],
         ["李四", "360111199002020022", "正常", date(2026, 2, 1), "唐人四川", "唐人数智科技股份有限公司", "四川项目部", "项目（成都）", "成本二", 30],
     ]
+    rows.extend(extra_rows or [])
     for row_index, row in enumerate(rows, start=2):
         for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index).value = value
@@ -357,19 +523,60 @@ def _write_wide_payment_file(path: Path) -> None:
     workbook = Workbook()
     ws = workbook.active
     ws.title = "缴费明细"
+    ws.merge_cells("A1:F1")
+    ws.merge_cells("G1:J1")
+    ws.merge_cells("K1:L1")
+    ws.merge_cells("M1:N1")
+    ws["G1"] = "基本医疗保险费"
+    ws["K1"] = "企业职工基本养老保险费"
+    ws["M1"] = "失业保险费"
+    ws["O1"] = "工伤保险费"
+    headers = [
+        "序号",
+        "姓名",
+        "证件类型",
+        "证件号码",
+        "费款所属期起",
+        "费款所属期止",
+        "职工基本医疗保险(单位缴纳)应缴费额(元)",
+        "职工基本医疗保险(个人缴纳)应缴费额(元)",
+        "职工大额医疗互助保险(单位缴纳)应缴费额(元)",
+        "职工大额医疗互助保险(个人缴纳)应缴费额(元)",
+        "职工基本养老保险(单位缴纳)应缴费额(元)",
+        "职工基本养老保险(个人缴纳)应缴费额(元)",
+        "失业保险(单位缴纳)应缴费额(元)",
+        "失业保险(个人缴纳)应缴费额(元)",
+        "工伤保险应缴费额(元)",
+    ]
+    for col_index, header in enumerate(headers, start=1):
+        ws.cell(2, col_index).value = header
+    rows = [
+        [1, "李四", "居民身份证", "360111199002020022", "2026-05", "2026-05", 70, 20, 5, 2, 100, 50, 10, 5, 8],
+        [2, "李四", "居民身份证", "360111199002020022", "2026-06", "2026-06", 50, None, None, None, None, None, None, None, None],
+    ]
+    for row_index, row in enumerate(rows, start=3):
+        for col_index, value in enumerate(row, start=1):
+            ws.cell(row_index, col_index).value = value
+    workbook.save(path)
+    workbook.close()
+
+
+def _write_wide_amount_only_history_file(path: Path) -> None:
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "缴费明细"
     headers = [
         "姓名",
         "证件号码",
         "费款所属期起",
         "费款所属期止",
         "职工基本养老保险(单位缴纳)应缴费额(元)",
-        "职工基本医疗保险(单位缴纳)应缴费额(元)",
     ]
     for col_index, header in enumerate(headers, start=1):
         ws.cell(1, col_index).value = header
     rows = [
-        ["李四", "360111199002020022", "2026-05", "2026-05", 100, None],
-        ["李四", "360111199002020022", "2026-06", "2026-06", None, 50],
+        ["李四", "360111199002020022", "2026-04", "2026-04", 100],
+        ["李四", "360111199002020022", "2026-05", "2026-05", 100],
     ]
     for row_index, row in enumerate(rows, start=2):
         for col_index, value in enumerate(row, start=1):

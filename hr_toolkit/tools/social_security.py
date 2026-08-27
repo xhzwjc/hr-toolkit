@@ -236,11 +236,11 @@ class DetailRecord:
     amounts: dict[str, dict[str, float]] = field(default_factory=dict)
     bases: dict[str, float] = field(default_factory=dict)
     rates: dict[str, dict[str, float]] = field(default_factory=dict)
+    arrears_amounts: dict[str, dict[str, float]] = field(default_factory=dict)
     difference_amounts: dict[str, dict[str, float]] = field(default_factory=dict)
     difference_bases: dict[str, set[float]] = field(default_factory=dict)
     difference_rates: dict[str, dict[str, set[float]]] = field(default_factory=dict)
     main_periods: set[str] = field(default_factory=set)
-    arrears_periods: dict[str, set[str]] = field(default_factory=dict)
     difference_periods: dict[str, set[str]] = field(default_factory=dict)
     unknown_periods: dict[str, set[str]] = field(default_factory=dict)
     source_files: set[str] = field(default_factory=set)
@@ -249,14 +249,16 @@ class DetailRecord:
     @property
     def personal_total(self) -> float:
         normal = sum(side_amounts.get("个人", 0.0) for side_amounts in self.amounts.values())
+        arrears = sum(side_amounts.get("个人", 0.0) for side_amounts in self.arrears_amounts.values())
         difference = sum(side_amounts.get("个人", 0.0) for side_amounts in self.difference_amounts.values())
-        return round(normal + difference, 2)
+        return round(normal + arrears + difference, 2)
 
     @property
     def unit_total(self) -> float:
         normal = sum(side_amounts.get("单位", 0.0) for side_amounts in self.amounts.values())
+        arrears = sum(side_amounts.get("单位", 0.0) for side_amounts in self.arrears_amounts.values())
         difference = sum(side_amounts.get("单位", 0.0) for side_amounts in self.difference_amounts.values())
-        return round(normal + difference, 2)
+        return round(normal + arrears + difference, 2)
 
     @property
     def social_total(self) -> float:
@@ -264,7 +266,7 @@ class DetailRecord:
 
     @property
     def tax(self) -> float:
-        return round(self.social_total * TAX_RATE, 2)
+        return round((self.social_total + (self.management_fee or 0.0)) * TAX_RATE, 2)
 
     @property
     def total_fee(self) -> float:
@@ -836,6 +838,7 @@ def _build_detail_records(
     billing_periods = _billing_periods_by_account(resolved)
     natures = _classify_payment_natures([item[0] for item in resolved], account_by_line, billing_periods)
     records: OrderedDict[tuple[str, str, str], DetailRecord] = OrderedDict()
+    unsupported_difference_warning_keys: set[tuple[str, str, str]] = set()
     for line, person, account_display, source_company, source_place in resolved:
         billing_period = billing_periods.get(account_display, "") or line.billing_period_hint or line.fee_period or "未识别账单期"
         key = (line.id_card, account_display, billing_period)
@@ -866,6 +869,15 @@ def _build_detail_records(
         record.source_files.add(line.source_file)
         nature = natures.get(line, PAYMENT_NORMAL)
         line_periods = _line_periods(line)
+        if nature == PAYMENT_DIFFERENCE and line.category not in DIFFERENCE_COLUMNS:
+            warning_key = (line.id_card, line.category, billing_period)
+            if warning_key not in unsupported_difference_warning_keys:
+                unsupported_difference_warning_keys.add(warning_key)
+                warnings.append(
+                    f"{record.name} {line.category}来源明确为补差，但模板没有对应补差明细列；"
+                    "金额已保留在普通缴费区，请人工确认。"
+                )
+            nature = PAYMENT_NORMAL
         if nature == PAYMENT_DIFFERENCE:
             side_amounts = record.difference_amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
             side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
@@ -874,6 +886,10 @@ def _build_detail_records(
                 record.difference_bases.setdefault(line.category, set()).add(line.base)
             if line.rate is not None:
                 record.difference_rates.setdefault(line.category, {}).setdefault(line.side, set()).add(line.rate)
+        elif nature == PAYMENT_ARREARS:
+            side_amounts = record.arrears_amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
+            side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
+            record.main_periods.update(line_periods)
         else:
             side_amounts = record.amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
             side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
@@ -882,10 +898,7 @@ def _build_detail_records(
                 record.bases[line.category] = line.base
             if line.rate is not None:
                 record.rates.setdefault(line.category, {})[line.side] = line.rate
-            if nature == PAYMENT_ARREARS:
-                arrears_periods = {period for period in line_periods if period < billing_period} or line_periods
-                record.arrears_periods.setdefault(line.category, set()).update(arrears_periods)
-            elif nature == PAYMENT_UNKNOWN:
+            if nature == PAYMENT_UNKNOWN:
                 record.unknown_periods.setdefault(line.category, set()).update(line_periods)
         if billing_period == "未识别账单期":
             warnings.append(f"{line.source_file} 第 {line.source_row} 行未识别账单期，已写入“未识别账单期”。")
@@ -895,7 +908,7 @@ def _build_detail_records(
             record.period = _format_period_span(record.main_periods)
         else:
             record.period = record.billing_period
-        _append_payment_nature_remarks(record, warnings)
+        _append_payment_nature_warnings(record, warnings)
     return list(records.values())
 
 
@@ -938,6 +951,8 @@ def _classify_payment_natures(
             current_by_person.setdefault((line.id_card, account, line.category, line.side), []).append(line)
             current_by_account.setdefault((account, line.category, line.side), []).append(line)
 
+    difference_candidates = _cohort_difference_candidates(history_groups, current_by_person, current_by_account)
+
     for line in lines:
         if line in result:
             continue
@@ -950,29 +965,84 @@ def _classify_payment_natures(
         person_key = (line.id_card, account, line.category, line.side)
         person_current = current_by_person.get(person_key, [])
         account_current = current_by_account.get((account, line.category, line.side), [])
-        if any(_same_contribution_profile(line, current) for current in person_current):
+        if any(_same_contribution_profile(line, current, require_basis_evidence=True) for current in person_current):
             result[line] = PAYMENT_ARREARS
             continue
-        if any(_same_contribution_profile(line, current) for current in account_current):
+        if any(_same_contribution_profile(line, current, require_basis_evidence=True) for current in account_current):
             result[line] = PAYMENT_ARREARS
             continue
 
-        history = [item for item in history_groups.get(person_key, []) if item.nature_hint is None]
-        periods = {item.fee_period for item in history if item.fee_period}
-        if len(periods) >= 2 and person_current and _same_history_profile(history):
-            if all(any(_is_lower_adjustment_profile(item, current) for current in person_current) for item in history):
-                result[line] = PAYMENT_DIFFERENCE
-                continue
+        if line in difference_candidates:
+            result[line] = PAYMENT_DIFFERENCE
+            continue
         result[line] = PAYMENT_UNKNOWN
     return result
 
 
-def _same_contribution_profile(left: SocialPaymentLine, right: SocialPaymentLine) -> bool:
+def _cohort_difference_candidates(
+    history_groups: dict[tuple[str, str, str, str], list[SocialPaymentLine]],
+    current_by_person: dict[tuple[str, str, str, str], list[SocialPaymentLine]],
+    current_by_account: dict[tuple[str, str, str], list[SocialPaymentLine]],
+) -> set[SocialPaymentLine]:
+    """无明确性质时，仅在同一调整模式呈群体特征时推断为补差。"""
+    candidates: dict[tuple[Any, ...], list[SocialPaymentLine]] = {}
+    for person_key, group_lines in history_groups.items():
+        _id_card, account, category, side = person_key
+        history = [line for line in group_lines if line.nature_hint is None]
+        current = current_by_person.get(person_key, [])
+        periods = tuple(sorted({line.fee_period for line in history if line.fee_period}))
+        if len(periods) < 2 or not current or not _same_history_profile(history):
+            continue
+        if not all(any(_is_lower_adjustment_profile(line, item) for item in current) for line in history):
+            continue
+        signature = (
+            account,
+            category,
+            side,
+            periods,
+            _contribution_profile_key(history[0]),
+            tuple(sorted({_contribution_profile_key(line) for line in current})),
+        )
+        candidates.setdefault(signature, []).extend(history)
+
+    accepted: set[SocialPaymentLine] = set()
+    for signature, lines in candidates.items():
+        account, category, side = signature[:3]
+        affected_people = {line.id_card for line in lines}
+        current_people = {line.id_card for line in current_by_account.get((account, category, side), [])}
+        # 单个人的历史费率/基数变化也可能是历史政策差异，不能仅凭金额自动当成补差。
+        if len(affected_people) < 2:
+            continue
+        # 补差应呈现同账户同险种的群体调整特征；零散记录保留为待确认，避免误伤补缴。
+        if current_people and len(affected_people) * 2 < len(current_people):
+            continue
+        accepted.update(lines)
+    return accepted
+
+
+def _contribution_profile_key(line: SocialPaymentLine) -> tuple[str, str, str]:
+    return (
+        "" if line.base is None else f"{line.base:.4f}",
+        "" if line.rate is None else f"{line.rate:.8f}",
+        f"{line.amount:.2f}",
+    )
+
+
+def _same_contribution_profile(
+    left: SocialPaymentLine,
+    right: SocialPaymentLine,
+    *,
+    require_basis_evidence: bool = False,
+) -> bool:
     if not _amount_close(left.amount, right.amount):
         return False
-    if left.base is not None and right.base is not None and not _amount_close(left.base, right.base):
+    comparable_base = left.base is not None and right.base is not None
+    comparable_rate = left.rate is not None and right.rate is not None
+    if require_basis_evidence and not (comparable_base or comparable_rate):
         return False
-    if left.rate is not None and right.rate is not None and not _rate_close(left.rate, right.rate):
+    if comparable_base and not _amount_close(left.base, right.base):
+        return False
+    if comparable_rate and not _rate_close(left.rate, right.rate):
         return False
     return True
 
@@ -1006,25 +1076,18 @@ def _line_periods(line: SocialPaymentLine) -> set[str]:
     return set(_period_sequence(line.fee_period, line.fee_period_end or line.fee_period))
 
 
-def _append_payment_nature_remarks(record: DetailRecord, warnings: list[str]) -> None:
-    arrears_categories = [category for category in SOCIAL_CATEGORIES if category in record.arrears_periods]
-    if arrears_categories:
-        periods = set().union(*(record.arrears_periods[category] for category in arrears_categories))
-        record.warnings.append(f"补缴：{_format_period_span(periods)}（{'、'.join(arrears_categories)}）")
+def _append_payment_nature_warnings(record: DetailRecord, warnings: list[str]) -> None:
     difference_categories = [category for category in SOCIAL_CATEGORIES if category in record.difference_periods]
     if difference_categories:
-        periods = set().union(*(record.difference_periods[category] for category in difference_categories))
-        record.warnings.append(f"补差：{_format_period_span(periods)}（{'、'.join(difference_categories)}）")
         for category in difference_categories:
             multiple_base = len(record.difference_bases.get(category, set())) > 1
             multiple_rate = any(len(values) > 1 for values in record.difference_rates.get(category, {}).values())
             if multiple_base or multiple_rate:
-                record.warnings.append(f"{category}补差含多种基数或比例，基数/比例留空，金额按源表汇总")
+                warnings.append(f"{record.name} {category}补差含多种基数或比例，基数/比例留空，金额按源表汇总。")
     unknown_categories = [category for category in SOCIAL_CATEGORIES if category in record.unknown_periods]
     if unknown_categories:
         periods = set().union(*(record.unknown_periods[category] for category in unknown_categories))
         message = f"待确认历史缴费：{_format_period_span(periods)}（{'、'.join(unknown_categories)}）"
-        record.warnings.append(message)
         warnings.append(f"{record.name} {message}，金额已保留在普通缴费区，未自动归入补差。")
 
 
@@ -1121,8 +1184,8 @@ def _write_detail_row(ws: Worksheet, row_index: int, sequence: int, record: Deta
     _write_category_cells(ws, row_index, record, "生育", "生育")
     _write_category_cells(ws, row_index, record, "大病医疗", "大病医疗")
     _write_difference_cells(ws, row_index, record)
+    _write_arrears_cells(ws, row_index, record)
     _write_detail_totals(ws, row_index)
-    _format_data_row(ws, row_index, ws.max_column)
     _format_difference_rate_cells(ws, row_index, record)
 
 
@@ -1135,13 +1198,55 @@ def _write_category_cells(ws: Worksheet, row_index: int, record: DetailRecord, c
         ws.cell(row_index, personal_rate_col).value = record.rates.get(category, {}).get("个人")
     personal_amount_col = DETAIL_COLUMNS.get(f"{prefix}个人金额")
     if personal_amount_col is not None:
-        ws.cell(row_index, personal_amount_col).value = _zero_blank(record.amounts.get(category, {}).get("个人"))
+        _write_template_amount(
+            ws,
+            row_index,
+            base_col,
+            personal_rate_col,
+            personal_amount_col,
+            record.bases.get(category),
+            record.rates.get(category, {}).get("个人"),
+            record.amounts.get(category, {}).get("个人"),
+        )
     unit_rate_col = DETAIL_COLUMNS.get(f"{prefix}单位比例")
     if unit_rate_col is not None:
         ws.cell(row_index, unit_rate_col).value = record.rates.get(category, {}).get("单位")
     unit_amount_col = DETAIL_COLUMNS.get(f"{prefix}单位金额")
     if unit_amount_col is not None:
-        ws.cell(row_index, unit_amount_col).value = _zero_blank(record.amounts.get(category, {}).get("单位"))
+        _write_template_amount(
+            ws,
+            row_index,
+            base_col,
+            unit_rate_col,
+            unit_amount_col,
+            record.bases.get(category),
+            record.rates.get(category, {}).get("单位"),
+            record.amounts.get(category, {}).get("单位"),
+        )
+
+
+def _write_template_amount(
+    ws: Worksheet,
+    row_index: int,
+    base_col: int | None,
+    rate_col: int | None,
+    amount_col: int,
+    base: float | None,
+    rate: float | None,
+    amount: float | None,
+) -> None:
+    """Use the client's formula when it reproduces the source amount exactly."""
+    if not amount:
+        ws.cell(row_index, amount_col).value = None
+        return
+    if base_col is not None and rate_col is not None and base is not None and rate is not None:
+        calculated = round(base * rate, 2)
+        if _amount_close(amount, calculated):
+            ws.cell(row_index, amount_col).value = (
+                f"=ROUND({_cell_ref(base_col, row_index)}*{_cell_ref(rate_col, row_index)},2)"
+            )
+            return
+    ws.cell(row_index, amount_col).value = round(amount, 2)
 
 
 def _write_difference_headers(ws: Worksheet, records: list[DetailRecord]) -> None:
@@ -1176,19 +1281,61 @@ def _write_difference_cells(ws: Worksheet, row_index: int, record: DetailRecord)
         if unit_amount and "单位金额" in columns:
             ws.cell(row_index, columns["单位金额"]).value = unit_amount
 
-    ws.cell(row_index, DETAIL_COLUMNS["个人社保补缴合计"]).value = _sum_formula(
-        [DIFFERENCE_COLUMNS["养老"]["个人金额"], DIFFERENCE_COLUMNS["失业"]["个人金额"], DIFFERENCE_COLUMNS["医疗"]["个人金额"]],
-        row_index,
+
+def _write_arrears_cells(ws: Worksheet, row_index: int, record: DetailRecord) -> None:
+    personal_arrears = round(sum(amounts.get("个人", 0.0) for amounts in record.arrears_amounts.values()), 2)
+    unit_arrears = round(sum(amounts.get("单位", 0.0) for amounts in record.arrears_amounts.values()), 2)
+    personal_difference = round(
+        record.difference_amounts.get("养老", {}).get("个人", 0.0)
+        + record.difference_amounts.get("失业", {}).get("个人", 0.0),
+        2,
     )
-    ws.cell(row_index, DETAIL_COLUMNS["单位社保补缴合计"]).value = _sum_formula(
+    unit_difference = round(
+        record.difference_amounts.get("养老", {}).get("单位", 0.0)
+        + record.difference_amounts.get("失业", {}).get("单位", 0.0)
+        + record.difference_amounts.get("工伤", {}).get("单位", 0.0)
+        + record.difference_amounts.get("医疗", {}).get("单位", 0.0),
+        2,
+    )
+    _write_template_rollup(
+        ws,
+        row_index,
+        DETAIL_COLUMNS["个人社保补缴合计"],
+        [DIFFERENCE_COLUMNS["养老"]["个人金额"], DIFFERENCE_COLUMNS["失业"]["个人金额"]],
+        personal_difference,
+        personal_arrears,
+    )
+    _write_template_rollup(
+        ws,
+        row_index,
+        DETAIL_COLUMNS["单位社保补缴合计"],
         [
             DIFFERENCE_COLUMNS["养老"]["单位金额"],
             DIFFERENCE_COLUMNS["失业"]["单位金额"],
             DIFFERENCE_COLUMNS["工伤"]["单位金额"],
             DIFFERENCE_COLUMNS["医疗"]["单位金额"],
         ],
-        row_index,
+        unit_difference,
+        unit_arrears,
     )
+
+
+def _write_template_rollup(
+    ws: Worksheet,
+    row_index: int,
+    target_col: int,
+    source_cols: list[int],
+    difference_amount: float,
+    arrears_amount: float,
+) -> None:
+    if not difference_amount and not arrears_amount:
+        ws.cell(row_index, target_col).value = None
+        return
+    if arrears_amount:
+        ws.cell(row_index, target_col).value = round(difference_amount + arrears_amount, 2)
+        return
+    formula = "+".join(_cell_ref(col, row_index) for col in source_cols)
+    ws.cell(row_index, target_col).value = f"={formula}"
 
 
 def _format_difference_rate_cells(ws: Worksheet, row_index: int, record: DetailRecord) -> None:
@@ -1208,35 +1355,36 @@ def _single_number(values: set[float]) -> float | None:
 
 
 def _write_detail_totals(ws: Worksheet, row_index: int) -> None:
-    personal_amount_cols = [
-        DETAIL_COLUMNS["养老个人金额"],
-        DETAIL_COLUMNS["医疗个人金额"],
-        DETAIL_COLUMNS["失业个人金额"],
-        DETAIL_COLUMNS["大病医疗个人金额"],
-        DETAIL_COLUMNS["个人社保补缴合计"],
-    ]
-    unit_amount_cols = [
-        DETAIL_COLUMNS["养老单位金额"],
-        DETAIL_COLUMNS["医疗单位金额"],
-        DETAIL_COLUMNS["失业单位金额"],
-        DETAIL_COLUMNS["工伤单位金额"],
-        DETAIL_COLUMNS["补充工伤单位金额"],
-        DETAIL_COLUMNS["生育单位金额"],
-        DETAIL_COLUMNS["大病医疗单位金额"],
-        DETAIL_COLUMNS["单位社保补缴合计"],
-        DETAIL_COLUMNS["单位补缴滞纳金"],
-    ]
     personal_total = DETAIL_COLUMNS["个人社保合计"]
     unit_total = DETAIL_COLUMNS["单位社保合计"]
     social_total = DETAIL_COLUMNS["社保缴纳合计"]
-    provident_total = DETAIL_COLUMNS["公积金缴纳合计"]
+    management_fee = DETAIL_COLUMNS["管理费"]
     tax = DETAIL_COLUMNS["税金"]
     total_fee = DETAIL_COLUMNS["费用总计"]
-    ws.cell(row_index, personal_total).value = _sum_formula(personal_amount_cols, row_index)
-    ws.cell(row_index, unit_total).value = _sum_formula(unit_amount_cols, row_index)
+    ws.cell(row_index, personal_total).value = (
+        f"={_cell_ref(DETAIL_COLUMNS['养老个人金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['医疗个人金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['失业个人金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['大病医疗个人金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['个人社保补缴合计'], row_index)}"
+    )
+    ws.cell(row_index, unit_total).value = (
+        f"={_cell_ref(DETAIL_COLUMNS['养老单位金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['医疗单位金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['失业单位金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['工伤单位金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['大病医疗单位金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['单位社保补缴合计'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['补充工伤单位金额'], row_index)}"
+        f"+{_cell_ref(DETAIL_COLUMNS['单位补缴滞纳金'], row_index)}"
+    )
     ws.cell(row_index, social_total).value = f"={_cell_ref(personal_total, row_index)}+{_cell_ref(unit_total, row_index)}"
-    ws.cell(row_index, tax).value = f"=ROUND(({_cell_ref(social_total, row_index)}+{_cell_ref(provident_total, row_index)})*{TAX_RATE},2)"
-    ws.cell(row_index, total_fee).value = f"={_cell_ref(social_total, row_index)}+{_cell_ref(provident_total, row_index)}+{_cell_ref(tax, row_index)}+{_cell_ref(DETAIL_COLUMNS['管理费'], row_index)}"
+    ws.cell(row_index, tax).value = (
+        f"=ROUND(({_cell_ref(social_total, row_index)}+{_cell_ref(management_fee, row_index)})*6.72%,2)"
+    )
+    ws.cell(row_index, total_fee).value = (
+        f"={_cell_ref(social_total, row_index)}+{_cell_ref(management_fee, row_index)}+{_cell_ref(tax, row_index)}"
+    )
 
 
 def _write_summary_workbook(records: list[DetailRecord], output_file: Path, temp_dir: Path, warnings: list[str]) -> None:
@@ -1375,7 +1523,11 @@ def _write_category_analysis(ws: Worksheet, start_row: int, records: list[Detail
         ws.cell(start_row + 1, col_index).value = header
     row_index = start_row + 2
     for category in SOCIAL_CATEGORIES:
-        category_records = [record for record in records if category in record.amounts or category in record.difference_amounts]
+        category_records = [
+            record
+            for record in records
+            if category in record.amounts or category in record.arrears_amounts or category in record.difference_amounts
+        ]
         if not category_records:
             continue
         bases: list[float] = []
@@ -1388,11 +1540,13 @@ def _write_category_analysis(ws: Worksheet, start_row: int, records: list[Detail
                     bases.append(difference_base)
         personal = sum(
             record.amounts.get(category, {}).get("个人", 0.0)
+            + record.arrears_amounts.get(category, {}).get("个人", 0.0)
             + record.difference_amounts.get(category, {}).get("个人", 0.0)
             for record in category_records
         )
         unit = sum(
             record.amounts.get(category, {}).get("单位", 0.0)
+            + record.arrears_amounts.get(category, {}).get("单位", 0.0)
             + record.difference_amounts.get(category, {}).get("单位", 0.0)
             for record in category_records
         )
