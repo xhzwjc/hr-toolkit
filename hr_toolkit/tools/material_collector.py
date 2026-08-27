@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import mmap
+import math
 import os
 import re
 import shutil
@@ -10,14 +10,26 @@ import threading
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+try:
+    from pypdf import PdfReader
+except ImportError:  # pragma: no cover - Win7 构建改用 PDFium
+    PdfReader = None  # type: ignore[assignment,misc]
+
+try:
+    import pypdfium2 as pdfium
+except ImportError:  # pragma: no cover - 现代构建使用纯 Python pypdf
+    pdfium = None  # type: ignore[assignment]
 
 from ..common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from ..common.filenames import safe_filename
@@ -38,6 +50,7 @@ def _beijing_now_str() -> str:
 _OCR_ENGINE = None
 _OCR_ATTEMPTED = False
 _OCR_LOCK = threading.Lock()
+_PDF_LOCK = threading.RLock()
 
 
 def _get_ocr_engine():
@@ -55,7 +68,7 @@ def _get_ocr_engine():
 
 # OCR 智能索引缓存：写入资料库根目录的隐藏 JSON 文件
 _OCR_CACHE_FILE_NAME = ".hr_material_index_cache.json"
-_OCR_CACHE_VERSION = 4
+_OCR_CACHE_VERSION = 5
 _OCR_CACHE_TEXT_SNIPPET_MAX = 4096
 _OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
@@ -67,7 +80,41 @@ _OFFICE_ARCHIVE_MAX_MEMBERS = 20_000
 _OFFICE_XML_MEMBER_MAX_BYTES = 16 * 1024 * 1024
 _OFFICE_XML_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 _OFFICE_XML_MAX_COMPRESSION_RATIO = 500
-_PDF_EMBEDDED_IMAGE_MAX_BYTES = 64 * 1024 * 1024
+_PDF_MAX_FILE_BYTES = 64 * 1024 * 1024
+_PDF_MAX_PAGES = 100
+_PDF_MAX_TEXT_CHARS = 2_000_000
+_PDF_MAX_XOBJECTS_PER_PAGE = 64
+_PDF_MAX_IMAGES_PER_PAGE = 8
+_PDF_MAX_IMAGE_PIXELS = 12_000_000
+_PDF_MAX_DECODED_IMAGE_BYTES = 64 * 1024 * 1024
+_PDF_MAX_TOTAL_IMAGE_PIXELS = 120_000_000
+_PDF_MAX_TOTAL_DECODED_IMAGE_BYTES = 512 * 1024 * 1024
+_PDF_MAX_ENCODED_IMAGE_BYTES = 32 * 1024 * 1024
+_PDF_PAGE_RENDER_SCALE = 2.0
+_PDF_BACKEND = "pypdf" if PdfReader is not None else "pdfium"
+
+if PdfReader is not None:
+    try:
+        import pypdf.filters as _pypdf_filters
+
+        _pypdf_filters.ZLIB_MAX_OUTPUT_LENGTH = min(
+            int(getattr(_pypdf_filters, "ZLIB_MAX_OUTPUT_LENGTH", 75_000_000)),
+            _PDF_MAX_DECODED_IMAGE_BYTES,
+        )
+    except Exception:
+        pass
+
+
+class PDFRecognitionError(ValueError):
+    """PDF 无法被安全、完整地读取或识别。"""
+
+
+class PDFResourceLimitError(PDFRecognitionError):
+    """PDF 超过为老旧电脑设置的资源安全门禁。"""
+
+
+class MaterialCollectionCancelled(RuntimeError):
+    """用户请求停止本次资料收集。"""
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +131,21 @@ def _get_engine_signature() -> str:
         return f"rapidocr_onnxruntime@{version}"
     except Exception:
         return "rapidocr_onnxruntime@unknown"
+
+
+def _get_pdf_backend_signature() -> str:
+    """区分现代与 Win7 PDF 后端，切换安装包时只失效 PDF 缓存。"""
+    if _PDF_BACKEND == "pdfium" and pdfium is not None:
+        version = getattr(getattr(pdfium, "PYPDFIUM_INFO", None), "version", "unknown")
+        return f"pdfium@{version}"
+    if PdfReader is not None:
+        try:
+            import pypdf
+
+            return f"pypdf@{getattr(pypdf, '__version__', 'unknown')}"
+        except Exception:
+            pass
+    return f"{_PDF_BACKEND}@unknown"
 
 
 def _compute_file_fingerprint(file_path: Path) -> tuple[int, float, str] | None:
@@ -284,6 +346,7 @@ def _new_ocr_cache() -> dict[str, Any]:
     return {
         "version": _OCR_CACHE_VERSION,
         "engine_signature": _get_engine_signature(),
+        "pdf_backend_signature": _get_pdf_backend_signature(),
         "created_at": now,
         "updated_at": now,
         "entries": {},
@@ -311,12 +374,66 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         return _new_ocr_cache()
 
-    data.setdefault("version", _OCR_CACHE_VERSION)
+    # 缺失版本号的旧缓存必须按最早版本迁移，不能误当成当前版本继续复用。
+    data.setdefault("version", 0)
     if not isinstance(data.get("entries"), dict):
         data["entries"] = {}
     if not isinstance(data.get("paths"), dict):
         data["paths"] = {}
     return data
+
+
+def _drop_pdf_cache_entries(data: dict[str, Any]) -> int:
+    """只删除 PDF 内容索引及其路径引用，保留图片和其他文档缓存。"""
+    entries: dict[str, Any] = data.get("entries") or {}
+    paths: dict[str, Any] = data.get("paths") or {}
+    removed_keys: set[str] = set()
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        sample_name = str(entry.get("sample_filename") or "")
+        source_relpath = str(entry.get("source_relpath") or "")
+        if sample_name.lower().endswith(".pdf") or source_relpath.lower().endswith(".pdf"):
+            removed_keys.add(str(key))
+
+    # 早期平铺缓存可能只在 paths 中保留扩展名；先反查其内容键再统一清理。
+    for rel_path, path_entry in paths.items():
+        if not str(rel_path).lower().endswith(".pdf"):
+            continue
+        if isinstance(path_entry, dict) and path_entry.get("cache_key"):
+            removed_keys.add(str(path_entry["cache_key"]))
+
+    for cache_key in removed_keys:
+        entries.pop(cache_key, None)
+    for rel_path, path_entry in list(paths.items()):
+        cache_key = path_entry.get("cache_key") if isinstance(path_entry, dict) else None
+        if str(rel_path).lower().endswith(".pdf") or str(cache_key) in removed_keys:
+            paths.pop(rel_path, None)
+    return len(removed_keys)
+
+
+def _invalidate_legacy_pdf_cache_entries(data: dict[str, Any]) -> int:
+    """PDF 解析升级时只失效 PDF 条目，保留现有图片和文档 OCR 缓存。"""
+    try:
+        cache_version = int(data.get("version") or 0)
+    except (TypeError, ValueError):
+        cache_version = 0
+    if cache_version >= _OCR_CACHE_VERSION:
+        return 0
+
+    removed_count = _drop_pdf_cache_entries(data)
+    data["version"] = _OCR_CACHE_VERSION
+    return removed_count
+
+
+def _invalidate_changed_pdf_backend_entries(data: dict[str, Any]) -> int:
+    current_signature = _get_pdf_backend_signature()
+    previous_signature = str(data.get("pdf_backend_signature") or "")
+    if previous_signature == current_signature:
+        return 0
+    removed_count = _drop_pdf_cache_entries(data)
+    data["pdf_backend_signature"] = current_signature
+    return removed_count
 
 
 def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
@@ -326,6 +443,7 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     """
     data["version"] = _OCR_CACHE_VERSION
     data["engine_signature"] = _get_engine_signature()
+    data["pdf_backend_signature"] = _get_pdf_backend_signature()
     data["updated_at"] = _beijing_now_str()
     data.setdefault("created_at", data["updated_at"])
     data.setdefault("entries", {})
@@ -1018,7 +1136,527 @@ def _read_office_xml_member(
         raise ValueError("Office XML 包含不支持的实体声明")
     return payload
 
-def _extract_document_text(file_path: Path) -> str:
+
+def _raise_if_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise MaterialCollectionCancelled("本次处理已停止。")
+
+
+def _validate_pdf_source_size(file_path: Path) -> int:
+    try:
+        file_size = file_path.stat().st_size
+    except OSError as exc:
+        raise PDFRecognitionError(f"PDF 文件无法读取：{file_path.name}") from exc
+    if file_size <= 0:
+        raise PDFRecognitionError(f"PDF 文件为空或已损坏：{file_path.name}")
+    if file_size > _PDF_MAX_FILE_BYTES:
+        raise PDFResourceLimitError(
+            f"PDF 文件体积超过安全上限：{file_path.name}，"
+            f"允许不超过 {_PDF_MAX_FILE_BYTES // (1024 * 1024)} MB"
+        )
+    return file_size
+
+
+@contextmanager
+def _open_pdf_reader(file_path: Path) -> Iterator[tuple[Any, int]]:
+    """以流式文件句柄打开 PDF，并在解析前执行体积、加密和页数门禁。"""
+    _validate_pdf_source_size(file_path)
+    if PdfReader is None:
+        raise PDFRecognitionError("当前安装包缺少 PDF 文字解析组件，请重新安装完整版本")
+
+    try:
+        stream = file_path.open("rb")
+    except OSError as exc:
+        raise PDFRecognitionError(f"PDF 文件无法读取：{file_path.name}") from exc
+    try:
+        try:
+            # 禁止宽松恢复恶意/畸形交叉引用；真实损坏文件应明确提示用户修复。
+            reader = PdfReader(stream, strict=True)
+        except Exception as exc:
+            raise PDFRecognitionError(
+                f"PDF 文件损坏或格式异常：{file_path.name}"
+            ) from exc
+        try:
+            if reader.is_encrypted:
+                raise PDFRecognitionError(
+                    f"PDF 文件已加密，无法自动识别：{file_path.name}；"
+                    "请先在可信的 PDF 工具中解除密码后重试"
+                )
+            page_count = len(reader.pages)
+        except PDFRecognitionError:
+            raise
+        except Exception as exc:
+            raise PDFRecognitionError(
+                f"PDF 文件损坏，无法读取页面结构：{file_path.name}"
+            ) from exc
+        if page_count <= 0:
+            raise PDFRecognitionError(f"PDF 文件没有可读取页面：{file_path.name}")
+        if page_count > _PDF_MAX_PAGES:
+            raise PDFResourceLimitError(
+                f"PDF 页数超过安全上限：{file_path.name}，"
+                f"共 {page_count} 页，允许不超过 {_PDF_MAX_PAGES} 页"
+            )
+        yield reader, page_count
+    finally:
+        stream.close()
+
+
+@contextmanager
+def _open_pdfium_document(file_path: Path) -> Iterator[tuple[Any, int]]:
+    """在 Win7 兼容包中使用受维护的 PDFium 安全加载并及时释放句柄。"""
+    _validate_pdf_source_size(file_path)
+    if pdfium is None:
+        raise PDFRecognitionError("当前安装包缺少 PDF 页面解析组件，请重新安装完整版本")
+
+    _PDF_LOCK.acquire()
+    document = None
+    try:
+        try:
+            document = pdfium.PdfDocument(file_path)
+        except Exception as exc:
+            password_code = getattr(getattr(pdfium, "raw", None), "FPDF_ERR_PASSWORD", 4)
+            if getattr(exc, "err_code", None) == password_code:
+                raise PDFRecognitionError(
+                    f"PDF 文件已加密，无法自动识别：{file_path.name}；"
+                    "请先在可信的 PDF 工具中解除密码后重试"
+                ) from exc
+            raise PDFRecognitionError(
+                f"PDF 文件损坏或格式异常：{file_path.name}"
+            ) from exc
+        try:
+            page_count = len(document)
+        except Exception as exc:
+            raise PDFRecognitionError(
+                f"PDF 文件损坏，无法读取页面结构：{file_path.name}"
+            ) from exc
+        if page_count <= 0:
+            raise PDFRecognitionError(f"PDF 文件没有可读取页面：{file_path.name}")
+        if page_count > _PDF_MAX_PAGES:
+            raise PDFResourceLimitError(
+                f"PDF 页数超过安全上限：{file_path.name}，"
+                f"共 {page_count} 页，允许不超过 {_PDF_MAX_PAGES} 页"
+            )
+        yield document, page_count
+    finally:
+        if document is not None:
+            try:
+                document.close()
+            except Exception:
+                pass
+        _PDF_LOCK.release()
+
+
+@contextmanager
+def _open_pdf_document(file_path: Path) -> Iterator[tuple[Any, int]]:
+    if _PDF_BACKEND == "pdfium":
+        with _open_pdfium_document(file_path) as opened:
+            yield opened
+        return
+    with _open_pdf_reader(file_path) as opened:
+        yield opened
+
+
+def _extract_pdf_text(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> str:
+    """逐页提取完整 PDF 文字层，避免固定字节截断和二进制乱码。"""
+    if _PDF_BACKEND == "pdfium":
+        return _extract_pdfium_text(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+
+    chunks: list[str] = []
+    character_count = 0
+    with _open_pdf_reader(file_path) as (reader, page_count):
+        for page_number, page in enumerate(reader.pages, start=1):
+            _raise_if_cancelled(cancelled)
+            if progress_callback is not None:
+                progress_callback(
+                    page_number,
+                    page_count,
+                    f"正在读取 PDF 文字层：{file_path.name}（{page_number}/{page_count}）",
+                )
+            try:
+                page_text = page.extract_text() or ""
+            except Exception as exc:
+                raise PDFRecognitionError(
+                    f"PDF 第 {page_number} 页文字层损坏：{file_path.name}"
+                ) from exc
+            if page_text:
+                character_count += len(page_text)
+                if character_count > _PDF_MAX_TEXT_CHARS:
+                    raise PDFResourceLimitError(
+                        f"PDF 文字量超过安全上限：{file_path.name}，"
+                        f"允许不超过 {_PDF_MAX_TEXT_CHARS} 个字符"
+                    )
+                chunks.append(page_text)
+        _raise_if_cancelled(cancelled)
+    return "\n".join(chunks)
+
+
+def _extract_pdfium_text(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> str:
+    """使用 PDFium 逐页提取 Win7 兼容包中的完整文字层。"""
+    chunks: list[str] = []
+    character_count = 0
+    with _open_pdfium_document(file_path) as (document, page_count):
+        for page_index in range(page_count):
+            page_number = page_index + 1
+            _raise_if_cancelled(cancelled)
+            if progress_callback is not None:
+                progress_callback(
+                    page_number,
+                    page_count,
+                    f"正在读取 PDF 文字层：{file_path.name}（{page_number}/{page_count}）",
+                )
+            page = None
+            text_page = None
+            try:
+                page = document[page_index]
+                text_page = page.get_textpage()
+                page_text = text_page.get_text_range() or ""
+            except Exception as exc:
+                raise PDFRecognitionError(
+                    f"PDF 第 {page_number} 页文字层损坏：{file_path.name}"
+                ) from exc
+            finally:
+                if text_page is not None:
+                    try:
+                        text_page.close()
+                    except Exception:
+                        pass
+                if page is not None:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+            if page_text:
+                character_count += len(page_text)
+                if character_count > _PDF_MAX_TEXT_CHARS:
+                    raise PDFResourceLimitError(
+                        f"PDF 文字量超过安全上限：{file_path.name}，"
+                        f"允许不超过 {_PDF_MAX_TEXT_CHARS} 个字符"
+                    )
+                chunks.append(page_text)
+        _raise_if_cancelled(cancelled)
+    return "\n".join(chunks)
+
+
+def _iter_pdf_xobject_images(
+    owner: Any,
+    *,
+    ancestors: tuple[str, ...] = (),
+    seen: set[tuple[int, int] | int] | None = None,
+    counter: list[int] | None = None,
+    depth: int = 0,
+) -> Iterator[tuple[tuple[str, ...], Any]]:
+    """有界遍历页面与 Form XObject 中的图片，跳过循环引用。"""
+    if depth > 8:
+        raise PDFResourceLimitError("PDF 页面对象嵌套层级超过安全上限")
+    if seen is None:
+        seen = set()
+    if counter is None:
+        counter = [0]
+    try:
+        resources = owner.get("/Resources")
+        if resources is None:
+            return
+        resources = resources.get_object()
+        xobjects = resources.get("/XObject")
+        if xobjects is None:
+            return
+        xobjects = xobjects.get_object()
+    except Exception as exc:
+        raise PDFRecognitionError("PDF 页面资源结构损坏") from exc
+
+    for name in xobjects:
+        counter[0] += 1
+        if counter[0] > _PDF_MAX_XOBJECTS_PER_PAGE:
+            raise PDFResourceLimitError("PDF 单页图像对象数量超过安全上限")
+        try:
+            candidate = xobjects[name].get_object()
+        except Exception as exc:
+            raise PDFRecognitionError("PDF 页面图像对象损坏") from exc
+        reference = getattr(candidate, "indirect_reference", None)
+        if reference is not None:
+            identity: tuple[int, int] | int = (
+                int(reference.idnum),
+                int(reference.generation),
+            )
+        else:
+            identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        subtype = str(candidate.get("/Subtype") or "")
+        image_path = (*ancestors, str(name))
+        if subtype == "/Image":
+            yield image_path, candidate
+        elif subtype == "/Form":
+            yield from _iter_pdf_xobject_images(
+                candidate,
+                ancestors=image_path,
+                seen=seen,
+                counter=counter,
+                depth=depth + 1,
+            )
+
+
+def _pdf_image_dimensions(image_object: Any) -> tuple[int, int]:
+    try:
+        width = int(image_object.get("/Width") or 0)
+        height = int(image_object.get("/Height") or 0)
+    except (TypeError, ValueError) as exc:
+        raise PDFRecognitionError("PDF 页面图像尺寸无效") from exc
+    if width <= 0 or height <= 0:
+        raise PDFRecognitionError("PDF 页面图像缺少有效尺寸")
+    return width, height
+
+
+def _release_pdf_image_decode_cache(
+    image_object: Any,
+    *,
+    seen: set[int] | None = None,
+) -> None:
+    """释放 pypdf 为当前图片保留的解码缓存，避免多页扫描件线性占用内存。"""
+    if seen is None:
+        seen = set()
+    identity = id(image_object)
+    if identity in seen:
+        return
+    seen.add(identity)
+
+    if hasattr(image_object, "decoded_self"):
+        try:
+            image_object.decoded_self = None
+        except Exception:
+            pass
+    try:
+        soft_mask = image_object.get("/SMask")
+        if soft_mask is not None:
+            _release_pdf_image_decode_cache(soft_mask.get_object(), seen=seen)
+    except Exception:
+        pass
+
+
+def _iter_pdfium_ocr_images(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Iterator[bytes]:
+    """按页渲染扫描 PDF，覆盖内嵌图、表单及复杂页面组合。"""
+    total_pixels = 0
+    total_decoded_bytes = 0
+    with _open_pdfium_document(file_path) as (document, page_count):
+        for page_index in range(page_count):
+            page_number = page_index + 1
+            _raise_if_cancelled(cancelled)
+            if progress_callback is not None:
+                progress_callback(
+                    page_number,
+                    page_count,
+                    f"正在识别扫描 PDF：{file_path.name}（{page_number}/{page_count}）",
+                )
+
+            page = None
+            bitmap = None
+            image = None
+            try:
+                page = document[page_index]
+                page_width, page_height = page.get_size()
+                if (
+                    not math.isfinite(page_width)
+                    or not math.isfinite(page_height)
+                    or page_width <= 0
+                    or page_height <= 0
+                ):
+                    raise PDFRecognitionError(
+                        f"PDF 第 {page_number} 页尺寸无效：{file_path.name}"
+                    )
+                width = max(1, math.ceil(page_width * _PDF_PAGE_RENDER_SCALE))
+                height = max(1, math.ceil(page_height * _PDF_PAGE_RENDER_SCALE))
+                pixels = width * height
+                decoded_bytes = pixels * 4
+                if pixels > _PDF_MAX_IMAGE_PIXELS:
+                    raise PDFResourceLimitError(
+                        f"PDF 第 {page_number} 页渲染像素超过安全上限："
+                        f"{pixels} > {_PDF_MAX_IMAGE_PIXELS}"
+                    )
+                if decoded_bytes > _PDF_MAX_DECODED_IMAGE_BYTES:
+                    raise PDFResourceLimitError(
+                        f"PDF 第 {page_number} 页估算解码内存超过安全上限："
+                        f"{decoded_bytes} > {_PDF_MAX_DECODED_IMAGE_BYTES} bytes"
+                    )
+                total_pixels += pixels
+                total_decoded_bytes += decoded_bytes
+                if total_pixels > _PDF_MAX_TOTAL_IMAGE_PIXELS:
+                    raise PDFResourceLimitError(
+                        f"PDF 累计页面像素超过安全上限：{file_path.name}"
+                    )
+                if total_decoded_bytes > _PDF_MAX_TOTAL_DECODED_IMAGE_BYTES:
+                    raise PDFResourceLimitError(
+                        f"PDF 累计估算解码内存超过安全上限：{file_path.name}"
+                    )
+
+                bitmap = page.render(scale=_PDF_PAGE_RENDER_SCALE)
+                image = bitmap.to_pil()
+                with BytesIO() as output:
+                    image.save(output, format="PNG", compress_level=1)
+                    payload = output.getvalue()
+            except (MaterialCollectionCancelled, PDFRecognitionError):
+                raise
+            except Exception as exc:
+                raise PDFRecognitionError(
+                    f"PDF 第 {page_number} 页损坏或无法安全渲染：{file_path.name}"
+                ) from exc
+            finally:
+                if image is not None:
+                    try:
+                        image.close()
+                    except Exception:
+                        pass
+                if bitmap is not None:
+                    try:
+                        bitmap.close()
+                    except Exception:
+                        pass
+                if page is not None:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+            _raise_if_cancelled(cancelled)
+            if not payload:
+                raise PDFRecognitionError(
+                    f"PDF 第 {page_number} 页渲染结果为空：{file_path.name}"
+                )
+            if len(payload) > _PDF_MAX_ENCODED_IMAGE_BYTES:
+                raise PDFResourceLimitError(
+                    f"PDF 第 {page_number} 页渲染图像体积超过安全上限："
+                    f"{len(payload)} > {_PDF_MAX_ENCODED_IMAGE_BYTES} bytes"
+                )
+            yield payload
+        _raise_if_cancelled(cancelled)
+
+
+def _iter_pdf_ocr_images(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Iterator[bytes]:
+    """逐页、逐图像产出 OCR 输入；每次只保留当前图像的解码结果。"""
+    if _PDF_BACKEND == "pdfium":
+        yield from _iter_pdfium_ocr_images(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+        return
+
+    total_pixels = 0
+    total_decoded_bytes = 0
+    image_count = 0
+    with _open_pdf_reader(file_path) as (reader, page_count):
+        for page_number, page in enumerate(reader.pages, start=1):
+            _raise_if_cancelled(cancelled)
+            if progress_callback is not None:
+                progress_callback(
+                    page_number,
+                    page_count,
+                    f"正在识别扫描 PDF：{file_path.name}（{page_number}/{page_count}）",
+                )
+            candidates = list(_iter_pdf_xobject_images(page))
+            if len(candidates) > _PDF_MAX_IMAGES_PER_PAGE:
+                raise PDFResourceLimitError(
+                    f"PDF 第 {page_number} 页图像数量超过安全上限："
+                    f"{len(candidates)} > {_PDF_MAX_IMAGES_PER_PAGE}"
+                )
+            for image_path, image_object in candidates:
+                _raise_if_cancelled(cancelled)
+                width, height = _pdf_image_dimensions(image_object)
+                pixels = width * height
+                decoded_bytes = pixels * 4
+                if pixels > _PDF_MAX_IMAGE_PIXELS:
+                    raise PDFResourceLimitError(
+                        f"PDF 第 {page_number} 页图像像素超过安全上限："
+                        f"{pixels} > {_PDF_MAX_IMAGE_PIXELS}"
+                    )
+                if decoded_bytes > _PDF_MAX_DECODED_IMAGE_BYTES:
+                    raise PDFResourceLimitError(
+                        f"PDF 第 {page_number} 页图像估算解码内存超过安全上限："
+                        f"{decoded_bytes} > {_PDF_MAX_DECODED_IMAGE_BYTES} bytes"
+                    )
+                total_pixels += pixels
+                total_decoded_bytes += decoded_bytes
+                if total_pixels > _PDF_MAX_TOTAL_IMAGE_PIXELS:
+                    raise PDFResourceLimitError(
+                        f"PDF 累计图像像素超过安全上限：{file_path.name}"
+                    )
+                if total_decoded_bytes > _PDF_MAX_TOTAL_DECODED_IMAGE_BYTES:
+                    raise PDFResourceLimitError(
+                        f"PDF 累计估算解码内存超过安全上限：{file_path.name}"
+                    )
+                image_key: str | tuple[str, ...]
+                image_key = image_path[0] if len(image_path) == 1 else image_path
+                image_file = None
+                try:
+                    image_file = page.images[image_key]
+                    payload = bytes(image_file.data)
+                except ImportError as exc:
+                    raise PDFRecognitionError(
+                        "PDF 图片解码组件不可用，请重新安装完整版本后重试"
+                    ) from exc
+                except Exception as exc:
+                    raise PDFRecognitionError(
+                        f"PDF 第 {page_number} 页图像损坏或格式不受支持："
+                        f"{file_path.name}"
+                    ) from exc
+                finally:
+                    if image_file is not None:
+                        pil_image = getattr(image_file, "image", None)
+                        if pil_image is not None:
+                            try:
+                                pil_image.close()
+                            except Exception:
+                                pass
+                    _release_pdf_image_decode_cache(image_object)
+                if not payload:
+                    raise PDFRecognitionError(
+                        f"PDF 第 {page_number} 页图像为空：{file_path.name}"
+                    )
+                if len(payload) > _PDF_MAX_ENCODED_IMAGE_BYTES:
+                    raise PDFResourceLimitError(
+                        f"PDF 第 {page_number} 页解码后图像体积超过安全上限："
+                        f"{len(payload)} > {_PDF_MAX_ENCODED_IMAGE_BYTES} bytes"
+                    )
+                image_count += 1
+                yield payload
+        _raise_if_cancelled(cancelled)
+    if image_count == 0:
+        raise PDFRecognitionError(
+            f"扫描型 PDF 未找到可安全提取的页面图片：{file_path.name}；"
+            "如该文件由特殊渲染器生成，请先另存为标准 PDF 或逐页图片后重试"
+        )
+
+
+def _extract_document_text(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> str:
     """提取文档内部文本（支持 .docx, .txt, .pdf, .doc 纯文本搜索）。"""
     ext = file_path.suffix.lower()
     if ext == ".docx":
@@ -1036,15 +1674,11 @@ def _extract_document_text(file_path: Path) -> str:
         except Exception:
             pass
     elif ext == ".pdf":
-        try:
-            with open(file_path, "rb") as f:
-                content = f.read(150000)
-            texts = re.findall(rb"\((.*?)\)[\s]*Tj", content)
-            if texts:
-                return b" ".join(texts).decode("utf-8", errors="ignore")
-            return content.decode("utf-8", errors="ignore")
-        except Exception:
-            pass
+        return _extract_pdf_text(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
     elif ext == ".doc":
         try:
             with open(file_path, "rb") as f:
@@ -1053,36 +1687,6 @@ def _extract_document_text(file_path: Path) -> str:
         except Exception:
             pass
     return ""
-
-
-def _extract_pdf_image_bytes(file_path: Path) -> bytes | None:
-    """如果 PDF 为纯图片扫描版，从二进制流中提取首张内嵌图片（JPEG/PNG）用于 OCR。"""
-    try:
-        with file_path.open("rb") as source:
-            if os.fstat(source.fileno()).st_size == 0:
-                return None
-            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                idx = 0
-                while True:
-                    s_idx = data.find(b"stream", idx)
-                    if s_idx == -1:
-                        break
-                    start = s_idx + 6
-                    if data[start:start + 2] == b"\r\n":
-                        start += 2
-                    elif data[start:start + 1] == b"\n":
-                        start += 1
-                    e_idx = data.find(b"endstream", start)
-                    if e_idx == -1:
-                        break
-                    # 先检查映射区中的魔数，仅在真正命中时复制图片内容。
-                    if data[start:start + 3] == b"\xff\xd8\xff" or data[start:start + 8] == b"\x89PNG\r\n\x1a\n":
-                        if e_idx - start <= _PDF_EMBEDDED_IMAGE_MAX_BYTES:
-                            return bytes(data[start:e_idx])
-                    idx = e_idx + 9
-    except Exception:
-        pass
-    return None
 
 
 def _build_doc_format_hint(file_path: Path) -> str | None:
@@ -1311,26 +1915,67 @@ def _classify_text_content(
     return None, "", ""
 
 
-def _read_ocr_text(file_path: Path) -> tuple[str, list[str], bool]:
-    """调用本地 OCR 并兼容 RapidOCR 与测试/旧适配器的两种结果形态。"""
+def _iter_ocr_targets(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Iterator[str | bytes]:
+    if file_path.suffix.lower() == ".pdf":
+        yield from _iter_pdf_ocr_images(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+        return
+    _raise_if_cancelled(cancelled)
+    yield str(file_path)
+
+
+def _collect_ocr_items(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[list[Any], bool]:
+    """逐个 OCR 当前文件或 PDF 页面，并保留现有引擎返回结构。"""
     engine = _get_ocr_engine()
     if engine is None:
-        return "", [], False
+        return [], False
 
-    target_input: str | bytes = str(file_path)
-    if file_path.suffix.lower() == ".pdf":
-        img_bytes = _extract_pdf_image_bytes(file_path)
-        if not img_bytes:
-            return "", [], False
-        target_input = img_bytes
-
+    items: list[Any] = []
     try:
-        with _OCR_LOCK:
-            result, _ = engine(target_input)
+        for target_input in _iter_ocr_targets(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        ):
+            _raise_if_cancelled(cancelled)
+            with _OCR_LOCK:
+                result, _ = engine(target_input)
+            if result:
+                items.extend(result)
+    except (MaterialCollectionCancelled, PDFRecognitionError):
+        raise
     except Exception:
-        return "", [], False
+        return [], False
+    return items, True
+
+
+def _read_ocr_text(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[str, list[str], bool]:
+    """调用本地 OCR 并兼容 RapidOCR 与测试/旧适配器的两种结果形态。"""
+    result, analysis_complete = _collect_ocr_items(
+        file_path,
+        progress_callback=progress_callback,
+        cancelled=cancelled,
+    )
     if not result:
-        return "", [], True
+        return "", [], analysis_complete
 
     texts: list[str] = []
     for item in result:
@@ -1343,14 +1988,21 @@ def _read_ocr_text(file_path: Path) -> tuple[str, list[str], bool]:
             texts.append(f"{item[0]}：{item[1]}")
         elif len(item) >= 2 and isinstance(item[1], str):
             texts.append(item[1])
-    return " ".join(texts), texts, True
+    return " ".join(texts), texts, analysis_complete
 
 
 def _analyze_ocr_file(
     file_path: Path,
     requested_types: list[str] | None = None,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str | None, str, str, str, str, str, list[str], bool]:
-    full_text, _texts, analysis_complete = _read_ocr_text(file_path)
+    full_text, _texts, analysis_complete = _read_ocr_text(
+        file_path,
+        progress_callback=progress_callback,
+        cancelled=cancelled,
+    )
     names = _extract_person_names(full_text)
     extracted_name = names[0] if names else ""
     extracted_id = _extract_id_card(full_text)
@@ -1365,24 +2017,19 @@ def _analyze_ocr_file(
 def _analyze_folder_ocr_file(
     file_path: Path,
     requested_types: list[str] | None = None,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str | None, str, str, str, str, str, bool]:
     """保持既有标准材料规则，并返回可供自定义材料重分类的 OCR 文字。"""
-    engine = _get_ocr_engine()
-    if engine is None:
-        return None, "", "", "", "", "", False
-
-    target_input: str | bytes = str(file_path)
-    if file_path.suffix.lower() == ".pdf":
-        img_bytes = _extract_pdf_image_bytes(file_path)
-        if not img_bytes:
-            return None, "", "", "", "", "", False
-        target_input = img_bytes
-
+    result, analysis_complete = _collect_ocr_items(
+        file_path,
+        progress_callback=progress_callback,
+        cancelled=cancelled,
+    )
+    if not result:
+        return None, "", "", "", "", "", analysis_complete
     try:
-        with _OCR_LOCK:
-            result, _ = engine(target_input)
-        if not result:
-            return None, "", "", "", "", "", True
         texts = [item[1] for item in result]
         full_text = " ".join(texts)
     except Exception:
@@ -1469,7 +2116,7 @@ def _analyze_folder_ocr_file(
         extracted_name,
         extracted_id,
         full_text,
-        True,
+        analysis_complete,
     )
 
 
@@ -1491,6 +2138,8 @@ def _classify_material_type(
     cache: dict[str, Any] | None = None,
     use_cache: bool = True,
     cache_stats: dict[str, int] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str | None, str, str, str, str, bool]:
     """Classify file into a material type using filenames, document contents, and local OCR.
 
@@ -1498,6 +2147,10 @@ def _classify_material_type(
               extracted_name, extracted_id, cache_hit)
     cache_hit=True 表示本次分类结果来自 OCR 缓存命中。
     """
+    _raise_if_cancelled(cancelled)
+    is_pdf = file_path.suffix.lower() == ".pdf"
+    if is_pdf:
+        _validate_pdf_source_size(file_path)
     stem = Path(filename).stem.lower()
 
     # 1. 优先匹配当前请求列表中明确包含在文件名里的材料（标准或自定义，按关键词长度降序最长优先匹配）
@@ -1512,6 +2165,10 @@ def _classify_material_type(
         for syn in sorted(syns, key=lambda s: len(s), reverse=True):
             if syn.lower() in stem:
                 sub = "正面" if "正面" in stem or "人像" in stem else ("反面" if "反面" in stem or "国徽" in stem else "")
+                if is_pdf:
+                    # 文件名已足够判型时仍需拒绝损坏、加密或超限 PDF。
+                    with _open_pdf_document(file_path):
+                        pass
                 return req_type, "filename_keyword", sub, "", "", False
 
     # 2b. 全量同义词库匹配（按优先级互斥判断）
@@ -1519,10 +2176,17 @@ def _classify_material_type(
         for syn in sorted(synonyms, key=lambda s: len(s), reverse=True):
             if syn.lower() in stem:
                 sub = "正面" if "正面" in stem or "人像" in stem else ("反面" if "反面" in stem or "国徽" in stem else "")
+                if is_pdf:
+                    with _open_pdf_document(file_path):
+                        pass
                 return mat_type, "filename_keyword", sub, "", "", False
 
     # 3. 文档内部文本内容深度检索（针对文件名如 01.docx, file.pdf 等非标准命名）
-    doc_text = _extract_document_text(file_path)
+    doc_text = _extract_document_text(
+        file_path,
+        progress_callback=progress_callback,
+        cancelled=cancelled,
+    )
     if doc_text:
         for mat_type, content_keywords in _DOC_CONTENT_PATTERNS.items():
             for kw in content_keywords:
@@ -1581,7 +2245,12 @@ def _classify_material_type(
             ocr_id,
             ocr_text,
             analysis_complete,
-        ) = _analyze_folder_ocr_file(file_path, requested_types=requested_types)
+        ) = _analyze_folder_ocr_file(
+            file_path,
+            requested_types=requested_types,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
         if use_cache and cache is not None and analysis_complete:
             stores_standard_result = ocr_mat in MATERIAL_SYNONYMS
             _store_ocr_cache(
@@ -1677,7 +2346,12 @@ def _scan_flat_library_files(lib_path: Path, skip_dir: Path | None = None) -> li
     return sorted(result, key=lambda path: path.relative_to(lib_path).as_posix().casefold())
 
 
-def _extract_flat_document_text(file_path: Path) -> str:
+def _extract_flat_document_text(
+    file_path: Path,
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> str:
     """提取无序库文档正文；该扩展能力仅用于 TASK-8，不改变原文件夹模式。"""
     ext = file_path.suffix.lower()
     if ext == ".docx":
@@ -1688,7 +2362,11 @@ def _extract_flat_document_text(file_path: Path) -> str:
         except Exception:
             return ""
     if ext in DOC_EXTENSIONS:
-        return _extract_document_text(file_path)
+        return _extract_document_text(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
     if ext == ".xlsx":
         try:
             workbook = load_workbook(file_path, read_only=True, data_only=True)
@@ -1895,24 +2573,53 @@ def _store_flat_index_entry(
 def _analyze_flat_source(
     file_path: Path,
     requested_types: list[str],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str, str, str, list[str], str, str, bool]:
     """分析单个无序库文件，返回类型、方式、子类型、姓名列表、证件号和正文。"""
-    text = _extract_flat_document_text(file_path)
+    text = _extract_flat_document_text(
+        file_path,
+        progress_callback=progress_callback,
+        cancelled=cancelled,
+    )
     method_prefix = "doc_content"
     analysis_complete = True
-    if not text and (file_path.suffix.lower() in IMAGE_EXTENSIONS or file_path.suffix.lower() == ".pdf"):
-        material, method, subtype, _name, extracted_id, text, names, analysis_complete = _analyze_ocr_file(
+    names = _extract_person_names(text)
+    extracted_id = _extract_id_card(text)
+    material, method, subtype = _classify_text_content(
+        text,
+        requested_types=requested_types,
+        method_prefix=method_prefix,
+    )
+
+    ext = file_path.suffix.lower()
+    needs_visual_ocr = (
+        (ext in IMAGE_EXTENSIONS and not text)
+        or (ext == ".pdf" and (not material or not names))
+    )
+    if needs_visual_ocr:
+        (
+            ocr_material,
+            ocr_method,
+            ocr_subtype,
+            _name,
+            ocr_id,
+            ocr_text,
+            ocr_names,
+            analysis_complete,
+        ) = _analyze_ocr_file(
             file_path,
             requested_types=requested_types,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
         )
-    else:
-        names = _extract_person_names(text)
-        extracted_id = _extract_id_card(text)
-        material, method, subtype = _classify_text_content(
-            text,
-            requested_types=requested_types,
-            method_prefix=method_prefix,
-        )
+        if analysis_complete:
+            names = list(dict.fromkeys([*names, *ocr_names]))
+            extracted_id = extracted_id or ocr_id
+            if not material and ocr_material:
+                material, method, subtype = ocr_material, ocr_method, ocr_subtype
+            text = " ".join(part for part in (text, ocr_text) if part)
 
     if not material:
         material, filename_method = _classify_material_from_filename(file_path.name, requested_types)
@@ -1962,6 +2669,7 @@ def _build_flat_ocr_index(
     cache_stats: dict[str, int],
     warnings: list[str],
     progress_callback: Callable[[int, int, str], None] | None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[_FlatIndexedFile], bool]:
     """建立/复用全局 OCR 索引；小批次密集、超大批次分段持久化。"""
     source_files = [
@@ -1974,6 +2682,7 @@ def _build_flat_ocr_index(
     cache_changed_since_checkpoint = False
 
     for index, source_path in enumerate(source_files, start=1):
+        _raise_if_cancelled(cancelled)
         rel_path = source_path.relative_to(lib_path).as_posix()
         active_paths.add(rel_path)
         if progress_callback:
@@ -1989,9 +2698,18 @@ def _build_flat_ocr_index(
         cache_hit = entry is not None
         extracted_id = ""
         if entry is None:
-            material, method, subtype, names, extracted_id, text, analysis_complete = _analyze_flat_source(
-                source_path, requested_types,
-            )
+            try:
+                material, method, subtype, names, extracted_id, text, analysis_complete = _analyze_flat_source(
+                    source_path,
+                    requested_types,
+                    progress_callback=progress_callback,
+                    cancelled=cancelled,
+                )
+            except MaterialCollectionCancelled:
+                raise
+            except PDFRecognitionError as exc:
+                warnings.append(f"PDF 识别失败，已跳过 {rel_path}：{exc}")
+                continue
             if fingerprint is None:
                 fingerprint = _compute_full_file_fingerprint(source_path)
             if fingerprint is None:
@@ -2272,10 +2990,12 @@ def collect_employee_materials(
     collect_all: bool = False,
     scan_depth: int = 1,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
     use_ocr_cache: bool = True,
     ocr_cache_path: Path | str | None = None,
 ) -> MaterialCollectResult:
     """Search, match, extract, and package employee materials from the repository."""
+    _raise_if_cancelled(cancelled)
     lib_path = Path(library_dir).expanduser().resolve()
     out_path = Path(output_dir).expanduser().resolve()
 
@@ -2323,6 +3043,7 @@ def collect_employee_materials(
     cache_skipped_reason: str | None = None
     cache_write_ok = True
     current_signature = ""
+    legacy_pdf_cache_invalidated = 0
 
     if effective_use_ocr_cache:
         current_signature = _get_engine_signature()
@@ -2332,6 +3053,9 @@ def collect_employee_materials(
             else (lib_path / _OCR_CACHE_FILE_NAME)
         )
         ocr_cache = _load_ocr_cache(cache_path)
+        legacy_pdf_cache_invalidated = _invalidate_legacy_pdf_cache_entries(ocr_cache)
+        legacy_pdf_cache_invalidated += _invalidate_changed_pdf_backend_entries(ocr_cache)
+        cache_stats["invalidated"] += legacy_pdf_cache_invalidated
         # 引擎升级 → 视为全量失效（彻底重写 entries）
         prev_sig = ocr_cache.get("engine_signature")
         if prev_sig and prev_sig != current_signature:
@@ -2349,6 +3073,12 @@ def collect_employee_materials(
     folder_match_counts: dict[str, int] = {}
     employee_result_keys: list[str] = []
 
+    if legacy_pdf_cache_invalidated:
+        warnings.append(
+            f"PDF 识别能力已升级，已安全失效 {legacy_pdf_cache_invalidated} 条旧 PDF 缓存；"
+            "图片和其他文档缓存保持不变。"
+        )
+
     # 引擎升级警告：本轮第一次识别时输出一次即可
     if (
         effective_use_ocr_cache
@@ -2365,6 +3095,7 @@ def collect_employee_materials(
     flat_index: list[_FlatIndexedFile] = []
     duplicate_target_names: set[str] = set()
     if library_mode == LIBRARY_MODE_PERSON_FOLDER:
+        _raise_if_cancelled(cancelled)
         if progress_callback:
             progress_callback(0, len(employees), "正在扫描资料库文件夹索引...")
         folder_index = _scan_folder_index(lib_path, max_depth=scan_depth, skip_dir=out_path)
@@ -2390,6 +3121,7 @@ def collect_employee_materials(
             cache_stats,
             warnings,
             progress_callback,
+            cancelled,
         )
         if not checkpoint_ok:
             cache_write_ok = False
@@ -2399,6 +3131,7 @@ def collect_employee_materials(
             )
 
     for idx, emp in enumerate(employees):
+        _raise_if_cancelled(cancelled)
         emp_key = (
             _flat_employee_result_key(emp, duplicate_target_names)
             if library_mode == LIBRARY_MODE_FLAT_OCR
@@ -2475,6 +3208,8 @@ def collect_employee_materials(
                 ocr_cache=ocr_cache,
                 use_ocr_cache=effective_use_ocr_cache,
                 cache_stats=cache_stats,
+                progress_callback=progress_callback,
+                cancelled=cancelled,
             )
             if emp_missing:
                 missing_records[emp_key] = emp_missing
@@ -2484,7 +3219,11 @@ def collect_employee_materials(
         effective_use_ocr_cache
         and ocr_cache is not None
         and cache_path is not None
-        and (ocr_cache.get("entries") or library_mode == LIBRARY_MODE_FLAT_OCR)
+        and (
+            ocr_cache.get("entries")
+            or library_mode == LIBRARY_MODE_FLAT_OCR
+            or legacy_pdf_cache_invalidated
+        )
     ):
         _trim_cache_by_age_and_size(ocr_cache)
         if not _save_ocr_cache(cache_path, ocr_cache):
@@ -2512,11 +3251,13 @@ def collect_employee_materials(
 
     zip_path: Path | None = None
     if create_zip:
+        _raise_if_cancelled(cancelled)
         zip_path = out_path.parent / f"{out_path.name}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, dirs, files in os.walk(out_path):
                 dirs[:] = [d for d in dirs if not d.startswith(".")]
                 for f in files:
+                    _raise_if_cancelled(cancelled)
                     if _is_junk_or_temp_file(f):
                         continue
                     full_p = Path(root) / f
@@ -2761,6 +3502,8 @@ def _collect_specific_materials(
     ocr_cache: dict[str, Any] | None = None,
     use_ocr_cache: bool = True,
     cache_stats: dict[str, int] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[str]:
     """指定材料模式：在匹配到的文件夹中精准搜集对应材料类型的文件。
 
@@ -2776,10 +3519,12 @@ def _collect_specific_materials(
     # 1. 扫描匹配到的所有文件夹，收集所有候选文件
     raw_candidates: list[tuple[Path, str, str]] = []
     for folder_path, folder_reason in matched_folders:
+        _raise_if_cancelled(cancelled)
         try:
             for root, dirs, files in os.walk(folder_path):
                 dirs[:] = [d for d in dirs if not d.startswith(".")]
                 for f in files:
+                    _raise_if_cancelled(cancelled)
                     if _is_junk_or_temp_file(f):
                         continue
                     f_path = Path(root) / f
@@ -2791,6 +3536,8 @@ def _collect_specific_materials(
                     except ValueError:
                         rel_p = f_path.name
                     raw_candidates.append((f_path, rel_p, folder_reason))
+        except MaterialCollectionCancelled:
+            raise
         except Exception as e:
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")
 
@@ -2803,6 +3550,7 @@ def _collect_specific_materials(
 
     # 3. 按优先级顺序逐个进行精准识别（支持短路早停）
     for idx_cand, (_cand_score, f_path, rel_p, folder_reason) in enumerate(scored_candidates):
+        _raise_if_cancelled(cancelled)
         sig = _get_file_signature(f_path)
         if sig in seen_hashes:
             continue
@@ -2816,7 +3564,11 @@ def _collect_specific_materials(
                 cache=ocr_cache,
                 use_cache=use_ocr_cache,
                 cache_stats=cache_stats,
+                progress_callback=progress_callback,
+                cancelled=cancelled,
             )
+        except MaterialCollectionCancelled:
+            raise
         except Exception as exc:
             warnings.append(f"文件读取异常 {f_path.name}: {exc}")
             if doc_hint:
@@ -2854,6 +3606,7 @@ def _collect_specific_materials(
             continue
 
         for seq, (src_path, rel_p, match_reason, subtype, ocr_name, ocr_id, cache_hit) in enumerate(m_list, start=1):
+            _raise_if_cancelled(cancelled)
             ext = src_path.suffix
             clean_mat = safe_filename(mat_type)
 

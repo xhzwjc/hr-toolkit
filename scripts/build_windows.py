@@ -41,6 +41,7 @@ WINDOWS_BUILD_MODULES = {
     "certifi": "certifi",
     "openpyxl": "openpyxl",
     "py7zr": "py7zr",
+    "pypdf": "pypdf",
     "unrar.cffi.rarfile": "unrar2-cffi",
     "xlrd": "xlrd",
     "pythoncom": "pywin32",
@@ -54,6 +55,7 @@ WINDOWS_WIN7_BUILD_MODULES = {
     "openpyxl": "openpyxl",
     "pefile": "pefile",
     "py7zr": "py7zr",
+    "pypdfium2": "pypdfium2",
     "xlrd": "xlrd",
     "pythoncom": "pywin32",
     "pywintypes": "pywin32",
@@ -67,6 +69,7 @@ WIN7_PINNED_DISTRIBUTIONS = {
     "Pillow": "10.4.0",
     "PyInstaller": "6.21.0",
     "py7zr": "0.22.0",
+    "pypdfium2": "5.13.0",
     "pywin32": "306",
     "rapidocr-onnxruntime": "1.4.4",
 }
@@ -76,6 +79,7 @@ HIDDEN_IMPORTS = (
     "win32com.client",
     "win32timezone",
     "py7zr",
+    "pypdf",
     "unrar.cffi.rarfile",
     "unrar.cffi.unrarlib",
     "xlrd",
@@ -86,6 +90,7 @@ WIN7_HIDDEN_IMPORTS = (
     "win32com.client",
     "win32timezone",
     "py7zr",
+    "pypdfium2",
     "xlrd",
 )
 COLLECT_ALL_MODULES = (
@@ -96,6 +101,8 @@ COLLECT_ALL_MODULES = (
 WIN7_COLLECT_ALL_MODULES = (
     "rapidocr_onnxruntime",
     "py7zr",
+    "pypdfium2",
+    "pypdfium2_raw",
 )
 EXCLUDED_MODULES = (
     "pytest",
@@ -634,6 +641,8 @@ def pyinstaller_commands(
         str(WINDOWS_WIN7_MANIFEST if target == WINDOWS_TARGET_WIN7 else WINDOWS_MANIFEST),
         "--add-data",
         f"{README_FILE};.",
+        "--copy-metadata",
+        "pypdfium2" if target == WINDOWS_TARGET_WIN7 else "pypdf",
     ]
     if target == WINDOWS_TARGET_WIN7:
         assert seven_zip_dir is not None

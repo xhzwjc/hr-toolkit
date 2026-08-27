@@ -7,10 +7,19 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from unittest import mock
 
 from openpyxl import load_workbook
+from pypdf import PdfWriter
+from pypdf.generic import (
+    DecodedStreamObject,
+    DictionaryObject,
+    EncodedStreamObject,
+    NameObject,
+    NumberObject,
+)
 
 from hr_toolkit.tools.material_collector import (
     LIBRARY_MODE_FLAT_OCR,
@@ -27,7 +36,6 @@ from hr_toolkit.tools.material_collector import (
     _classify_material_type,
     _compute_cache_key,
     _compute_file_fingerprint,
-    _extract_pdf_image_bytes,
     _extract_document_text,
     _get_engine_signature,
     _hash_id_card,
@@ -41,6 +49,66 @@ from hr_toolkit.tools.material_collector import (
     _scan_folder_index,
     _trim_cache_by_age_and_size,
 )
+
+
+def _write_text_pdf(path: Path, marker: str, *, padding_bytes: int = 0) -> None:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): writer._add_object(font),
+        }),
+    })
+    content = DecodedStreamObject()
+    content.set_data(
+        b"%" + b"x" * padding_bytes
+        + b"\nBT /F1 12 Tf 10 100 Td ("
+        + marker.encode("ascii")
+        + b") Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with path.open("wb") as stream:
+        writer.write(stream)
+
+
+def _write_scanned_pdf(
+    path: Path,
+    *,
+    page_count: int,
+    width: int = 16,
+    height: int = 16,
+) -> None:
+    writer = PdfWriter()
+    for page_index in range(page_count):
+        page = writer.add_blank_page(width=300, height=300)
+        image = EncodedStreamObject()
+        image._data = zlib.compress(
+            bytes([100 + page_index % 100]) * width * height * 3
+        )
+        image.update({
+            NameObject("/Type"): NameObject("/XObject"),
+            NameObject("/Subtype"): NameObject("/Image"),
+            NameObject("/Width"): NumberObject(width),
+            NameObject("/Height"): NumberObject(height),
+            NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+            NameObject("/BitsPerComponent"): NumberObject(8),
+            NameObject("/Filter"): NameObject("/FlateDecode"),
+        })
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/XObject"): DictionaryObject({
+                NameObject("/Im0"): writer._add_object(image),
+            }),
+        })
+        content = DecodedStreamObject()
+        content.set_data(b"q 300 0 0 300 0 0 cm /Im0 Do Q")
+        page[NameObject("/Contents")] = writer._add_object(content)
+    with path.open("wb") as stream:
+        writer.write(stream)
 
 
 class TestResolveMAterialText(unittest.TestCase):
@@ -146,8 +214,8 @@ class TestExclusiveClassification(unittest.TestCase):
             w = lib / "王京川"
             w.mkdir()
             (w / "王京川_身份证正面.jpg").write_text("id front")
-            (w / "王京川_安全员C证.pdf").write_text("safety cert")
-            (w / "王京川_特种作业操作证.pdf").write_text("special cert")
+            _write_text_pdf(w / "王京川_安全员C证.pdf", "safety cert")
+            _write_text_pdf(w / "王京川_特种作业操作证.pdf", "special cert")
 
             out = Path(td) / "输出"
             result = collect_employee_materials(
@@ -208,9 +276,9 @@ class TestCollectAll(unittest.TestCase):
             lib = Path(td) / "资料库"
             lib.mkdir()
             (lib / "张三").mkdir()
-            (lib / "张三" / "身份证.pdf").write_text("id")
+            _write_text_pdf(lib / "张三" / "身份证.pdf", "id")
             (lib / "李四").mkdir()
-            (lib / "李四" / "李四资料.pdf").write_text("lisi")
+            _write_text_pdf(lib / "李四" / "李四资料.pdf", "lisi")
 
             out = Path(td) / "输出"
             result = collect_employee_materials(
@@ -307,7 +375,7 @@ class TestSafetyAndRobustness(unittest.TestCase):
             lib = Path(td) / "资料库"
             lib.mkdir()
             (lib / "张三").mkdir()
-            (lib / "张三" / "身份证.pdf").write_text("id")
+            _write_text_pdf(lib / "张三" / "身份证.pdf", "id")
             nested_out = lib / "output_nested"
 
             with self.assertRaises(ValueError) as ctx:
@@ -406,25 +474,353 @@ class TestSafetyAndRobustness(unittest.TestCase):
                 {first.read_bytes(), second.read_bytes()},
             )
 
-    def test_pdf_image_scan_does_not_change_extracted_bytes(self) -> None:
+    def test_text_pdf_reads_text_after_150kb_without_modifying_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            pdf = Path(td) / "scan.pdf"
-            jpeg = b"\xff\xd8\xffimage-payload\xff\xd9"
-            pdf.write_bytes(
-                b"%PDF-1.4\nstream\nnot-an-image\nendstream\n"
-                b"stream\r\n" + jpeg + b"endstream\n%%EOF"
+            root = Path(td)
+            library = root / "资料库"
+            employee_dir = library / "张三"
+            employee_dir.mkdir(parents=True)
+            pdf = employee_dir / "long-text.pdf"
+            marker = "TAIL_MATERIAL_MARKER"
+            _write_text_pdf(pdf, marker, padding_bytes=180_000)
+            source_hash = hashlib.sha256(pdf.read_bytes()).hexdigest()
+
+            self.assertIn(marker, _extract_document_text(pdf))
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=[marker],
+                use_ocr_cache=False,
             )
 
-            self.assertEqual(_extract_pdf_image_bytes(pdf), jpeg)
+            self.assertEqual(result.matched_file_count, 1)
+            self.assertTrue(
+                (root / "输出" / "张三" / f"张三_{marker}.pdf").is_file()
+            )
+            self.assertEqual(
+                hashlib.sha256(pdf.read_bytes()).hexdigest(),
+                source_hash,
+            )
 
-    def test_oversized_embedded_pdf_image_is_not_copied_into_memory(self) -> None:
-        import hr_toolkit.tools.material_collector as material_collector
+    def test_single_page_scanned_pdf_uses_existing_ocr_engine(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class FakeEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    type(self).call_count += 1
+                    return ([[None, "劳动合同"]], None)
+
+            mc._OCR_ENGINE = FakeEngine()
+            mc._OCR_ATTEMPTED = True
+            with tempfile.TemporaryDirectory() as td:
+                pdf = Path(td) / "scan.pdf"
+                _write_scanned_pdf(pdf, page_count=1)
+
+                result = mc._analyze_folder_ocr_file(pdf)
+
+            self.assertEqual(result[0], "劳动合同")
+            self.assertEqual(FakeEngine.call_count, 1)
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_multi_page_scan_combines_pages_and_reports_progress(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class SequencedEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    page_text = ("员工手册", "签收单")[type(self).call_count]
+                    type(self).call_count += 1
+                    return ([[None, page_text]], None)
+
+            mc._OCR_ENGINE = SequencedEngine()
+            mc._OCR_ATTEMPTED = True
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                library = root / "资料库"
+                employee_dir = library / "张三"
+                employee_dir.mkdir(parents=True)
+                source = employee_dir / "random.pdf"
+                _write_scanned_pdf(source, page_count=2)
+                source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+                progress_messages: list[str] = []
+
+                result = collect_employee_materials(
+                    library,
+                    root / "输出",
+                    roster_source="张三",
+                    material_types=["员工手册签收单"],
+                    use_ocr_cache=False,
+                    progress_callback=lambda _current, _total, message: (
+                        progress_messages.append(message)
+                    ),
+                )
+
+                copied = root / "输出" / "张三" / "张三_员工手册签收单.pdf"
+                self.assertEqual(result.matched_file_count, 1)
+                self.assertEqual(SequencedEngine.call_count, 2)
+                self.assertTrue(copied.is_file())
+                self.assertEqual(
+                    hashlib.sha256(copied.read_bytes()).hexdigest(),
+                    source_hash,
+                )
+                self.assertEqual(
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                    source_hash,
+                )
+                self.assertTrue(any("PDF" in message and "2/2" in message for message in progress_messages))
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_pdf_cancel_stops_between_pages(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class CountingEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    type(self).call_count += 1
+                    return ([[None, "未分类"]], None)
+
+            mc._OCR_ENGINE = CountingEngine()
+            mc._OCR_ATTEMPTED = True
+            with tempfile.TemporaryDirectory() as td:
+                pdf = Path(td) / "multi-page.pdf"
+                _write_scanned_pdf(pdf, page_count=3)
+
+                with self.assertRaisesRegex(mc.MaterialCollectionCancelled, "停止"):
+                    mc._analyze_folder_ocr_file(
+                        pdf,
+                        cancelled=lambda: CountingEngine.call_count >= 1,
+                    )
+
+            self.assertEqual(CountingEngine.call_count, 1)
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_corrupt_and_encrypted_pdf_have_clear_errors(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
 
         with tempfile.TemporaryDirectory() as td:
-            pdf = Path(td) / "large-scan.pdf"
-            pdf.write_bytes(b"stream\n\xff\xd8\xffpayloadendstream")
-            with mock.patch.object(material_collector, "_PDF_EMBEDDED_IMAGE_MAX_BYTES", 4):
-                self.assertIsNone(_extract_pdf_image_bytes(pdf))
+            root = Path(td)
+            corrupt = root / "corrupt.pdf"
+            corrupt.write_bytes(b"%PDF-1.4\ntruncated")
+            corrupt_hash = hashlib.sha256(corrupt.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(mc.PDFRecognitionError, "损坏"):
+                _extract_document_text(corrupt)
+            self.assertEqual(
+                hashlib.sha256(corrupt.read_bytes()).hexdigest(),
+                corrupt_hash,
+            )
+
+            encrypted = root / "encrypted.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=100, height=100)
+            writer.encrypt("secret")
+            with encrypted.open("wb") as stream:
+                writer.write(stream)
+            encrypted_hash = hashlib.sha256(encrypted.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(mc.PDFRecognitionError, "加密"):
+                _extract_document_text(encrypted)
+            self.assertEqual(
+                hashlib.sha256(encrypted.read_bytes()).hexdigest(),
+                encrypted_hash,
+            )
+
+    def test_pdf_resource_limits_fail_before_ocr_decode(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class UnexpectedEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    type(self).call_count += 1
+                    return ([], None)
+
+            mc._OCR_ENGINE = UnexpectedEngine()
+            mc._OCR_ATTEMPTED = True
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                one_page = root / "one-page.pdf"
+                two_pages = root / "two-pages.pdf"
+                _write_scanned_pdf(one_page, page_count=1, width=32, height=32)
+                _write_scanned_pdf(two_pages, page_count=2)
+
+                cases = (
+                    ("_PDF_MAX_FILE_BYTES", 10, one_page, "体积"),
+                    ("_PDF_MAX_PAGES", 1, two_pages, "页数"),
+                    ("_PDF_MAX_IMAGE_PIXELS", 100, one_page, "像素"),
+                    ("_PDF_MAX_DECODED_IMAGE_BYTES", 100, one_page, "解码内存"),
+                )
+                for constant, limit, source, message in cases:
+                    with self.subTest(constant=constant):
+                        with mock.patch.object(mc, constant, limit):
+                            with self.assertRaisesRegex(mc.PDFResourceLimitError, message):
+                                mc._analyze_folder_ocr_file(source)
+
+            self.assertEqual(UnexpectedEngine.call_count, 0)
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_flat_multi_page_pdf_uses_ocr_then_cache(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            class SequencedEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    page_text = ("姓名：张三", "劳动合同")[type(self).call_count]
+                    type(self).call_count += 1
+                    return ([[None, page_text]], None)
+
+            mc._OCR_ENGINE = SequencedEngine()
+            mc._OCR_ATTEMPTED = True
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                library = root / "资料库"
+                library.mkdir()
+                source = library / "random.pdf"
+                _write_scanned_pdf(source, page_count=2)
+                source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+                first = collect_employee_materials(
+                    library,
+                    root / "输出1",
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+                first_calls = SequencedEngine.call_count
+                second = collect_employee_materials(
+                    library,
+                    root / "输出2",
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
+
+                self.assertEqual(first.matched_file_count, 1)
+                self.assertEqual(second.matched_file_count, 1)
+                self.assertEqual(first_calls, 2)
+                self.assertEqual(SequencedEngine.call_count, first_calls)
+                self.assertEqual(second.ocr_cache_hits, 1)
+                copied = root / "输出2" / "张三" / "张三_劳动合同.pdf"
+                self.assertEqual(
+                    hashlib.sha256(copied.read_bytes()).hexdigest(),
+                    source_hash,
+                )
+                self.assertEqual(
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                    source_hash,
+                )
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_pdf_failures_are_reported_without_modifying_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "资料库"
+            employee_dir = library / "张三"
+            employee_dir.mkdir(parents=True)
+            corrupt = employee_dir / "corrupt.pdf"
+            corrupt.write_bytes(b"%PDF-1.4\ntruncated")
+            encrypted = employee_dir / "encrypted.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=100, height=100)
+            writer.encrypt("secret")
+            with encrypted.open("wb") as stream:
+                writer.write(stream)
+            source_hashes = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (corrupt, encrypted)
+            }
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["员工手册签收单"],
+                use_ocr_cache=False,
+            )
+
+            warning_text = "\n".join(result.warnings)
+            self.assertIn("损坏", warning_text)
+            self.assertIn("加密", warning_text)
+            self.assertIn("张三", result.missing_records)
+            for path in (corrupt, encrypted):
+                self.assertEqual(
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    source_hashes[path.name],
+                )
+
+    def test_pdf_handles_are_closed_after_page_ocr(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            mc._OCR_ENGINE = lambda _payload: ([[None, "劳动合同"]], None)
+            mc._OCR_ATTEMPTED = True
+            with tempfile.TemporaryDirectory() as td:
+                source = Path(td) / "scan.pdf"
+                renamed = Path(td) / "renamed.pdf"
+                _write_scanned_pdf(source, page_count=2)
+
+                mc._analyze_folder_ocr_file(source)
+                source.replace(renamed)
+
+                self.assertTrue(renamed.is_file())
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_pdf_page_decode_cache_is_released_after_each_image(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        if mc.PdfReader is None:
+            self.skipTest("pypdf 解码缓存测试不适用于 Win7 PDFium 后端")
+
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "scan.pdf"
+            _write_scanned_pdf(source, page_count=3, width=64, height=64)
+
+            with mock.patch.object(mc, "_PDF_BACKEND", "pypdf"):
+                with mock.patch.object(
+                    mc,
+                    "_release_pdf_image_decode_cache",
+                    wraps=mc._release_pdf_image_decode_cache,
+                ) as release_cache:
+                    payloads = list(mc._iter_pdf_ocr_images(source))
+
+            self.assertEqual(len(payloads), 3)
+            self.assertEqual(release_cache.call_count, 3)
+            for call in release_cache.call_args_list:
+                image_object = call.args[0]
+                self.assertIsNone(image_object.decoded_self)
 
     def test_office_xml_bombs_and_entity_declarations_are_ignored(self) -> None:
         import hr_toolkit.tools.material_collector as material_collector
@@ -472,6 +868,79 @@ class TestOCRCacheHelpers(unittest.TestCase):
 
             self.assertEqual(loaded["entries"], {})
             self.assertEqual(loaded["paths"], {})
+
+    def test_pdf_cache_upgrade_invalidates_only_pdf_entries(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        cache = {
+            "version": 4,
+            "entries": {
+                "pdf-key": {
+                    "sample_filename": "random.pdf",
+                    "analysis_state": "complete",
+                },
+                "image-key": {
+                    "sample_filename": "random.jpg",
+                    "analysis_state": "complete",
+                },
+            },
+            "paths": {
+                "random.pdf": {"cache_key": "pdf-key"},
+                "random.jpg": {"cache_key": "image-key"},
+            },
+        }
+
+        removed = mc._invalidate_legacy_pdf_cache_entries(cache)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(cache["version"], 5)
+        self.assertEqual(set(cache["entries"]), {"image-key"})
+        self.assertEqual(set(cache["paths"]), {"random.jpg"})
+
+    def test_unversioned_path_only_pdf_cache_is_invalidated(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        cache = {
+            "entries": {
+                "pdf-key": {"analysis_state": "complete"},
+                "image-key": {"analysis_state": "complete"},
+            },
+            "paths": {
+                "archive/random.pdf": {"cache_key": "pdf-key"},
+                "archive/random.jpg": {"cache_key": "image-key"},
+            },
+        }
+
+        removed = mc._invalidate_legacy_pdf_cache_entries(cache)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(cache["version"], 5)
+        self.assertEqual(set(cache["entries"]), {"image-key"})
+        self.assertEqual(set(cache["paths"]), {"archive/random.jpg"})
+
+    def test_pdf_backend_switch_invalidates_only_pdf_entries(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        cache = {
+            "version": 5,
+            "pdf_backend_signature": "pypdf@old",
+            "entries": {
+                "pdf-key": {"sample_filename": "random.pdf"},
+                "image-key": {"sample_filename": "random.jpg"},
+            },
+            "paths": {
+                "random.pdf": {"cache_key": "pdf-key"},
+                "random.jpg": {"cache_key": "image-key"},
+            },
+        }
+
+        with mock.patch.object(mc, "_get_pdf_backend_signature", return_value="pdfium@new"):
+            removed = mc._invalidate_changed_pdf_backend_entries(cache)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(cache["pdf_backend_signature"], "pdfium@new")
+        self.assertEqual(set(cache["entries"]), {"image-key"})
+        self.assertEqual(set(cache["paths"]), {"random.jpg"})
 
     def test_compute_cache_key_stable(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1050,7 +1519,7 @@ class TestOCRCacheIO(unittest.TestCase):
             lib.mkdir()
             emp = lib / "张三"
             emp.mkdir()
-            (emp / "张三_安全员C证.pdf").write_text("c cert")
+            _write_text_pdf(emp / "张三_安全员C证.pdf", "c cert")
             (emp / "张三_特种作业操作证.jpg").write_bytes(b"\x89PNG\r\n\x1a\nfake")
 
             out = Path(td) / "输出"
@@ -1070,7 +1539,7 @@ class TestOCRCacheIO(unittest.TestCase):
             lib.mkdir()
             emp = lib / "李四"
             emp.mkdir()
-            (emp / "李四_入职证明.pdf").write_text("onboarding proof")
+            _write_text_pdf(emp / "李四_入职证明.pdf", "onboarding proof")
             (emp / "李四_保密协议.docx").write_text("nda doc")
 
             out = Path(td) / "输出"
@@ -1404,7 +1873,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             self.assertEqual(self.engine_type.call_count, first_calls)
             migrated = json.loads(cache_path.read_text(encoding="utf-8"))
-            self.assertEqual(migrated["version"], 4)
+            self.assertEqual(migrated["version"], 5)
             self.assertIn("source_change_token", migrated["paths"]["000.png"])
             self.assertNotIn("source_ctime_ns", migrated["paths"]["000.png"])
 

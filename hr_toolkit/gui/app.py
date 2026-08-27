@@ -10061,8 +10061,6 @@ class HRToolkitApp:
         last_progress: dict[str, tuple[int, int]] = {}
 
         def material_progress(current: int, total: int, message: str) -> None:
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("本次处理已停止。")
             phase = "index" if "索引" in message else "employee"
             interval = max(1, total // 20) if phase == "index" else max(1, total // 10)
             marker = (current, total)
@@ -10086,6 +10084,7 @@ class HRToolkitApp:
             collect_all=is_collect_all,
             use_ocr_cache=use_ocr_cache_for_run,
             progress_callback=material_progress,
+            cancelled=cancel_event.is_set if cancel_event is not None else None,
         )
 
     def _begin_tool_run(self) -> None:

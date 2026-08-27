@@ -92,6 +92,10 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertIn(["--hidden-import", hidden_import], [main[index : index + 2] for index in range(len(main) - 1)])
         for module in build_windows.COLLECT_ALL_MODULES:
             self.assertIn(["--collect-all", module], [main[index : index + 2] for index in range(len(main) - 1)])
+        self.assertIn(
+            ["--copy-metadata", "pypdf"],
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
 
         data_values = [main[index + 1] for index, value in enumerate(main[:-1]) if value == "--add-data"]
         self.assertEqual(len(data_values), 1 + len(build_windows.release_template_files()))
@@ -147,6 +151,24 @@ class WindowsPackagingTests(unittest.TestCase):
         )
         self.assertNotIn("unrar.cffi.rarfile", main)
         self.assertNotIn("unrar", main)
+        for hidden_import in build_windows.WIN7_HIDDEN_IMPORTS:
+            self.assertIn(
+                ["--hidden-import", hidden_import],
+                [main[index : index + 2] for index in range(len(main) - 1)],
+            )
+        for module in build_windows.WIN7_COLLECT_ALL_MODULES:
+            self.assertIn(
+                ["--collect-all", module],
+                [main[index : index + 2] for index in range(len(main) - 1)],
+            )
+        self.assertIn(
+            ["--copy-metadata", "pypdfium2"],
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
+        self.assertNotIn(
+            ["--copy-metadata", "pypdf"],
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
         self.assertIn(str(seven_zip.resolve() / "7z.exe") + ";third_party/7zip", main)
         self.assertIn(str(seven_zip.resolve() / "7z.dll") + ";third_party/7zip", main)
         for name in build_windows.WIN7_REQUIRED_UCRT_FILES:
@@ -226,6 +248,8 @@ class WindowsPackagingTests(unittest.TestCase):
             spec = spec_path.read_text(encoding="utf-8")
         self.assertIn('collect_all("py7zr")', spec)
         self.assertIn('collect_all("unrar")', spec)
+        self.assertIn('copy_metadata("pypdf")', spec)
+        self.assertIn('"pypdf"', spec)
         self.assertIn("_sevenzip_binaries + _rar_binaries", spec)
         self.assertIn("_sevenzip_hidden + _rar_hidden", spec)
         self.assertNotIn('"distutils"', spec)
@@ -432,6 +456,7 @@ class WindowsPackagingTests(unittest.TestCase):
         ]
         self.assertIn("pip==26.2", constraints)
         self.assertIn("rapidocr_onnxruntime==1.4.4", constraints)
+        self.assertIn("pypdf==6.16.1", constraints)
         self.assertIn("pyinstaller==6.21.0", constraints)
         self.assertIn(
             'onnxruntime==1.23.2; platform_system == "Darwin" and platform_machine == "x86_64"',
@@ -458,6 +483,8 @@ class WindowsPackagingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("onnxruntime==1.11.1", win7_constraints)
         self.assertIn("opencv-python==4.8.1.78", win7_constraints)
+        self.assertIn("pypdfium2==5.13.0", win7_constraints)
+        self.assertNotIn("pypdf==", win7_constraints)
         self.assertIn("pyinstaller==6.21.0", win7_constraints)
 
     def test_scheduled_windows_package_gate_runs_tests_and_ocr(self) -> None:

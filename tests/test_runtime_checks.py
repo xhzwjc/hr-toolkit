@@ -13,6 +13,7 @@ from hr_toolkit import __version__
 from hr_toolkit.runtime_checks import (
     CHECK_OUTPUT_ENV,
     ocr_runtime_smoke_test,
+    pdf_runtime_smoke_test,
     run_headless_command,
     smoke_test,
 )
@@ -90,6 +91,12 @@ class RuntimeChecksTest(unittest.TestCase):
             with patch.dict(sys.modules, {"rapidocr_onnxruntime": rapidocr}):
                 with self.assertRaisesRegex(RuntimeError, "返回格式无效"):
                     ocr_runtime_smoke_test(Path(tmp))
+
+    def test_pdf_runtime_smoke_extracts_complete_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_runtime_smoke_test(Path(tmp))
+            self.assertTrue((Path(tmp) / "runtime.pdf").is_file())
+            self.assertTrue((Path(tmp) / "runtime-scan.pdf").is_file())
 
     def test_unknown_arguments_are_left_for_cli(self) -> None:
         self.assertIsNone(run_headless_command(["salary-split"]))

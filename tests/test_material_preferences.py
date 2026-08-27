@@ -307,12 +307,13 @@ class MaterialPreferencesGUITest(unittest.TestCase):
         self.assertEqual(call.kwargs["library_mode"], LIBRARY_MODE_FLAT_OCR)
         self.assertEqual(call.kwargs["mode"], "by_employee")
         self.assertTrue(call.kwargs["use_ocr_cache"])
+        cancelled = call.kwargs["cancelled"]
+        self.assertFalse(cancelled())
         progress = call.kwargs["progress_callback"]
         progress(1, 100, "正在建立无序资料 OCR 索引：1/100")
         self.assertEqual(app.status_queue.get_nowait()[0], "progress")
         cancel_event.set()
-        with self.assertRaisesRegex(RuntimeError, "已停止"):
-            progress(2, 100, "正在建立无序资料 OCR 索引：2/100")
+        self.assertTrue(cancelled())
 
 
 if __name__ == "__main__":

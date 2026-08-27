@@ -188,6 +188,7 @@ jobs:
           tests.test_social_security
           tests.test_tool_registry
           tests.test_paths
+          tests.test_pdf_backend_compat
           tests.test_release_metadata
 
       - name: Compile Python sources under Python 3.8

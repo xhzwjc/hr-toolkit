@@ -31,6 +31,20 @@ _RAR_RUNTIME_FIXTURE = base64.b64decode(
 _SEVEN_ZIP_RUNTIME_FIXTURE = base64.b64decode(
     "N3q8ryccAASuJxD0iAAAAAAAAAAUAAAAAAAAAGkm1z8BAB5IUlRvb2xraXQgYXJjaGl2ZSBydW50aW1lIHNtb2tlAOAAXgBdXQAAgTMHrg/QPBb8nzkQnG8VArnDFMcdhtRaWFWIWBRIxoCITwQTg7wuT9/dT/wnHngb888SGgIyduSDds/zn2STt2jHBoaB/DbbyKI+Dksb3jMZ88uaze/zjyAAAAAAFwYjAQllAAcLAQABISEBGAxfAAA="
 )
+_PDF_RUNTIME_FIXTURE = base64.b64decode(
+    "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFs1IDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iago0IDAgb2JqCjw8IC9MZW5ndGggNTkgPj4Kc3RyZWFtCkJUIC9GMSAxMiBUZiAyMCAxMDAgVGQgKEZVTExfVEVYVF9BRlRFUl9MSU1JVF9NQVJLRVIpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDMwMCAzMDBdIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDMgMCBSID4+ID4+IC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDAwNjQgMDAwMDAgbiAKMDAwMDAwMDEyMSAwMDAwMCBuIAowMDAwMDAwMTkxIDAwMDAwIG4gCjAwMDAwMDAzMDAgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo0MjYKJSVFT0YK"
+)
+_PDF_SCAN_RUNTIME_FIXTURE = base64.b64decode(
+    "JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwg"
+    "L1R5cGUgL1BhZ2VzIC9LaWRzIFs1IDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1hPYmplY3QgL1N1"
+    "YnR5cGUgL0ltYWdlIC9XaWR0aCAyIC9IZWlnaHQgMiAvQ29sb3JTcGFjZSAvRGV2aWNlUkdCIC9CaXRzUGVyQ29tcG9uZW50IDgg"
+    "L0xlbmd0aCAxMiA+PgpzdHJlYW0K/wAAAP8AAAD/////CmVuZHN0cmVhbQplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDMwID4+"
+    "CnN0cmVhbQpxIDMwMCAwIDAgMzAwIDAgMCBjbSAvSW0wIERvIFEKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9Q"
+    "YWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgMzAwIDMwMF0gL1Jlc291cmNlcyA8PCAvWE9iamVjdCA8PCAvSW0wIDMg"
+    "MCBSID4+ID4+IC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDE1"
+    "IDAwMDAwIG4gCjAwMDAwMDAwNjQgMDAwMDAgbiAKMDAwMDAwMDEyMSAwMDAwMCBuIAowMDAwMDAwMjc2IDAwMDAwIG4gCjAwMDAw"
+    "MDAzNTYgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo0ODYKJSVFT0YK"
+)
 
 
 def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
@@ -75,6 +89,38 @@ def ocr_runtime_smoke_test(root: Path | None = None) -> None:
         raise RuntimeError(f"本地 OCR 引擎返回格式无效：{type(result).__name__}")
 
 
+def pdf_runtime_smoke_test(root: Path | None = None) -> None:
+    """实际加载文字页和扫描页，验证打包后端的两条识别链路。"""
+    if root is None:
+        with tempfile.TemporaryDirectory(prefix="hr_toolkit_pdf_smoke_") as temp_root:
+            pdf_runtime_smoke_test(Path(temp_root))
+        return
+
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "runtime.pdf"
+    scan_source = root / "runtime-scan.pdf"
+    source.write_bytes(_PDF_RUNTIME_FIXTURE)
+    scan_source.write_bytes(_PDF_SCAN_RUNTIME_FIXTURE)
+    try:
+        from hr_toolkit.tools.material_collector import (
+            _extract_document_text,
+            _iter_pdf_ocr_images,
+        )
+
+        text = _extract_document_text(source)
+        scan_pages = 0
+        for payload in _iter_pdf_ocr_images(scan_source):
+            if not payload:
+                raise RuntimeError("PDF 扫描页解码结果为空")
+            scan_pages += 1
+    except Exception as exc:
+        raise RuntimeError(f"PDF 识别组件运行检查失败：{exc}") from exc
+    if "FULL_TEXT_AFTER_LIMIT_MARKER" not in text:
+        raise RuntimeError("PDF 识别组件未能提取完整文字层")
+    if scan_pages != 1:
+        raise RuntimeError(f"PDF 扫描页解码数量异常：{scan_pages} != 1")
+
+
 def run_headless_command(argv: list[str]) -> int | None:
     """Handle packaged verification commands without creating a Tk window."""
     if argv == ["--version"]:
@@ -111,6 +157,10 @@ def smoke_test() -> None:
     """Validate dependencies and packaged whitelist resources without a GUI."""
     _mark_smoke_stage("dependencies")
     import openpyxl  # noqa: F401
+    try:
+        import pypdf  # noqa: F401
+    except ImportError:
+        import pypdfium2  # noqa: F401
     import xlrd  # noqa: F401
     from hr_toolkit.app_update import create_https_context
     from hr_toolkit.project_store import ProjectStore
@@ -129,6 +179,8 @@ def smoke_test() -> None:
         # macOS 上 tempfile 可能返回经过 /var -> /private/var 的系统链接；
         # 运行检查使用真实路径，不降低项目对链接路径的安全限制。
         resolved_temp_root = Path(temp_root).resolve()
+        _mark_smoke_stage("pdf-runtime")
+        pdf_runtime_smoke_test(resolved_temp_root / "pdf-runtime")
         _mark_smoke_stage("archive-7z")
         _smoke_test_archive_runtimes(resolved_temp_root / "archive-runtime")
         if getattr(sys, "frozen", False):
