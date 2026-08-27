@@ -12,11 +12,12 @@ _OTHER_PART_SEPARATOR = re.compile(r"[；;]+")
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -51,6 +52,22 @@ HEADER_OTHER = "其他"
 QUANTITY_MATERIAL_HEADERS = frozenset({"劳动合同", "保密协议", "入职员工须知"})
 PRESENCE_MARKS = frozenset({"√", "✓", "✔", "✅"})
 PLACEHOLDER_SHEET_TITLES = {"模板", "公司……", "公司..."}
+HISTORY_DATE_HEADERS = {"入职时间": "入职", "离职时间": "离职"}
+# 不可见边界只用于识别工具生成的批注段落；用户在 Excel 中看到的仍是约定格式。
+_HISTORY_COMMENT_START = "\u2063\u2060"
+_HISTORY_COMMENT_END = "\u2060\u2063"
+_HISTORY_COMMENT_BLOCK = re.compile(
+    re.escape(_HISTORY_COMMENT_START) + r"(?P<body>.*?)" + re.escape(_HISTORY_COMMENT_END),
+    re.DOTALL,
+)
+_HISTORY_COMMENT_LINE = re.compile(
+    r"^第(?:[一二三四五六七八九十百]+|\d+)次(?P<event>入职|离职)："
+    r"(?P<date>\d{4}/\d{1,2}/\d{1,2})$"
+)
+_HISTORY_DATE_TEXT = re.compile(
+    r"^(?P<year>\d{4})(?:年|[-/.])(?P<month>\d{1,2})(?:月|[-/.])"
+    r"(?P<day>\d{1,2})(?:日)?(?:\s+00:00(?::00)?)?$"
+)
 
 REGION_CODES = {
     "总部": "00",
@@ -626,7 +643,9 @@ def _clear_archive_data_rows(ws: Worksheet) -> None:
     layout = _detect_archive_layout(ws)
     for row_index in range(layout.data_start_row, layout.footer_start_row):
         for col_index in range(1, layout.max_column + 1):
-            ws.cell(row_index, col_index).value = None
+            cell = ws.cell(row_index, col_index)
+            cell.value = None
+            _remove_generated_history_comment(cell)
 
 
 def _existing_records(ws: Worksheet, layout: ArchiveSheetLayout) -> dict[str, int]:
@@ -657,7 +676,9 @@ def _append_archive_rows(ws: Worksheet, layout: ArchiveSheetLayout, records: lis
 
 def _clear_archive_record_values(ws: Worksheet, layout: ArchiveSheetLayout, row_index: int) -> None:
     for col_index in range(1, layout.max_column + 1):
-        ws.cell(row_index, col_index).value = None
+        cell = ws.cell(row_index, col_index)
+        cell.value = None
+        _remove_generated_history_comment(cell)
 
 
 def _blank_data_rows(ws: Worksheet, layout: ArchiveSheetLayout) -> list[int]:
@@ -696,10 +717,133 @@ def _merge_existing_archive_row(
             changed = _merge_other_cell(cell, value) or changed
         elif header in QUANTITY_MATERIAL_HEADERS:
             changed = _merge_quantity_material_cell(cell, value, header, record, warnings) or changed
+        elif header in HISTORY_DATE_HEADERS:
+            changed = _merge_history_date_cell(cell, value, header) or changed
         elif _has_value(value) and not _has_value(cell.value):
             cell.value = value
             changed = True
     return changed
+
+
+def _merge_history_date_cell(cell, value: Any, header: str) -> bool:
+    """保留主单元格当前日期，仅将多个有效历史日期写入可维护的批注段落。"""
+    if not _has_value(value):
+        return False
+    if not _has_value(cell.value):
+        cell.value = value
+        return True
+
+    current_date = _parse_history_date(cell.value)
+    incoming_date = _parse_history_date(value)
+    if current_date is None or incoming_date is None:
+        return False
+
+    existing_comment = cell.comment
+    existing_text = existing_comment.text if existing_comment is not None else ""
+    existing_block = _HISTORY_COMMENT_BLOCK.search(existing_text)
+    history_dates = {current_date, incoming_date}
+    if existing_block is not None:
+        event = HISTORY_DATE_HEADERS[header]
+        for line in existing_block.group("body").splitlines():
+            match = _HISTORY_COMMENT_LINE.fullmatch(line.strip())
+            if match is None or match.group("event") != event:
+                continue
+            parsed = _parse_history_date(match.group("date"))
+            if parsed is not None:
+                history_dates.add(parsed)
+
+    if len(history_dates) < 2:
+        return False
+
+    event = HISTORY_DATE_HEADERS[header]
+    body = "\n".join(
+        f"第{_chinese_ordinal(index)}次{event}：{item.year}/{item.month}/{item.day}"
+        for index, item in enumerate(sorted(history_dates), start=1)
+    )
+    generated_block = f"{_HISTORY_COMMENT_START}{body}{_HISTORY_COMMENT_END}"
+    if existing_block is not None:
+        new_text = (
+            existing_text[: existing_block.start()]
+            + generated_block
+            + existing_text[existing_block.end() :]
+        )
+    elif existing_text:
+        separator = "" if existing_text.endswith("\n\n") else ("\n" if existing_text.endswith("\n") else "\n\n")
+        new_text = f"{existing_text}{separator}{generated_block}"
+    else:
+        new_text = generated_block
+
+    if existing_comment is not None and new_text == existing_text:
+        return False
+
+    author = existing_comment.author if existing_comment is not None else "HRToolkit"
+    updated_comment = Comment(new_text, author or "HRToolkit")
+    if existing_comment is not None:
+        updated_comment.width = existing_comment.width
+        updated_comment.height = existing_comment.height
+    cell.comment = updated_comment
+    return True
+
+
+def _remove_generated_history_comment(cell) -> None:
+    """清空模板数据时只移除工具历史段，保留原有人工批注。"""
+    existing_comment = cell.comment
+    if existing_comment is None:
+        return
+    existing_text = existing_comment.text
+    existing_block = _HISTORY_COMMENT_BLOCK.search(existing_text)
+    if existing_block is None:
+        return
+    prefix = existing_text[: existing_block.start()]
+    suffix = existing_text[existing_block.end() :]
+    if not suffix:
+        if prefix.endswith("\n\n"):
+            prefix = prefix[:-2]
+        elif prefix.endswith("\n"):
+            prefix = prefix[:-1]
+    new_text = f"{prefix}{suffix}"
+    if not new_text:
+        cell.comment = None
+        return
+    updated_comment = Comment(new_text, existing_comment.author or "HRToolkit")
+    updated_comment.width = existing_comment.width
+    updated_comment.height = existing_comment.height
+    cell.comment = updated_comment
+
+
+def _parse_history_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = _cell_text(value)
+    if not text:
+        return None
+    match = _HISTORY_DATE_TEXT.fullmatch(text)
+    if match is None:
+        return None
+    try:
+        return date(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+    except ValueError:
+        return None
+
+
+def _chinese_ordinal(value: int) -> str:
+    digits = "零一二三四五六七八九"
+    if value < 10:
+        return digits[value]
+    if value == 10:
+        return "十"
+    if value < 20:
+        return f"十{digits[value - 10]}"
+    if value < 100:
+        tens, ones = divmod(value, 10)
+        return f"{digits[tens]}十{digits[ones] if ones else ''}"
+    return str(value)
 
 
 def _merge_quantity_material_cell(

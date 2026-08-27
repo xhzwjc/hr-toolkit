@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import zipfile
 import shutil
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -132,8 +133,8 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(_sha256(target), target_sha256)
             self.assertEqual(result.source_record_count, 3)
             self.assertEqual(result.inserted_count, 0)
-            self.assertEqual(result.updated_count, 2)
-            self.assertEqual(result.skipped_count, 1)
+            self.assertEqual(result.updated_count, 3)
+            self.assertEqual(result.skipped_count, 0)
             self.assertTrue(
                 any("保密协议数量冲突" in warning and "已保留原值" in warning for warning in result.warnings)
             )
@@ -165,6 +166,12 @@ class ArchiveImportTest(unittest.TestCase):
                     out1.cell(4, 30).value,
                     "驾照复印件：√；备注：补充说明；解除合同协议书：√",
                 )
+                self.assertEqual(
+                    _visible_comment_text(out1.cell(4, 6).comment.text),
+                    "人工批注不得变化\n\n"
+                    "第一次入职：2020/1/1\n"
+                    "第二次入职：2026/4/9",
+                )
 
                 out2 = after_wb["公司2"]
                 self.assertEqual(out2.cell(4, 19).value, 4)
@@ -172,11 +179,22 @@ class ArchiveImportTest(unittest.TestCase):
                 self.assertEqual(out2.cell(4, 22).value, 2)
                 self.assertEqual(out2.cell(4, 20).value, "✅")
                 self.assertEqual(out2.cell(4, 21).value, "✅")
+                self.assertEqual(
+                    _visible_comment_text(out2.cell(4, 6).comment.text),
+                    "第一次入职：2020/1/1\n"
+                    "第二次入职：2026/4/14",
+                )
 
                 out3 = after_wb["公司3"]
                 self.assertEqual(out3.cell(4, 19).value, 5)
                 self.assertEqual(out3.cell(4, 25).value, 5)
                 self.assertEqual(out3.cell(4, 22).value, "√")
+                self.assertEqual(
+                    _visible_comment_text(out3.cell(4, 6).comment.text),
+                    "人工批注不得变化\n\n"
+                    "第一次入职：2020/1/1\n"
+                    "第二次入职：2026/3/13",
+                )
 
                 allowed_value_changes = {
                     ("公司1", "N4"),
@@ -199,10 +217,195 @@ class ArchiveImportTest(unittest.TestCase):
                     before_wb,
                     after_wb,
                     allowed_value_changes,
+                    allowed_comment_changes={
+                        ("公司1", "F4"),
+                        ("公司2", "F4"),
+                        ("公司3", "F4"),
+                    },
                 )
             finally:
                 after_wb.close()
                 before_wb.close()
+
+    def test_reemployment_dates_are_kept_in_sorted_comments_without_changing_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "重复入职离职移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            output_dir = root / "output"
+            _write_history_transfer_file(
+                source,
+                entry_date=date(2026, 1, 1),
+                exit_date=date(2026, 8, 31),
+            )
+            shutil.copyfile(
+                Path(__file__).resolve().parents[1]
+                / "hr_toolkit"
+                / "templates"
+                / "archive_summary_template.xlsx",
+                target,
+            )
+
+            target_wb = load_workbook(target)
+            target_ws = target_wb["模板"]
+            target_ws.title = "公司1"
+            headers = _header_columns(target_ws, 3)
+            target_ws.cell(4, headers["姓名"]).value = "张三"
+            target_ws.cell(4, headers["身份证"]).value = "4600271987030XXXXX"
+            target_ws.cell(4, headers["入职时间"]).value = date(2024, 5, 2)
+            target_ws.cell(4, headers["入职时间"]).comment = Comment("人工入职说明不得变化", "甲方HR")
+            target_ws.cell(4, headers["离职时间"]).value = date(2024, 12, 31)
+            target_ws.cell(4, headers["离职时间"]).comment = Comment("人工离职说明不得变化", "甲方HR")
+            target_wb.save(target)
+            target_wb.close()
+
+            source_sha256 = _sha256(source)
+            target_sha256 = _sha256(target)
+            before_wb = load_workbook(target, data_only=False)
+
+            result = import_archive_transfers(source, target, output_dir)
+
+            self.assertEqual(_sha256(source), source_sha256)
+            self.assertEqual(_sha256(target), target_sha256)
+            self.assertEqual(result.updated_count, 1)
+            self.assertEqual(result.skipped_count, 0)
+            after_wb = load_workbook(result.output_file, data_only=False)
+            try:
+                after_ws = after_wb["公司1"]
+                self.assertEqual(_date_only(after_ws.cell(4, headers["入职时间"]).value), date(2024, 5, 2))
+                self.assertEqual(_date_only(after_ws.cell(4, headers["离职时间"]).value), date(2024, 12, 31))
+
+                entry_comment = after_ws.cell(4, headers["入职时间"]).comment
+                self.assertIsNotNone(entry_comment)
+                self.assertEqual(entry_comment.author, "甲方HR")
+                self.assertEqual(
+                    _visible_comment_text(entry_comment.text),
+                    "人工入职说明不得变化\n\n"
+                    "第一次入职：2024/5/2\n"
+                    "第二次入职：2026/1/1",
+                )
+
+                exit_comment = after_ws.cell(4, headers["离职时间"]).comment
+                self.assertIsNotNone(exit_comment)
+                self.assertEqual(exit_comment.author, "甲方HR")
+                self.assertEqual(
+                    _visible_comment_text(exit_comment.text),
+                    "人工离职说明不得变化\n\n"
+                    "第一次离职：2024/12/31\n"
+                    "第二次离职：2026/8/31",
+                )
+                _assert_only_expected_cell_values_changed(
+                    self,
+                    before_wb,
+                    after_wb,
+                    set(),
+                    allowed_comment_changes={("公司1", "F4"), ("公司1", "AK4")},
+                )
+            finally:
+                after_wb.close()
+                before_wb.close()
+
+            # 再次导入更早日期：批注按日期排序，已有日期去重，主单元格仍保持原值。
+            third_source = root / "第三次入职离职移交表.xlsx"
+            _write_history_transfer_file(
+                third_source,
+                entry_date=date(2023, 3, 4),
+                exit_date=date(2025, 6, 30),
+            )
+            third_result = import_archive_transfers(
+                third_source,
+                result.output_file,
+                root / "third-output",
+            )
+            third_wb = load_workbook(third_result.output_file, data_only=False)
+            try:
+                third_ws = third_wb["公司1"]
+                self.assertEqual(_date_only(third_ws.cell(4, headers["入职时间"]).value), date(2024, 5, 2))
+                self.assertEqual(_date_only(third_ws.cell(4, headers["离职时间"]).value), date(2024, 12, 31))
+                self.assertEqual(
+                    _visible_comment_text(third_ws.cell(4, headers["入职时间"]).comment.text),
+                    "人工入职说明不得变化\n\n"
+                    "第一次入职：2023/3/4\n"
+                    "第二次入职：2024/5/2\n"
+                    "第三次入职：2026/1/1",
+                )
+                self.assertEqual(
+                    _visible_comment_text(third_ws.cell(4, headers["离职时间"]).comment.text),
+                    "人工离职说明不得变化\n\n"
+                    "第一次离职：2024/12/31\n"
+                    "第二次离职：2025/6/30\n"
+                    "第三次离职：2026/8/31",
+                )
+                third_entry_comment_text = third_ws.cell(4, headers["入职时间"]).comment.text
+                third_exit_comment_text = third_ws.cell(4, headers["离职时间"]).comment.text
+            finally:
+                third_wb.close()
+
+            duplicate_source = root / "重复日期移交表.xlsx"
+            _write_history_transfer_file(
+                duplicate_source,
+                entry_date=date(2026, 1, 1),
+                exit_date=date(2026, 8, 31),
+            )
+            duplicate_result = import_archive_transfers(
+                duplicate_source,
+                third_result.output_file,
+                root / "duplicate-output",
+            )
+            self.assertEqual(duplicate_result.updated_count, 0)
+            self.assertEqual(duplicate_result.skipped_count, 1)
+            duplicate_wb = load_workbook(duplicate_result.output_file, data_only=False)
+            try:
+                duplicate_ws = duplicate_wb["公司1"]
+                self.assertEqual(
+                    duplicate_ws.cell(4, headers["入职时间"]).comment.text,
+                    third_entry_comment_text,
+                )
+                self.assertEqual(
+                    duplicate_ws.cell(4, headers["离职时间"]).comment.text,
+                    third_exit_comment_text,
+                )
+            finally:
+                duplicate_wb.close()
+
+    def test_single_date_fills_empty_cell_without_creating_history_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "首次入职离职移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            _write_history_transfer_file(
+                source,
+                entry_date=date(2026, 2, 3),
+                exit_date=date(2026, 9, 4),
+            )
+            shutil.copyfile(
+                Path(__file__).resolve().parents[1]
+                / "hr_toolkit"
+                / "templates"
+                / "archive_summary_template.xlsx",
+                target,
+            )
+            target_wb = load_workbook(target)
+            target_ws = target_wb["模板"]
+            target_ws.title = "公司1"
+            headers = _header_columns(target_ws, 3)
+            target_ws.cell(4, headers["姓名"]).value = "张三"
+            target_ws.cell(4, headers["身份证"]).value = "4600271987030XXXXX"
+            target_ws.cell(4, headers["入职时间"]).comment = Comment("人工说明", "甲方HR")
+            target_wb.save(target)
+            target_wb.close()
+
+            result = import_archive_transfers(source, target, root / "output")
+
+            output_wb = load_workbook(result.output_file, data_only=False)
+            try:
+                output_ws = output_wb["公司1"]
+                self.assertEqual(_date_only(output_ws.cell(4, headers["入职时间"]).value), date(2026, 2, 3))
+                self.assertEqual(_date_only(output_ws.cell(4, headers["离职时间"]).value), date(2026, 9, 4))
+                self.assertEqual(output_ws.cell(4, headers["入职时间"]).comment.text, "人工说明")
+                self.assertIsNone(output_ws.cell(4, headers["离职时间"]).comment)
+            finally:
+                output_wb.close()
 
     def test_dry_run_does_not_write_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,6 +549,12 @@ class ArchiveImportTest(unittest.TestCase):
             export_output = root / "export"
             existing_dir.mkdir()
             _write_transfer_file(source)
+            source_wb = load_workbook(source)
+            source_ws = source_wb["移交表"]
+            source_ws.cell(2, 20).value = "离职时间"
+            source_ws.cell(3, 20).value = date(2026, 7, 1)
+            source_wb.save(source)
+            source_wb.close()
             imported = import_archive_transfers(source, None, summary_output)
 
             existing = existing_dir / "公司1档案表.xlsx"
@@ -359,8 +568,29 @@ class ArchiveImportTest(unittest.TestCase):
             existing_ws.cell(4, headers["保密协议"]).value = 1
             existing_ws.cell(4, headers["入职员工须知"]).value = 2
             existing_ws.cell(4, headers["照片"]).value = 1
+            existing_ws.cell(4, headers["入职时间"]).value = date(2020, 1, 1)
+            existing_entry_comment = Comment("旧档案入职说明", "甲方HR")
+            existing_entry_comment.width = 260
+            existing_entry_comment.height = 110
+            existing_ws.cell(4, headers["入职时间"]).comment = existing_entry_comment
+            existing_ws.cell(4, headers["离职时间"]).value = date(2021, 2, 3)
+            existing_exit_comment = Comment("旧档案离职说明", "甲方HR")
+            existing_exit_comment.width = 280
+            existing_exit_comment.height = 120
+            existing_ws.cell(4, headers["离职时间"]).comment = existing_exit_comment
             existing_wb.save(existing)
             existing_wb.close()
+            saved_existing_wb = load_workbook(existing)
+            saved_existing_ws = saved_existing_wb["公司1"]
+            expected_entry_size = (
+                saved_existing_ws.cell(4, headers["入职时间"]).comment.width,
+                saved_existing_ws.cell(4, headers["入职时间"]).comment.height,
+            )
+            expected_exit_size = (
+                saved_existing_ws.cell(4, headers["离职时间"]).comment.width,
+                saved_existing_ws.cell(4, headers["离职时间"]).comment.height,
+            )
+            saved_existing_wb.close()
             summary_sha256 = _sha256(imported.output_file)
             existing_sha256 = _sha256(existing)
 
@@ -381,6 +611,32 @@ class ArchiveImportTest(unittest.TestCase):
                 self.assertEqual(output_ws.cell(4, output_headers["保密协议"]).value, 3)
                 self.assertEqual(output_ws.cell(4, output_headers["入职员工须知"]).value, 4)
                 self.assertEqual(output_ws.cell(4, output_headers["照片"]).value, 1)
+                self.assertEqual(
+                    _date_only(output_ws.cell(4, output_headers["入职时间"]).value),
+                    date(2020, 1, 1),
+                )
+                self.assertEqual(
+                    _date_only(output_ws.cell(4, output_headers["离职时间"]).value),
+                    date(2021, 2, 3),
+                )
+                entry_comment = output_ws.cell(4, output_headers["入职时间"]).comment
+                self.assertEqual(entry_comment.author, "甲方HR")
+                self.assertEqual((entry_comment.width, entry_comment.height), expected_entry_size)
+                self.assertEqual(
+                    _visible_comment_text(entry_comment.text),
+                    "旧档案入职说明\n\n"
+                    "第一次入职：2020/1/1\n"
+                    "第二次入职：2026/4/9",
+                )
+                exit_comment = output_ws.cell(4, output_headers["离职时间"]).comment
+                self.assertEqual(exit_comment.author, "甲方HR")
+                self.assertEqual((exit_comment.width, exit_comment.height), expected_exit_size)
+                self.assertEqual(
+                    _visible_comment_text(exit_comment.text),
+                    "旧档案离职说明\n\n"
+                    "第一次离职：2021/2/3\n"
+                    "第二次离职：2026/7/1",
+                )
             finally:
                 output_wb.close()
 
@@ -424,6 +680,25 @@ def _write_transfer_file(path: Path, *, duplicate_first: bool = False) -> None:
         for col_index, value in enumerate(row, start=1):
             ws.cell(row_index, col_index).value = value
     wb.save(path)
+
+
+def _write_history_transfer_file(
+    path: Path,
+    *,
+    entry_date: date,
+    exit_date: date,
+) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "移交表"
+    headers = ["公司", "姓名", "身份证", "入职时间", "离职时间"]
+    for col_index, header in enumerate(headers, start=1):
+        ws.cell(2, col_index).value = header
+    values = ["公司1", "张三", "4600271987030XXXXX", entry_date, exit_date]
+    for col_index, value in enumerate(values, start=1):
+        ws.cell(3, col_index).value = value
+    wb.save(path)
+    wb.close()
 
 
 def _write_existing_company_archive(path: Path) -> None:
@@ -506,13 +781,25 @@ def _header_columns(ws, header_row: int) -> dict[str, int]:
     }
 
 
+def _visible_comment_text(value: str) -> str:
+    return value.replace("\u2060", "").replace("\u2063", "")
+
+
+def _date_only(value):
+    return value.date() if hasattr(value, "date") else value
+
+
 def _assert_only_expected_cell_values_changed(
     test_case: unittest.TestCase,
     before_wb,
     after_wb,
     allowed_value_changes: set[tuple[str, str]],
+    *,
+    allowed_comment_changes: set[tuple[str, str]] | None = None,
 ) -> None:
+    allowed_comment_changes = allowed_comment_changes or set()
     actual_value_changes: set[tuple[str, str]] = set()
+    actual_comment_changes: set[tuple[str, str]] = set()
     for sheet_name in before_wb.sheetnames:
         before_ws = before_wb[sheet_name]
         after_ws = after_wb[sheet_name]
@@ -523,14 +810,28 @@ def _assert_only_expected_cell_values_changed(
                 key = (sheet_name, before_cell.coordinate)
                 if before_cell.value != after_cell.value:
                     actual_value_changes.add(key)
+                if _comment_signature(before_cell.comment) != _comment_signature(after_cell.comment):
+                    actual_comment_changes.add(key)
                 if key not in allowed_value_changes:
                     test_case.assertEqual(before_cell.value, after_cell.value, key)
                     test_case.assertEqual(before_cell.data_type, after_cell.data_type, key)
                 test_case.assertEqual(before_cell.style_id, after_cell.style_id, key)
                 test_case.assertEqual(before_cell.number_format, after_cell.number_format, key)
-                test_case.assertEqual(before_cell.comment, after_cell.comment, key)
+                if key not in allowed_comment_changes:
+                    test_case.assertEqual(
+                        _comment_signature(before_cell.comment),
+                        _comment_signature(after_cell.comment),
+                        key,
+                    )
                 test_case.assertEqual(before_cell.hyperlink, after_cell.hyperlink, key)
     test_case.assertEqual(actual_value_changes, allowed_value_changes)
+    test_case.assertEqual(actual_comment_changes, allowed_comment_changes)
+
+
+def _comment_signature(comment):
+    if comment is None:
+        return None
+    return (comment.text, comment.author, comment.width, comment.height)
 
 
 if __name__ == "__main__":
