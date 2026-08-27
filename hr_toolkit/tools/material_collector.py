@@ -936,6 +936,21 @@ def parse_employee_roster(
     return employees
 
 
+def _is_direct_employee_input(
+    source: str | Path | list[dict[str, Any]] | list[str],
+) -> bool:
+    """Return whether the roster came from the GUI's direct employee input."""
+    if not isinstance(source, str):
+        return False
+    try:
+        source_path = Path(source).expanduser()
+        return not (source_path.is_file() and is_supported_excel_file(source_path))
+    except (OSError, ValueError):
+        # Free-form employee text can contain characters or lengths that are not
+        # valid filesystem paths.  It is still a direct roster input.
+        return True
+
+
 # ---------------------------------------------------------------------------
 # 文件夹匹配核心算法
 # ---------------------------------------------------------------------------
@@ -2189,6 +2204,13 @@ def collect_employee_materials(
     else:
         global_materials = list(material_types)
 
+    skip_folder_all_ocr = (
+        collect_all
+        and library_mode == LIBRARY_MODE_PERSON_FOLDER
+        and _is_direct_employee_input(roster_source)
+    )
+    effective_use_ocr_cache = use_ocr_cache and not skip_folder_all_ocr
+
     out_path.mkdir(parents=True, exist_ok=True)
 
     # === OCR 智能索引缓存层：启动期加载 / 引擎升级全量失效 / 只读目录降级 ===
@@ -2197,9 +2219,10 @@ def collect_employee_materials(
     cache_path: Path | None = None
     cache_skipped_reason: str | None = None
     cache_write_ok = True
-    current_signature = _get_engine_signature()
+    current_signature = ""
 
-    if use_ocr_cache:
+    if effective_use_ocr_cache:
+        current_signature = _get_engine_signature()
         cache_path = (
             Path(ocr_cache_path).expanduser().resolve()
             if ocr_cache_path is not None
@@ -2211,6 +2234,8 @@ def collect_employee_materials(
         if prev_sig and prev_sig != current_signature:
             ocr_cache["entries"] = {}
             ocr_cache["paths"] = {}
+    elif skip_folder_all_ocr:
+        cache_skipped_reason = "全部材料按人员文件夹直接复制，无需 OCR 或 OCR 缓存"
     else:
         cache_skipped_reason = "用户已关闭 OCR 识别缓存"
 
@@ -2223,7 +2248,7 @@ def collect_employee_materials(
 
     # 引擎升级警告：本轮第一次识别时输出一次即可
     if (
-        use_ocr_cache
+        effective_use_ocr_cache
         and ocr_cache is not None
         and ocr_cache.get("engine_signature")
         and ocr_cache.get("engine_signature") != current_signature
@@ -2335,8 +2360,9 @@ def collect_employee_materials(
                 emp, matched_folders, out_path, mode, matches, warnings, duplicate_folder_warning,
                 employee_key=employee_key,
                 ocr_cache=ocr_cache,
-                use_ocr_cache=use_ocr_cache,
+                use_ocr_cache=effective_use_ocr_cache,
                 cache_stats=cache_stats,
+                verify_image_identity=not skip_folder_all_ocr,
             )
         else:
             emp_missing = _collect_specific_materials(
@@ -2344,7 +2370,7 @@ def collect_employee_materials(
                 duplicate_folder_warning,
                 employee_key=employee_key,
                 ocr_cache=ocr_cache,
-                use_ocr_cache=use_ocr_cache,
+                use_ocr_cache=effective_use_ocr_cache,
                 cache_stats=cache_stats,
             )
             if emp_missing:
@@ -2352,7 +2378,7 @@ def collect_employee_materials(
 
     # === OCR 缓存：跑完一轮后汇总写一次（而非每张图片即写）"""
     if (
-        use_ocr_cache
+        effective_use_ocr_cache
         and ocr_cache is not None
         and cache_path is not None
         and (ocr_cache.get("entries") or library_mode == LIBRARY_MODE_FLAT_OCR)
@@ -2367,7 +2393,7 @@ def collect_employee_materials(
             cache_skipped_reason = "资料库目录只读或无写入权限"
 
     # 缓存指标摘要写进 warnings
-    if use_ocr_cache and cache_write_ok and ocr_cache is not None:
+    if effective_use_ocr_cache and cache_write_ok and ocr_cache is not None:
         total = cache_stats["hits"] + cache_stats["misses"]
         if total > 0:
             if library_mode == LIBRARY_MODE_FLAT_OCR:
@@ -2404,6 +2430,7 @@ def collect_employee_materials(
         _write_excel_report(
             report_path, employees, report_materials, matches, collect_all, warnings,
             cache_stats=cache_stats, cache_path=cache_path,
+            content_verification_skipped=skip_folder_all_ocr,
         )
 
     return MaterialCollectResult(
@@ -2420,7 +2447,7 @@ def collect_employee_materials(
         warnings=warnings,
         folder_match_counts=folder_match_counts,
         employee_result_keys=employee_result_keys,
-        ocr_cache_enabled=use_ocr_cache,
+        ocr_cache_enabled=effective_use_ocr_cache,
         ocr_cache_hits=cache_stats["hits"],
         ocr_cache_misses=cache_stats["misses"],
         ocr_cache_invalidated=cache_stats["invalidated"],
@@ -2458,6 +2485,7 @@ def _collect_all_from_folders(
     ocr_cache: dict[str, Any] | None = None,
     use_ocr_cache: bool = True,
     cache_stats: dict[str, int] | None = None,
+    verify_image_identity: bool = True,
 ) -> None:
     """全部材料模式：将匹配到的文件夹整体拷贝到输出目录。"""
     clean_emp = safe_filename(emp.name)
@@ -2513,7 +2541,7 @@ def _collect_all_from_folders(
                     # 尝试轻量分析图片是否有信息不匹配（优先查缓存）
                     ocr_name, ocr_id = "", ""
                     cache_hit = False
-                    if src.suffix.lower() in IMAGE_EXTENSIONS:
+                    if verify_image_identity and src.suffix.lower() in IMAGE_EXTENSIONS:
                         cached = None
                         if use_ocr_cache and ocr_cache is not None:
                             cached = _lookup_ocr_cache(
@@ -2792,6 +2820,7 @@ def _write_excel_report(
     *,
     cache_stats: dict[str, int] | None = None,
     cache_path: Path | None = None,
+    content_verification_skipped: bool = False,
 ) -> None:
     """Generate structured summary and missing Excel report with optimized columns and wrap text."""
     wb = Workbook()
@@ -2937,6 +2966,10 @@ def _write_excel_report(
                 warn_cell.value = "；".join(sorted(set(warn_list)))
                 warn_cell.fill = warning_fill
                 warn_cell.font = warning_font
+            elif content_verification_skipped and file_count > 0:
+                warn_cell.value = "已按文件夹直接复制（未进行 OCR 内容核对）"
+                warn_cell.fill = stat_fill
+                warn_cell.font = normal_font
             else:
                 warn_cell.value = "正常 (信息一致)" if file_count > 0 else "-"
                 warn_cell.fill = ok_fill if file_count > 0 else stat_fill

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -8,6 +9,8 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
+
+from openpyxl import load_workbook
 
 from hr_toolkit.tools.material_collector import (
     LIBRARY_MODE_FLAT_OCR,
@@ -220,12 +223,8 @@ class TestCollectAll(unittest.TestCase):
             self.assertTrue((out / "张三").is_dir())
             self.assertFalse((out / "李四").exists())
 
-    def test_collect_all_with_images_uses_ocr_cache(self) -> None:
-        """collect_all=True + 图片场景必须能正确触发缓存读写，不抛异常。
-
-        回归测试：防止 _collect_all_from_folders 内对 _lookup_ocr_cache /
-        _store_ocr_cache 的旧位置参数调用（会触发 AttributeError）再次回归。
-        """
+    def test_direct_name_collect_all_skips_ocr_and_cache(self) -> None:
+        """按人员文件夹 + 直接输入姓名 + 全部材料只复制，不进行 OCR 识别。"""
         from hr_toolkit.tools import material_collector as mc
         real_engine = mc._OCR_ENGINE
         real_attempted = mc._OCR_ATTEMPTED
@@ -249,32 +248,53 @@ class TestCollectAll(unittest.TestCase):
                 emp.mkdir()
                 pic = emp / "a5d6e67cd.jpg"
                 pic.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                source_sha_before = hashlib.sha256(pic.read_bytes()).hexdigest()
 
-                out1 = Path(td) / "输出1"
-                # 第一次 collect_all + 图片：不能抛 AttributeError
-                result = collect_employee_materials(
-                    lib, out1,
-                    roster_source="张三",
-                    collect_all=True,
-                )
+                out1 = Path(td) / "输出"
+                with mock.patch.object(
+                    mc, "_get_engine_signature", wraps=mc._get_engine_signature,
+                ) as signature_mock, mock.patch.object(
+                    mc, "_load_ocr_cache", wraps=mc._load_ocr_cache,
+                ) as load_mock, mock.patch.object(
+                    mc, "_save_ocr_cache", wraps=mc._save_ocr_cache,
+                ) as save_mock:
+                    result = collect_employee_materials(
+                        lib, out1,
+                        roster_source="张三",
+                        collect_all=True,
+                    )
+
                 self.assertEqual(result.total_employees, 1)
                 self.assertEqual(result.matched_file_count, 1)
-                # OCR 应被调用至少一次
-                self.assertGreaterEqual(FakeEngine.call_count, 1)
-                # 缓存应已写入
-                cache_file = lib / _OCR_CACHE_FILE_NAME
-                self.assertTrue(cache_file.exists())
+                self.assertEqual(FakeEngine.call_count, 0)
+                signature_mock.assert_not_called()
+                load_mock.assert_not_called()
+                save_mock.assert_not_called()
+                self.assertFalse((lib / _OCR_CACHE_FILE_NAME).exists())
+                self.assertFalse(result.ocr_cache_enabled)
+                self.assertEqual(result.ocr_cache_hits, 0)
+                self.assertEqual(result.ocr_cache_misses, 0)
+                self.assertIn("无需 OCR", result.ocr_cache_skipped_reason or "")
 
-                # 第二次：缓存命中，OCR 调用次数不变
-                out2 = Path(td) / "输出2"
-                result2 = collect_employee_materials(
-                    lib, out2,
-                    roster_source="张三",
-                    collect_all=True,
+                copied = out1 / "张三" / pic.name
+                self.assertTrue(copied.is_file())
+                source_sha_after = hashlib.sha256(pic.read_bytes()).hexdigest()
+                self.assertEqual(source_sha_after, source_sha_before)
+                self.assertEqual(
+                    hashlib.sha256(copied.read_bytes()).hexdigest(),
+                    source_sha_before,
                 )
-                self.assertEqual(FakeEngine.call_count, 1,
-                                 "第二次 collect_all 应命中缓存，不重复调用 OCR")
-                self.assertGreaterEqual(result2.ocr_cache_hits, 1)
+
+                workbook = load_workbook(result.report_path, data_only=True)
+                try:
+                    summary = workbook["资料提取汇总与缺失清单"]
+                    self.assertEqual(summary["D6"].value, 0)
+                    self.assertEqual(
+                        summary["G8"].value,
+                        "已按文件夹直接复制（未进行 OCR 内容核对）",
+                    )
+                finally:
+                    workbook.close()
         finally:
             mc._OCR_ENGINE = real_engine
             mc._OCR_ATTEMPTED = real_attempted

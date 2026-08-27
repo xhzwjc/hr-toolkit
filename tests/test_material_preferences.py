@@ -205,6 +205,46 @@ class MaterialPreferencesGUITest(unittest.TestCase):
         self.assertFalse(call.kwargs["collect_all"])
         self.assertEqual(call.kwargs["library_mode"], LIBRARY_MODE_PERSON_FOLDER)
 
+    def test_direct_name_collect_all_disables_ocr_for_this_run(self) -> None:
+        app = self._make_app()
+        app.material_target_input = _Value("张三")
+        app.summary_path = _Value("")
+        app.material_create_zip = _Value(False)
+        app.material_use_ocr_cache = _Value(True)
+        app._prepare_result_output_dir = Mock()
+        app._begin_tool_run = Mock()
+        app._clear_log = Mock()
+        app._write_log = Mock()
+        app._start_tool_worker = Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            library = root / "资料库"
+            output = root / "输出"
+            result_dir = root / "本次结果"
+            library.mkdir()
+            output.mkdir()
+            app.input_path = _Value(str(library))
+            app.output_dir = _Value(str(output))
+            app._prepare_result_output_dir.return_value = result_dir
+
+            with patch("hr_toolkit.gui.app.messagebox") as mocked_messagebox:
+                app._run_material_collector()
+
+        mocked_messagebox.showwarning.assert_not_called()
+        call = app._start_tool_worker.call_args
+        self.assertTrue(call.kwargs["collect_all"])
+        self.assertEqual(call.kwargs["library_mode"], LIBRARY_MODE_PERSON_FOLDER)
+        self.assertFalse(call.kwargs["use_ocr_cache"])
+        self.assertTrue(any(
+            "不进行 OCR 内容识别" in str(log_call.args[0])
+            for log_call in app._write_log.call_args_list
+        ))
+        self.assertFalse(any(
+            "OCR 智能索引缓存已启用" in str(log_call.args[0])
+            for log_call in app._write_log.call_args_list
+        ))
+
     def test_flat_library_mode_forces_cache_and_updates_only_its_controls(self) -> None:
         app = HRToolkitApp.__new__(HRToolkitApp)
         app.material_library_mode = _Value("无序平铺资料库（OCR 索引）")

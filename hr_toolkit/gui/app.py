@@ -10032,6 +10032,12 @@ class HRToolkitApp:
             if library_mode_val == LIBRARY_MODE_FLAT_OCR
             else self.material_use_ocr_cache.get()
         )
+        skip_direct_all_ocr = (
+            library_mode_val == LIBRARY_MODE_PERSON_FOLDER
+            and is_collect_all
+            and bool(direct_target_text)
+        )
+        use_ocr_cache_for_run = use_ocr_cache_val and not skip_direct_all_ocr
 
         output_dir = self._prepare_result_output_dir(Path(output_text))
         if output_dir is None:
@@ -10044,7 +10050,9 @@ class HRToolkitApp:
             self._write_log("开始检索并拷贝员工整个资料文件夹，请稍候...")
         else:
             self._write_log("开始检索并打包指定材料，请稍候...")
-        if use_ocr_cache_val:
+        if skip_direct_all_ocr:
+            self._write_log("全部材料将直接复制匹配到的员工文件夹，不进行 OCR 内容识别。")
+        elif use_ocr_cache_for_run:
             self._write_log("OCR 智能索引缓存已启用：首次扫描会建立资料库缓存；二次扫描将秒级命中。")
 
         run_token = getattr(self, "_tool_run_token", 0)
@@ -10076,7 +10084,7 @@ class HRToolkitApp:
             create_zip=create_zip_val,
             generate_report=True,
             collect_all=is_collect_all,
-            use_ocr_cache=use_ocr_cache_val,
+            use_ocr_cache=use_ocr_cache_for_run,
             progress_callback=material_progress,
         )
 
