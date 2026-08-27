@@ -76,6 +76,34 @@ COMPANY_ALIASES = {
 
 SOCIAL_CATEGORIES = ("养老", "医疗", "失业", "工伤", "补充工伤", "生育", "大病医疗")
 
+PAYMENT_NORMAL = "normal"
+PAYMENT_ARREARS = "arrears"
+PAYMENT_DIFFERENCE = "difference"
+PAYMENT_UNKNOWN = "unknown"
+
+FEE_PERIOD_START_HEADERS = (
+    "费款所属日期起",
+    "费款所属期起",
+    "费款所属期",
+    "费用所属期",
+    "所属月份",
+    "缴费月份",
+)
+FEE_PERIOD_END_HEADERS = ("费款所属日期止", "费款所属期止")
+PAYMENT_NATURE_HEADERS = (
+    "缴费性质",
+    "业务类型",
+    "业务类别",
+    "申报类型",
+    "征缴类型",
+    "款项性质",
+    "补缴类型",
+    "调整类型",
+    "摘要",
+    "备注",
+    "征收子目",
+)
+
 DETAIL_COLUMNS = {
     "序号": 1,
     "公司": 2,
@@ -131,6 +159,13 @@ DETAIL_COLUMNS = {
     "备注": 76,
 }
 
+DIFFERENCE_COLUMNS = {
+    "养老": {"基数": 44, "个人比例": 45, "个人金额": 46, "单位比例": 47, "单位金额": 48},
+    "失业": {"基数": 49, "个人比例": 50, "个人金额": 51, "单位比例": 52, "单位金额": 53},
+    "工伤": {"基数": 54, "单位比例": 55, "单位金额": 56},
+    "医疗": {"基数": 57, "个人比例": 58, "个人金额": 59, "单位比例": 60, "单位金额": 61},
+}
+
 
 @dataclass(frozen=True)
 class RosterPerson:
@@ -152,9 +187,13 @@ class RosterPerson:
 @dataclass(frozen=True)
 class SourceContext:
     label: str
-    period: str
+    file_period: str
+    container_period: str
+    billing_period_hint: str
+    period_split_file: bool
     account_hint: str
     company_hint: str
+    nature_hint: str | None
 
 
 @dataclass(frozen=True)
@@ -163,7 +202,10 @@ class SocialPaymentLine:
     source_row: int
     name: str
     id_card: str
-    period: str
+    fee_period: str
+    fee_period_end: str
+    billing_period_hint: str
+    period_split_file: bool
     account_hint: str
     company_hint: str
     category: str
@@ -172,6 +214,7 @@ class SocialPaymentLine:
     base: float | None
     rate: float | None
     amount: float
+    nature_hint: str | None = None
 
 
 @dataclass
@@ -179,6 +222,8 @@ class DetailRecord:
     id_card: str
     name: str
     period: str
+    billing_period: str
+    period_split_input: bool
     account: str
     account_display: str
     company: str
@@ -191,16 +236,27 @@ class DetailRecord:
     amounts: dict[str, dict[str, float]] = field(default_factory=dict)
     bases: dict[str, float] = field(default_factory=dict)
     rates: dict[str, dict[str, float]] = field(default_factory=dict)
+    difference_amounts: dict[str, dict[str, float]] = field(default_factory=dict)
+    difference_bases: dict[str, set[float]] = field(default_factory=dict)
+    difference_rates: dict[str, dict[str, set[float]]] = field(default_factory=dict)
+    main_periods: set[str] = field(default_factory=set)
+    arrears_periods: dict[str, set[str]] = field(default_factory=dict)
+    difference_periods: dict[str, set[str]] = field(default_factory=dict)
+    unknown_periods: dict[str, set[str]] = field(default_factory=dict)
     source_files: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
 
     @property
     def personal_total(self) -> float:
-        return round(sum(side_amounts.get("个人", 0.0) for side_amounts in self.amounts.values()), 2)
+        normal = sum(side_amounts.get("个人", 0.0) for side_amounts in self.amounts.values())
+        difference = sum(side_amounts.get("个人", 0.0) for side_amounts in self.difference_amounts.values())
+        return round(normal + difference, 2)
 
     @property
     def unit_total(self) -> float:
-        return round(sum(side_amounts.get("单位", 0.0) for side_amounts in self.amounts.values()), 2)
+        normal = sum(side_amounts.get("单位", 0.0) for side_amounts in self.amounts.values())
+        difference = sum(side_amounts.get("单位", 0.0) for side_amounts in self.difference_amounts.values())
+        return round(normal + difference, 2)
 
     @property
     def social_total(self) -> float:
@@ -528,13 +584,17 @@ def _read_xls_long_sheet(sheet, headers: dict[str, int], header_row: int, contex
         category, side = _classify_insurance_item(_cell_text(row.get("参保费种")), _cell_text(row.get("征收品目")))
         if category is None:
             continue
+        fee_period, fee_period_end = _payment_periods_from_row(row, context)
         lines.append(
             SocialPaymentLine(
                 source_file=context.label,
                 source_row=row_index + 1,
                 name=name,
                 id_card=id_card,
-                period=context.period or _period_from_value(row.get("费款所属日期起")) or "",
+                fee_period=fee_period,
+                fee_period_end=fee_period_end,
+                billing_period_hint=context.billing_period_hint,
+                period_split_file=context.period_split_file,
                 account_hint=context.account_hint,
                 company_hint=context.company_hint,
                 category=category,
@@ -543,6 +603,7 @@ def _read_xls_long_sheet(sheet, headers: dict[str, int], header_row: int, contex
                 base=_to_number(row.get("缴费基数")),
                 rate=_rate_to_decimal(row.get("费率")),
                 amount=_to_number(row.get("本期应缴费额")) or 0.0,
+                nature_hint=_nature_hint_from_row(row, context),
             )
         )
     return lines
@@ -552,7 +613,6 @@ def _read_xls_single_kind_sheet(sheet, headers: dict[str, int], header_row: int,
     category, side = _classify_insurance_item(context.label, context.label)
     if category is None:
         raise ValueError("文件名中未识别险种。")
-    period = context.period
     lines: list[SocialPaymentLine] = []
     for row_index in range(header_row + 1, sheet.nrows):
         row = {header: sheet.cell_value(row_index, col_index) for header, col_index in headers.items()}
@@ -560,13 +620,17 @@ def _read_xls_single_kind_sheet(sheet, headers: dict[str, int], header_row: int,
         id_card = _normalize_id_card(row.get("身份证件号码") or row.get("证件号码"))
         if not _valid_person_row(name, id_card):
             continue
+        fee_period, fee_period_end = _payment_periods_from_row(row, context)
         lines.append(
             SocialPaymentLine(
                 source_file=context.label,
                 source_row=row_index + 1,
                 name=name,
                 id_card=id_card,
-                period=period,
+                fee_period=fee_period,
+                fee_period_end=fee_period_end,
+                billing_period_hint=context.billing_period_hint,
+                period_split_file=context.period_split_file,
                 account_hint=context.account_hint,
                 company_hint=context.company_hint,
                 category=category,
@@ -575,6 +639,7 @@ def _read_xls_single_kind_sheet(sheet, headers: dict[str, int], header_row: int,
                 base=_to_number(row.get("缴费基数")),
                 rate=_rate_to_decimal(row.get("费率")),
                 amount=_to_number(row.get("应缴费额(元)") or row.get("本期应缴费额")) or 0.0,
+                nature_hint=_nature_hint_from_row(row, context),
             )
         )
     return lines
@@ -596,10 +661,8 @@ def _read_xls_wide_sheet(sheet, headers: dict[str, int], header_row: int, contex
         id_card = _normalize_id_card(_xls_header_value(sheet, row_index, headers, "证件号码") or _xls_header_value(sheet, row_index, headers, "身份证件号码"))
         if not _valid_person_row(name, id_card):
             continue
-        period = context.period or _period_from_value(
-            _xls_header_value(sheet, row_index, headers, "费款所属期起")
-            or _xls_header_value(sheet, row_index, headers, "费款所属日期起")
-        ) or ""
+        row = {header: sheet.cell_value(row_index, col_index) for header, col_index in headers.items()}
+        fee_period, fee_period_end = _payment_periods_from_row(row, context)
         for _header, col_index, category, side in amount_columns:
             amount = _to_number(sheet.cell_value(row_index, col_index))
             if not amount:
@@ -610,7 +673,10 @@ def _read_xls_wide_sheet(sheet, headers: dict[str, int], header_row: int, contex
                     source_row=row_index + 1,
                     name=name,
                     id_card=id_card,
-                    period=period,
+                    fee_period=fee_period,
+                    fee_period_end=fee_period_end,
+                    billing_period_hint=context.billing_period_hint,
+                    period_split_file=context.period_split_file,
                     account_hint=context.account_hint,
                     company_hint=context.company_hint,
                     category=category,
@@ -619,6 +685,7 @@ def _read_xls_wide_sheet(sheet, headers: dict[str, int], header_row: int, contex
                     base=None,
                     rate=None,
                     amount=amount,
+                    nature_hint=_nature_hint_from_row(row, context, _header),
                 )
             )
     return lines
@@ -635,13 +702,17 @@ def _read_long_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, co
         category, side = _classify_insurance_item(_cell_text(row.get("参保费种")), _cell_text(row.get("征收品目") or row.get("险种")))
         if category is None:
             continue
+        fee_period, fee_period_end = _payment_periods_from_row(row, context)
         lines.append(
             SocialPaymentLine(
                 source_file=context.label,
                 source_row=row_index,
                 name=name,
                 id_card=id_card,
-                period=context.period or _period_from_value(row.get("费款所属日期起") or row.get("费款所属期起")) or "",
+                fee_period=fee_period,
+                fee_period_end=fee_period_end,
+                billing_period_hint=context.billing_period_hint,
+                period_split_file=context.period_split_file,
                 account_hint=context.account_hint,
                 company_hint=context.company_hint,
                 category=category,
@@ -650,6 +721,7 @@ def _read_long_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, co
                 base=_to_number(row.get("缴费基数")),
                 rate=_rate_to_decimal(row.get("费率")),
                 amount=_to_number(row.get("本期应缴费额") or row.get("应缴费额(元)")) or 0.0,
+                nature_hint=_nature_hint_from_row(row, context),
             )
         )
     return lines
@@ -659,7 +731,6 @@ def _read_single_kind_sheet(ws: Worksheet, headers: dict[str, int], header_row: 
     category, side = _classify_insurance_item(context.label, context.label)
     if category is None:
         raise ValueError("文件名中未识别险种。")
-    period = context.period
     lines: list[SocialPaymentLine] = []
     for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
         row = {header: ws.cell(row_index, col_index).value for header, col_index in headers.items()}
@@ -667,13 +738,17 @@ def _read_single_kind_sheet(ws: Worksheet, headers: dict[str, int], header_row: 
         id_card = _normalize_id_card(row.get("身份证件号码") or row.get("证件号码"))
         if not _valid_person_row(name, id_card):
             continue
+        fee_period, fee_period_end = _payment_periods_from_row(row, context)
         lines.append(
             SocialPaymentLine(
                 source_file=context.label,
                 source_row=row_index,
                 name=name,
                 id_card=id_card,
-                period=period,
+                fee_period=fee_period,
+                fee_period_end=fee_period_end,
+                billing_period_hint=context.billing_period_hint,
+                period_split_file=context.period_split_file,
                 account_hint=context.account_hint,
                 company_hint=context.company_hint,
                 category=category,
@@ -682,6 +757,7 @@ def _read_single_kind_sheet(ws: Worksheet, headers: dict[str, int], header_row: 
                 base=_to_number(row.get("缴费基数")),
                 rate=_rate_to_decimal(row.get("费率")),
                 amount=_to_number(row.get("应缴费额(元)") or row.get("本期应缴费额")) or 0.0,
+                nature_hint=_nature_hint_from_row(row, context),
             )
         )
     return lines
@@ -704,7 +780,8 @@ def _read_wide_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, co
         id_card = _normalize_id_card(ws.cell(row_index, headers.get("证件号码", headers.get("身份证件号码", 0))).value if ("证件号码" in headers or "身份证件号码" in headers) else "")
         if not _valid_person_row(name, id_card):
             continue
-        period = context.period or _period_from_value(_header_value(ws, row_index, headers, "费款所属期起") or _header_value(ws, row_index, headers, "费款所属日期起")) or ""
+        row = {header: ws.cell(row_index, col_index).value for header, col_index in headers.items()}
+        fee_period, fee_period_end = _payment_periods_from_row(row, context)
         for _header, col_index, category, side in amount_columns:
             amount = _to_number(ws.cell(row_index, col_index).value)
             if not amount:
@@ -715,7 +792,10 @@ def _read_wide_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, co
                     source_row=row_index,
                     name=name,
                     id_card=id_card,
-                    period=period,
+                    fee_period=fee_period,
+                    fee_period_end=fee_period_end,
+                    billing_period_hint=context.billing_period_hint,
+                    period_split_file=context.period_split_file,
                     account_hint=context.account_hint,
                     company_hint=context.company_hint,
                     category=category,
@@ -724,6 +804,7 @@ def _read_wide_sheet(ws: Worksheet, headers: dict[str, int], header_row: int, co
                     base=None,
                     rate=None,
                     amount=amount,
+                    nature_hint=_nature_hint_from_row(row, context, _header),
                 )
             )
     return lines
@@ -734,7 +815,8 @@ def _build_detail_records(
     roster_people: dict[str, RosterPerson],
     warnings: list[str],
 ) -> list[DetailRecord]:
-    records: OrderedDict[tuple[str, str, str], DetailRecord] = OrderedDict()
+    resolved: list[tuple[SocialPaymentLine, RosterPerson, str, str, str]] = []
+    account_by_line: dict[SocialPaymentLine, str] = {}
     mismatch_warning_keys: set[tuple[str, str, str, str, str]] = set()
     for line in lines:
         person = roster_people.get(line.id_card)
@@ -747,16 +829,24 @@ def _build_detail_records(
         source_company = _company_display(line.company_hint, line.account_hint)
         source_place = _insured_place(line.account_hint)
         _append_source_mismatch_warnings(line, person, source_account, source_company, source_place, warnings, mismatch_warning_keys)
-
-        period = line.period or "未识别账单期"
         account_display = source_account or person.account_display
-        key = (line.id_card, account_display, period)
+        account_by_line[line] = account_display
+        resolved.append((line, person, account_display, source_company, source_place))
+
+    billing_periods = _billing_periods_by_account(resolved)
+    natures = _classify_payment_natures([item[0] for item in resolved], account_by_line, billing_periods)
+    records: OrderedDict[tuple[str, str, str], DetailRecord] = OrderedDict()
+    for line, person, account_display, source_company, source_place in resolved:
+        billing_period = billing_periods.get(account_display, "") or line.billing_period_hint or line.fee_period or "未识别账单期"
+        key = (line.id_card, account_display, billing_period)
         record = records.get(key)
         if record is None:
             record = DetailRecord(
                 id_card=line.id_card,
                 name=person.name,
-                period=period,
+                period=billing_period,
+                billing_period=billing_period,
+                period_split_input=line.period_split_file,
                 account=line.account_hint or person.account,
                 account_display=account_display,
                 company=source_company or person.company,
@@ -768,19 +858,174 @@ def _build_detail_records(
                 management_fee=person.management_fee,
             )
             records[key] = record
+        else:
+            record.period_split_input = record.period_split_input or line.period_split_file
         if line.category not in SOCIAL_CATEGORIES:
             record.warnings.append(f"未识别险种：{line.category}")
             continue
         record.source_files.add(line.source_file)
-        side_amounts = record.amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
-        side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
-        if line.base is not None:
-            record.bases[line.category] = line.base
-        if line.rate is not None:
-            record.rates.setdefault(line.category, {})[line.side] = line.rate
-        if period == "未识别账单期":
+        nature = natures.get(line, PAYMENT_NORMAL)
+        line_periods = _line_periods(line)
+        if nature == PAYMENT_DIFFERENCE:
+            side_amounts = record.difference_amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
+            side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
+            record.difference_periods.setdefault(line.category, set()).update(line_periods)
+            if line.base is not None:
+                record.difference_bases.setdefault(line.category, set()).add(line.base)
+            if line.rate is not None:
+                record.difference_rates.setdefault(line.category, {}).setdefault(line.side, set()).add(line.rate)
+        else:
+            side_amounts = record.amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
+            side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
+            record.main_periods.update(line_periods)
+            if line.base is not None:
+                record.bases[line.category] = line.base
+            if line.rate is not None:
+                record.rates.setdefault(line.category, {})[line.side] = line.rate
+            if nature == PAYMENT_ARREARS:
+                arrears_periods = {period for period in line_periods if period < billing_period} or line_periods
+                record.arrears_periods.setdefault(line.category, set()).update(arrears_periods)
+            elif nature == PAYMENT_UNKNOWN:
+                record.unknown_periods.setdefault(line.category, set()).update(line_periods)
+        if billing_period == "未识别账单期":
             warnings.append(f"{line.source_file} 第 {line.source_row} 行未识别账单期，已写入“未识别账单期”。")
+
+    for record in records.values():
+        if record.period_split_input and record.main_periods:
+            record.period = _format_period_span(record.main_periods)
+        else:
+            record.period = record.billing_period
+        _append_payment_nature_remarks(record, warnings)
     return list(records.values())
+
+
+def _billing_periods_by_account(
+    resolved: list[tuple[SocialPaymentLine, RosterPerson, str, str, str]],
+) -> dict[str, str]:
+    fee_periods: OrderedDict[str, set[str]] = OrderedDict()
+    fallback_periods: OrderedDict[str, set[str]] = OrderedDict()
+    for line, _person, account_display, _source_company, _source_place in resolved:
+        if line.fee_period:
+            fee_periods.setdefault(account_display, set()).add(line.fee_period_end or line.fee_period)
+        if line.billing_period_hint:
+            fallback_periods.setdefault(account_display, set()).add(line.billing_period_hint)
+    accounts = OrderedDict.fromkeys([item[2] for item in resolved])
+    result: dict[str, str] = {}
+    for account in accounts:
+        candidates = fallback_periods.get(account) or fee_periods.get(account) or set()
+        result[account] = max(candidates) if candidates else ""
+    return result
+
+
+def _classify_payment_natures(
+    lines: list[SocialPaymentLine],
+    account_by_line: dict[SocialPaymentLine, str],
+    billing_periods: dict[str, str],
+) -> dict[SocialPaymentLine, str]:
+    result: dict[SocialPaymentLine, str] = {}
+    current_by_person: dict[tuple[str, str, str, str], list[SocialPaymentLine]] = {}
+    current_by_account: dict[tuple[str, str, str], list[SocialPaymentLine]] = {}
+    history_groups: dict[tuple[str, str, str, str], list[SocialPaymentLine]] = {}
+
+    for line in lines:
+        account = account_by_line[line]
+        billing_period = billing_periods.get(account, "")
+        if line.nature_hint:
+            result[line] = line.nature_hint
+        if line.fee_period and billing_period and line.fee_period < billing_period:
+            history_groups.setdefault((line.id_card, account, line.category, line.side), []).append(line)
+        elif line.fee_period and line.fee_period == billing_period:
+            current_by_person.setdefault((line.id_card, account, line.category, line.side), []).append(line)
+            current_by_account.setdefault((account, line.category, line.side), []).append(line)
+
+    for line in lines:
+        if line in result:
+            continue
+        account = account_by_line[line]
+        billing_period = billing_periods.get(account, "")
+        if not line.fee_period or not billing_period or line.fee_period >= billing_period:
+            result[line] = PAYMENT_NORMAL
+            continue
+
+        person_key = (line.id_card, account, line.category, line.side)
+        person_current = current_by_person.get(person_key, [])
+        account_current = current_by_account.get((account, line.category, line.side), [])
+        if any(_same_contribution_profile(line, current) for current in person_current):
+            result[line] = PAYMENT_ARREARS
+            continue
+        if any(_same_contribution_profile(line, current) for current in account_current):
+            result[line] = PAYMENT_ARREARS
+            continue
+
+        history = [item for item in history_groups.get(person_key, []) if item.nature_hint is None]
+        periods = {item.fee_period for item in history if item.fee_period}
+        if len(periods) >= 2 and person_current and _same_history_profile(history):
+            if all(any(_is_lower_adjustment_profile(item, current) for current in person_current) for item in history):
+                result[line] = PAYMENT_DIFFERENCE
+                continue
+        result[line] = PAYMENT_UNKNOWN
+    return result
+
+
+def _same_contribution_profile(left: SocialPaymentLine, right: SocialPaymentLine) -> bool:
+    if not _amount_close(left.amount, right.amount):
+        return False
+    if left.base is not None and right.base is not None and not _amount_close(left.base, right.base):
+        return False
+    if left.rate is not None and right.rate is not None and not _rate_close(left.rate, right.rate):
+        return False
+    return True
+
+
+def _same_history_profile(lines: list[SocialPaymentLine]) -> bool:
+    if not lines:
+        return False
+    first = lines[0]
+    return all(_same_contribution_profile(first, line) for line in lines[1:])
+
+
+def _is_lower_adjustment_profile(history: SocialPaymentLine, current: SocialPaymentLine) -> bool:
+    if history.amount >= current.amount - 0.005:
+        return False
+    lower_rate = history.rate is not None and current.rate is not None and history.rate < current.rate - 0.0000001
+    lower_base = history.base is not None and current.base is not None and history.base < current.base - 0.005
+    return lower_rate or lower_base
+
+
+def _amount_close(left: float, right: float) -> bool:
+    return abs(left - right) <= 0.01
+
+
+def _rate_close(left: float, right: float) -> bool:
+    return abs(left - right) <= 0.0000001
+
+
+def _line_periods(line: SocialPaymentLine) -> set[str]:
+    if not line.fee_period:
+        return set()
+    return set(_period_sequence(line.fee_period, line.fee_period_end or line.fee_period))
+
+
+def _append_payment_nature_remarks(record: DetailRecord, warnings: list[str]) -> None:
+    arrears_categories = [category for category in SOCIAL_CATEGORIES if category in record.arrears_periods]
+    if arrears_categories:
+        periods = set().union(*(record.arrears_periods[category] for category in arrears_categories))
+        record.warnings.append(f"补缴：{_format_period_span(periods)}（{'、'.join(arrears_categories)}）")
+    difference_categories = [category for category in SOCIAL_CATEGORIES if category in record.difference_periods]
+    if difference_categories:
+        periods = set().union(*(record.difference_periods[category] for category in difference_categories))
+        record.warnings.append(f"补差：{_format_period_span(periods)}（{'、'.join(difference_categories)}）")
+        for category in difference_categories:
+            multiple_base = len(record.difference_bases.get(category, set())) > 1
+            multiple_rate = any(len(values) > 1 for values in record.difference_rates.get(category, {}).values())
+            if multiple_base or multiple_rate:
+                record.warnings.append(f"{category}补差含多种基数或比例，基数/比例留空，金额按源表汇总")
+    unknown_categories = [category for category in SOCIAL_CATEGORIES if category in record.unknown_periods]
+    if unknown_categories:
+        periods = set().union(*(record.unknown_periods[category] for category in unknown_categories))
+        message = f"待确认历史缴费：{_format_period_span(periods)}（{'、'.join(unknown_categories)}）"
+        record.warnings.append(message)
+        warnings.append(f"{record.name} {message}，金额已保留在普通缴费区，未自动归入补差。")
 
 
 def _append_source_mismatch_warnings(
@@ -818,6 +1063,7 @@ def _write_detail_workbook(records: list[DetailRecord], output_file: Path, temp_
         title = _detail_title(records)
         if title:
             ws["A1"].value = title
+        _write_difference_headers(ws, records)
         template_snapshot = snapshot_row(ws, 4, ws.max_column)
         data_start = 4
         if records:
@@ -874,8 +1120,10 @@ def _write_detail_row(ws: Worksheet, row_index: int, sequence: int, record: Deta
     _write_category_cells(ws, row_index, record, "补充工伤", "补充工伤")
     _write_category_cells(ws, row_index, record, "生育", "生育")
     _write_category_cells(ws, row_index, record, "大病医疗", "大病医疗")
+    _write_difference_cells(ws, row_index, record)
     _write_detail_totals(ws, row_index)
     _format_data_row(ws, row_index, ws.max_column)
+    _format_difference_rate_cells(ws, row_index, record)
 
 
 def _write_category_cells(ws: Worksheet, row_index: int, record: DetailRecord, category: str, prefix: str) -> None:
@@ -894,6 +1142,69 @@ def _write_category_cells(ws: Worksheet, row_index: int, record: DetailRecord, c
     unit_amount_col = DETAIL_COLUMNS.get(f"{prefix}单位金额")
     if unit_amount_col is not None:
         ws.cell(row_index, unit_amount_col).value = _zero_blank(record.amounts.get(category, {}).get("单位"))
+
+
+def _write_difference_headers(ws: Worksheet, records: list[DetailRecord]) -> None:
+    periods: set[str] = set()
+    for record in records:
+        for category_periods in record.difference_periods.values():
+            periods.update(category_periods)
+    if not periods:
+        return
+    period_text = _format_chinese_period_span(periods)
+    for category, column in (("养老", 44), ("失业", 49), ("工伤", 54), ("医疗", 57)):
+        ws.cell(2, column).value = f"{category}{period_text}补差"
+
+
+def _write_difference_cells(ws: Worksheet, row_index: int, record: DetailRecord) -> None:
+    if not record.difference_amounts:
+        return
+    for category, columns in DIFFERENCE_COLUMNS.items():
+        base = _single_number(record.difference_bases.get(category, set()))
+        if base is not None:
+            ws.cell(row_index, columns["基数"]).value = base
+        personal_rate = _single_number(record.difference_rates.get(category, {}).get("个人", set()))
+        if personal_rate is not None and "个人比例" in columns:
+            ws.cell(row_index, columns["个人比例"]).value = personal_rate
+        personal_amount = record.difference_amounts.get(category, {}).get("个人")
+        if personal_amount and "个人金额" in columns:
+            ws.cell(row_index, columns["个人金额"]).value = personal_amount
+        unit_rate = _single_number(record.difference_rates.get(category, {}).get("单位", set()))
+        if unit_rate is not None and "单位比例" in columns:
+            ws.cell(row_index, columns["单位比例"]).value = unit_rate
+        unit_amount = record.difference_amounts.get(category, {}).get("单位")
+        if unit_amount and "单位金额" in columns:
+            ws.cell(row_index, columns["单位金额"]).value = unit_amount
+
+    ws.cell(row_index, DETAIL_COLUMNS["个人社保补缴合计"]).value = _sum_formula(
+        [DIFFERENCE_COLUMNS["养老"]["个人金额"], DIFFERENCE_COLUMNS["失业"]["个人金额"], DIFFERENCE_COLUMNS["医疗"]["个人金额"]],
+        row_index,
+    )
+    ws.cell(row_index, DETAIL_COLUMNS["单位社保补缴合计"]).value = _sum_formula(
+        [
+            DIFFERENCE_COLUMNS["养老"]["单位金额"],
+            DIFFERENCE_COLUMNS["失业"]["单位金额"],
+            DIFFERENCE_COLUMNS["工伤"]["单位金额"],
+            DIFFERENCE_COLUMNS["医疗"]["单位金额"],
+        ],
+        row_index,
+    )
+
+
+def _format_difference_rate_cells(ws: Worksheet, row_index: int, record: DetailRecord) -> None:
+    """Only newly populated supplement rates use the client's percentage format."""
+    for category, columns in DIFFERENCE_COLUMNS.items():
+        rates = record.difference_rates.get(category, {})
+        for side, key in (("个人", "个人比例"), ("单位", "单位比例")):
+            if key not in columns or _single_number(rates.get(side, set())) is None:
+                continue
+            ws.cell(row_index, columns[key]).number_format = "0.00%"
+
+
+def _single_number(values: set[float]) -> float | None:
+    if len(values) != 1:
+        return None
+    return next(iter(values))
 
 
 def _write_detail_totals(ws: Worksheet, row_index: int) -> None:
@@ -1064,12 +1375,27 @@ def _write_category_analysis(ws: Worksheet, start_row: int, records: list[Detail
         ws.cell(start_row + 1, col_index).value = header
     row_index = start_row + 2
     for category in SOCIAL_CATEGORIES:
-        category_records = [record for record in records if category in record.amounts]
+        category_records = [record for record in records if category in record.amounts or category in record.difference_amounts]
         if not category_records:
             continue
-        bases = [record.bases[category] for record in category_records if category in record.bases]
-        personal = sum(record.amounts.get(category, {}).get("个人", 0.0) for record in category_records)
-        unit = sum(record.amounts.get(category, {}).get("单位", 0.0) for record in category_records)
+        bases: list[float] = []
+        for record in category_records:
+            if category in record.bases:
+                bases.append(record.bases[category])
+            else:
+                difference_base = _single_number(record.difference_bases.get(category, set()))
+                if difference_base is not None:
+                    bases.append(difference_base)
+        personal = sum(
+            record.amounts.get(category, {}).get("个人", 0.0)
+            + record.difference_amounts.get(category, {}).get("个人", 0.0)
+            for record in category_records
+        )
+        unit = sum(
+            record.amounts.get(category, {}).get("单位", 0.0)
+            + record.difference_amounts.get(category, {}).get("单位", 0.0)
+            for record in category_records
+        )
         ws.cell(row_index, 1).value = category
         ws.cell(row_index, 2).value = len({record.id_card for record in category_records})
         ws.cell(row_index, 3).value = round(sum(bases) / len(bases), 2) if bases else ""
@@ -1205,10 +1531,12 @@ def _classify_insurance_item(type_text: str, item_text: str) -> tuple[str | None
 def _source_context(file_path: Path) -> SourceContext:
     candidates = _source_name_candidates(file_path)
     hint_text = " ".join(candidates)
-    period = ""
-    for candidate in candidates:
-        period = _period_from_filename(candidate) or ""
-        if period:
+    file_period = _period_from_filename(file_path.name) or ""
+    period_split_file = bool(_FILENAME_HAS_PERIOD.search(file_path.name))
+    container_period = ""
+    for candidate in candidates[:-1]:
+        container_period = _period_from_filename(candidate) or ""
+        if container_period:
             break
     account_hint = ""
     for candidate in candidates:
@@ -1217,9 +1545,13 @@ def _source_context(file_path: Path) -> SourceContext:
             break
     return SourceContext(
         label=file_path.name,
-        period=period,
+        file_period=file_period,
+        container_period=container_period,
+        billing_period_hint=(file_period if file_period and not period_split_file else "") or (container_period if not file_period else ""),
+        period_split_file=period_split_file,
         account_hint=account_hint,
         company_hint=_company_hint_from_filename(hint_text),
+        nature_hint=_payment_nature_from_text(file_path.name),
     )
 
 
@@ -1265,6 +1597,90 @@ def _period_from_value(value: Any) -> str | None:
         if 1 <= month <= 12:
             return f"{year}{month:02d}"
     return None
+
+
+def _payment_periods_from_row(row: dict[str, Any], context: SourceContext) -> tuple[str, str]:
+    start = ""
+    for header in FEE_PERIOD_START_HEADERS:
+        start = _period_from_value(row.get(header)) or ""
+        if start:
+            break
+    end = ""
+    for header in FEE_PERIOD_END_HEADERS:
+        end = _period_from_value(row.get(header)) or ""
+        if end:
+            break
+    start = start or context.file_period or context.container_period
+    end = end or start
+    if start and end and end < start:
+        start, end = end, start
+    return start, end
+
+
+def _nature_hint_from_row(row: dict[str, Any], context: SourceContext, *extra_values: Any) -> str | None:
+    values = [row.get(header) for header in PAYMENT_NATURE_HEADERS]
+    values.extend(extra_values)
+    return _payment_nature_from_text(*values) or context.nature_hint
+
+
+def _payment_nature_from_text(*values: Any) -> str | None:
+    text = " ".join(_cell_text(value) for value in values if value is not None)
+    if not text:
+        return None
+    difference = any(keyword in text for keyword in ("补差", "差额", "基数调整", "基数补差", "调整补收"))
+    explicit_arrears = any(keyword in text for keyword in ("补缴", "追缴"))
+    if difference and not explicit_arrears:
+        return PAYMENT_DIFFERENCE
+    if explicit_arrears and not difference:
+        return PAYMENT_ARREARS
+    if "补收" in text and not difference:
+        return PAYMENT_ARREARS
+    if any(keyword in text for keyword in ("正常缴费", "正常征收", "当期缴费")):
+        return PAYMENT_NORMAL
+    return None
+
+
+def _period_sequence(start: str, end: str) -> list[str]:
+    if not _is_period(start) or not _is_period(end):
+        return [start] if start else []
+    start_index = int(start[:4]) * 12 + int(start[4:]) - 1
+    end_index = int(end[:4]) * 12 + int(end[4:]) - 1
+    if end_index < start_index:
+        start_index, end_index = end_index, start_index
+    periods: list[str] = []
+    for index in range(start_index, end_index + 1):
+        year, month_index = divmod(index, 12)
+        periods.append(f"{year}{month_index + 1:02d}")
+    return periods
+
+
+def _format_period_span(periods: set[str]) -> str:
+    normalized = sorted(period for period in periods if _is_period(period))
+    if not normalized:
+        return ""
+    if len(normalized) == 1:
+        return normalized[0]
+    contiguous = normalized == _period_sequence(normalized[0], normalized[-1])
+    if contiguous:
+        return f"{normalized[0]}-{normalized[-1]}"
+    return "、".join(normalized)
+
+
+def _format_chinese_period_span(periods: set[str]) -> str:
+    normalized = sorted(period for period in periods if _is_period(period))
+    if not normalized:
+        return ""
+    start = normalized[0]
+    end = normalized[-1]
+    if start == end:
+        return f"{start[:4]}年{int(start[4:]):d}月"
+    if start[:4] == end[:4] and normalized == _period_sequence(start, end):
+        return f"{start[:4]}年{int(start[4:]):d}月-{int(end[4:]):d}月"
+    return f"{start[:4]}年{int(start[4:]):d}月-{end[:4]}年{int(end[4:]):d}月"
+
+
+def _is_period(value: str) -> bool:
+    return bool(re.fullmatch(r"20\d{4}", value)) and 1 <= int(value[4:]) <= 12
 
 
 def _account_hint_from_filename(file_name: str) -> str:
@@ -1347,7 +1763,7 @@ def _count_records(records: list[DetailRecord], attr: str) -> dict[str, int]:
 
 def _detail_title(records: list[DetailRecord]) -> str:
     companies = sorted({record.company for record in records if record.company})
-    periods = sorted({record.period for record in records if record.period and record.period != "未识别账单期"})
+    periods = sorted({record.billing_period for record in records if _is_period(record.billing_period)})
     company_part = "、".join(companies) if companies else "社保"
     if len(periods) == 1:
         period_text = f"{periods[0][:4]}年{int(periods[0][4:]):d}月"
