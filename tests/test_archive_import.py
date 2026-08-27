@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 import zipfile
@@ -7,6 +8,8 @@ import shutil
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
+from openpyxl.styles import PatternFill
 
 from hr_toolkit.tools.archive_import import export_company_archive_tables, import_archive_transfers
 
@@ -51,6 +54,155 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(ws3.cell(4, 2).value, "张五")
             self.assertIsNone(ws3.cell(4, 12).value)
             self.assertIsNone(ws3.cell(4, 19).value)
+
+    def test_existing_materials_merge_using_template_field_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "人事档案移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            output_dir = root / "output"
+            _write_transfer_file(source)
+            _write_summary_file(target)
+
+            source_wb = load_workbook(source)
+            source_ws = source_wb["移交表"]
+            source_ws.cell(2, 20).value = "离职证明\n（前司）"
+            source_ws.cell(3, 20).value = "√"
+            # 公司2：三项数量用于验证“旧值为空则写入”；存在性字段仍只表示已有。
+            source_ws.cell(4, 9).value = "✅"
+            source_ws.cell(4, 10).value = "✓"
+            source_ws.cell(4, 12).value = 2
+            source_ws.cell(4, 13).value = 2
+            source_ws.cell(4, 14).value = "✔"
+            source_ws.cell(4, 15).value = "✅"
+            source_ws.cell(4, 16).value = "✔"
+            source_ws.cell(4, 20).value = "✅"
+            # 公司3：数量字段的空值、数字/勾选冲突、双勾选三种边界。
+            source_ws.cell(5, 12).value = "✅"
+            source_ws.cell(5, 13).value = "✅"
+            source_wb.save(source)
+            source_wb.close()
+
+            target_wb = load_workbook(target)
+            ws1 = target_wb["公司1"]
+            ws1.cell(4, 1).value = "11"
+            ws1.cell(4, 2).value = "张三"
+            ws1.cell(4, 3).value = "4600271987030XXXXX"
+            ws1.cell(4, 4).value = '=MIDB(C4,7,4)&"-"&MIDB(C4,11,2)&"-"&MIDB(C4,13,2)'
+            ws1.cell(4, 6).value = "2020-01-01"
+            ws1.cell(4, 6).comment = Comment("人工批注不得变化", "HR")
+            ws1.cell(4, 12).value = "√"
+            ws1.cell(4, 13).value = 1
+            ws1.cell(4, 14).value = None
+            ws1.cell(4, 19).value = 3
+            ws1.cell(4, 20).value = 1
+            ws1.cell(4, 21).value = 1
+            ws1.cell(4, 22).value = 2
+            ws1.cell(4, 25).value = 1
+            ws1.cell(4, 27).value = None
+            ws1.cell(4, 30).value = "驾照复印件：√；备注：补充说明"
+            ws1.cell(4, 19).fill = PatternFill(fill_type="solid", fgColor="FFF2CC")
+
+            ws2 = target_wb["公司2"]
+            ws2.cell(4, 1).value = "11"
+            ws2.cell(4, 6).value = "2020-01-01"
+            ws2.cell(4, 19).value = None
+            ws2.cell(4, 20).value = "✅"
+            ws2.cell(4, 21).value = None
+            ws2.cell(4, 22).value = None
+            ws2.cell(4, 25).value = None
+
+            ws3 = target_wb.copy_worksheet(ws1)
+            ws3.title = "公司3"
+            ws3.cell(4, 2).value = "张五"
+            ws3.cell(4, 3).value = "4409211994103XXXXX"
+            ws3.cell(4, 19).value = 5
+            ws3.cell(4, 22).value = "√"
+            ws3.cell(4, 25).value = 5
+            target_wb.save(target)
+            target_wb.close()
+
+            source_sha256 = _sha256(source)
+            target_sha256 = _sha256(target)
+            before_wb = load_workbook(target, data_only=False)
+
+            result = import_archive_transfers(source, target, output_dir)
+
+            self.assertEqual(_sha256(source), source_sha256)
+            self.assertEqual(_sha256(target), target_sha256)
+            self.assertEqual(result.source_record_count, 3)
+            self.assertEqual(result.inserted_count, 0)
+            self.assertEqual(result.updated_count, 2)
+            self.assertEqual(result.skipped_count, 1)
+            self.assertTrue(
+                any("保密协议数量冲突" in warning and "已保留原值" in warning for warning in result.warnings)
+            )
+
+            after_wb = load_workbook(result.output_file, data_only=False)
+            try:
+                self.assertEqual(after_wb.sheetnames, before_wb.sheetnames)
+                for sheet_name in before_wb.sheetnames:
+                    before_ws = before_wb[sheet_name]
+                    after_ws = after_wb[sheet_name]
+                    self.assertEqual(before_ws.max_row, after_ws.max_row)
+                    self.assertEqual(before_ws.max_column, after_ws.max_column)
+                    self.assertEqual(
+                        sorted(str(item) for item in before_ws.merged_cells.ranges),
+                        sorted(str(item) for item in after_ws.merged_cells.ranges),
+                    )
+
+                out1 = after_wb["公司1"]
+                self.assertEqual(out1.cell(4, 19).value, 7)
+                self.assertEqual(out1.cell(4, 25).value, 3)
+                self.assertEqual(out1.cell(4, 22).value, 4)
+                self.assertEqual(out1.cell(4, 12).value, "√")
+                self.assertEqual(out1.cell(4, 13).value, 1)
+                self.assertEqual(out1.cell(4, 14).value, "√")
+                self.assertEqual(out1.cell(4, 20).value, 1)
+                self.assertEqual(out1.cell(4, 21).value, 1)
+                self.assertEqual(out1.cell(4, 27).value, "√")
+                self.assertEqual(
+                    out1.cell(4, 30).value,
+                    "驾照复印件：√；备注：补充说明；解除合同协议书：√",
+                )
+
+                out2 = after_wb["公司2"]
+                self.assertEqual(out2.cell(4, 19).value, 4)
+                self.assertEqual(out2.cell(4, 25).value, 2)
+                self.assertEqual(out2.cell(4, 22).value, 2)
+                self.assertEqual(out2.cell(4, 20).value, "✅")
+                self.assertEqual(out2.cell(4, 21).value, "✅")
+
+                out3 = after_wb["公司3"]
+                self.assertEqual(out3.cell(4, 19).value, 5)
+                self.assertEqual(out3.cell(4, 25).value, 5)
+                self.assertEqual(out3.cell(4, 22).value, "√")
+
+                allowed_value_changes = {
+                    ("公司1", "N4"),
+                    ("公司1", "S4"),
+                    ("公司1", "V4"),
+                    ("公司1", "Y4"),
+                    ("公司1", "AA4"),
+                    ("公司1", "AD4"),
+                    ("公司2", "L4"),
+                    ("公司2", "M4"),
+                    ("公司2", "N4"),
+                    ("公司2", "S4"),
+                    ("公司2", "U4"),
+                    ("公司2", "V4"),
+                    ("公司2", "Y4"),
+                    ("公司2", "AA4"),
+                }
+                _assert_only_expected_cell_values_changed(
+                    self,
+                    before_wb,
+                    after_wb,
+                    allowed_value_changes,
+                )
+            finally:
+                after_wb.close()
+                before_wb.close()
 
     def test_dry_run_does_not_write_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,6 +337,53 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertFalse(ws3.cell(4, 2).font.bold)
             wb3.close()
 
+    def test_export_adds_quantity_materials_to_existing_employee(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "人事档案移交表.xlsx"
+            summary_output = root / "summary"
+            existing_dir = root / "existing"
+            export_output = root / "export"
+            existing_dir.mkdir()
+            _write_transfer_file(source)
+            imported = import_archive_transfers(source, None, summary_output)
+
+            existing = existing_dir / "公司1档案表.xlsx"
+            _write_existing_company_archive(existing)
+            existing_wb = load_workbook(existing)
+            existing_ws = existing_wb["公司1"]
+            headers = _header_columns(existing_ws, 3)
+            existing_ws.cell(4, headers["姓名"]).value = "张三"
+            existing_ws.cell(4, headers["身份证"]).value = "4600271987030XXXXX"
+            existing_ws.cell(4, headers["劳动合同"]).value = 3
+            existing_ws.cell(4, headers["保密协议"]).value = 1
+            existing_ws.cell(4, headers["入职员工须知"]).value = 2
+            existing_ws.cell(4, headers["照片"]).value = 1
+            existing_wb.save(existing)
+            existing_wb.close()
+            summary_sha256 = _sha256(imported.output_file)
+            existing_sha256 = _sha256(existing)
+
+            result = export_company_archive_tables(
+                imported.output_file,
+                export_output,
+                existing_archive_path=existing_dir,
+            )
+
+            self.assertEqual(_sha256(imported.output_file), summary_sha256)
+            self.assertEqual(_sha256(existing), existing_sha256)
+            self.assertEqual(result.updated_count, 1)
+            output_wb = load_workbook(export_output / "公司1-档案表.xlsx", data_only=False)
+            try:
+                output_ws = output_wb["公司1"]
+                output_headers = _header_columns(output_ws, 3)
+                self.assertEqual(output_ws.cell(4, output_headers["劳动合同"]).value, 7)
+                self.assertEqual(output_ws.cell(4, output_headers["保密协议"]).value, 3)
+                self.assertEqual(output_ws.cell(4, output_headers["入职员工须知"]).value, 4)
+                self.assertEqual(output_ws.cell(4, output_headers["照片"]).value, 1)
+            finally:
+                output_wb.close()
+
 
 def _write_transfer_file(path: Path, *, duplicate_first: bool = False) -> None:
     wb = Workbook()
@@ -293,6 +492,45 @@ def _write_summary_file(path: Path) -> None:
     ws2.cell(4, 3).value = "440921198009XXXXXX"
     ws2.cell(4, 12).value = None
     wb.save(path)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _header_columns(ws, header_row: int) -> dict[str, int]:
+    return {
+        str(ws.cell(header_row, col_index).value).replace("\n", "").replace(" ", ""): col_index
+        for col_index in range(1, ws.max_column + 1)
+        if ws.cell(header_row, col_index).value not in (None, "")
+    }
+
+
+def _assert_only_expected_cell_values_changed(
+    test_case: unittest.TestCase,
+    before_wb,
+    after_wb,
+    allowed_value_changes: set[tuple[str, str]],
+) -> None:
+    actual_value_changes: set[tuple[str, str]] = set()
+    for sheet_name in before_wb.sheetnames:
+        before_ws = before_wb[sheet_name]
+        after_ws = after_wb[sheet_name]
+        for row_index in range(1, before_ws.max_row + 1):
+            for col_index in range(1, before_ws.max_column + 1):
+                before_cell = before_ws.cell(row_index, col_index)
+                after_cell = after_ws.cell(row_index, col_index)
+                key = (sheet_name, before_cell.coordinate)
+                if before_cell.value != after_cell.value:
+                    actual_value_changes.add(key)
+                if key not in allowed_value_changes:
+                    test_case.assertEqual(before_cell.value, after_cell.value, key)
+                    test_case.assertEqual(before_cell.data_type, after_cell.data_type, key)
+                test_case.assertEqual(before_cell.style_id, after_cell.style_id, key)
+                test_case.assertEqual(before_cell.number_format, after_cell.number_format, key)
+                test_case.assertEqual(before_cell.comment, after_cell.comment, key)
+                test_case.assertEqual(before_cell.hyperlink, after_cell.hyperlink, key)
+    test_case.assertEqual(actual_value_changes, allowed_value_changes)
 
 
 if __name__ == "__main__":

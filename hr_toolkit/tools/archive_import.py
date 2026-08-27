@@ -7,6 +7,7 @@ import re
 _SHEET_TITLE_INVALID = re.compile(r"[:\\/?*\[\]]")
 _COMPANY_FILE_INVALID = re.compile(r'[<>:"/\\|?*\r\n]+')
 _HEADER_WHITESPACE = re.compile(r"\s+")
+_OTHER_PART_SEPARATOR = re.compile(r"[；;]+")
 
 import shutil
 import tempfile
@@ -46,6 +47,9 @@ HEADER_COMPANY = "公司"
 HEADER_NAME = "姓名"
 HEADER_ID_CARD = "身份证"
 HEADER_OTHER = "其他"
+# 人事移交表填表说明：仅这三项填写数量；照片、离职证明等其余材料只表示是否已有。
+QUANTITY_MATERIAL_HEADERS = frozenset({"劳动合同", "保密协议", "入职员工须知"})
+PRESENCE_MARKS = frozenset({"√", "✓", "✔", "✅"})
 PLACEHOLDER_SHEET_TITLES = {"模板", "公司……", "公司..."}
 
 REGION_CODES = {
@@ -526,7 +530,7 @@ def _write_archive_summary(
                     continue
                 if _cell_text(ws.cell(existing_row, layout.headers[HEADER_NAME]).value) != record.name:
                     warnings.append(f"{company} 身份证 {record.id_card} 已存在，但姓名不同：{record.name}")
-                if _merge_existing_archive_row(ws, layout, existing_row, record):
+                if _merge_existing_archive_row(ws, layout, existing_row, record, warnings):
                     updated_count += 1
                 else:
                     skipped_count += 1
@@ -674,7 +678,13 @@ def _template_row(ws: Worksheet, layout: ArchiveSheetLayout) -> int:
     return layout.header_row
 
 
-def _merge_existing_archive_row(ws: Worksheet, layout: ArchiveSheetLayout, row_index: int, record: ArchiveTransferRecord) -> bool:
+def _merge_existing_archive_row(
+    ws: Worksheet,
+    layout: ArchiveSheetLayout,
+    row_index: int,
+    record: ArchiveTransferRecord,
+    warnings: list[str],
+) -> bool:
     changed = False
     target_values = _target_values_for_record(record, layout.headers)
     for header, value in target_values.items():
@@ -684,24 +694,84 @@ def _merge_existing_archive_row(ws: Worksheet, layout: ArchiveSheetLayout, row_i
         cell = ws.cell(row_index, col_index)
         if header == HEADER_OTHER:
             changed = _merge_other_cell(cell, value) or changed
+        elif header in QUANTITY_MATERIAL_HEADERS:
+            changed = _merge_quantity_material_cell(cell, value, header, record, warnings) or changed
         elif _has_value(value) and not _has_value(cell.value):
             cell.value = value
             changed = True
     return changed
 
 
-def _merge_other_cell(cell, value: Any) -> bool:
+def _merge_quantity_material_cell(
+    cell,
+    value: Any,
+    header: str,
+    record: ArchiveTransferRecord,
+    warnings: list[str],
+) -> bool:
+    if not _has_value(value):
+        return False
+    if not _has_value(cell.value):
+        cell.value = value
+        return True
+
+    current = cell.value
+    if _is_quantity_number(current) and _is_quantity_number(value):
+        merged = current + value
+        if merged == current:
+            return False
+        cell.value = merged
+        return True
+
+    current_text = _cell_text(current)
     value_text = _cell_text(value)
-    if not value_text:
+    if current_text == value_text or (current_text in PRESENCE_MARKS and value_text in PRESENCE_MARKS):
+        return False
+
+    warnings.append(
+        f"{record.source_file} 第 {record.source_row} 行 {record.company} {record.name}"
+        f"（身份证 {record.id_card}）的{header}数量冲突："
+        f"原值“{current_text}”，新值“{value_text}”，已保留原值。"
+    )
+    return False
+
+
+def _is_quantity_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _merge_other_cell(cell, value: Any) -> bool:
+    incoming_parts = _split_other_parts(value)
+    if not incoming_parts:
         return False
     current = _cell_text(cell.value)
     if not current:
-        cell.value = value_text
+        cell.value = "；".join(incoming_parts)
         return True
-    if value_text in current:
+    existing_parts = set(_split_other_parts(current))
+    appended_parts: list[str] = []
+    for part in incoming_parts:
+        if part in existing_parts:
+            continue
+        existing_parts.add(part)
+        appended_parts.append(part)
+    if not appended_parts:
         return False
-    cell.value = f"{current}；{value_text}"
+    separator = "" if current.endswith(("；", ";")) else "；"
+    cell.value = f"{current}{separator}{'；'.join(appended_parts)}"
     return True
+
+
+def _split_other_parts(value: Any) -> list[str]:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for part in _OTHER_PART_SEPARATOR.split(_cell_text(value)):
+        normalized = part.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        parts.append(normalized)
+    return parts
 
 
 def _write_archive_record(ws: Worksheet, layout: ArchiveSheetLayout, row_index: int, record: ArchiveTransferRecord) -> None:
@@ -1010,7 +1080,7 @@ def _append_or_merge_archive_records(
         if existing_row is not None:
             if _cell_text(ws.cell(existing_row, layout.headers[HEADER_NAME]).value) != record.name:
                 warnings.append(f"{record.company} 身份证 {record.id_card} 已存在，但姓名不同：{record.name}")
-            if _merge_existing_archive_row(ws, layout, existing_row, record):
+            if _merge_existing_archive_row(ws, layout, existing_row, record, warnings):
                 updated_count += 1
             else:
                 skipped_count += 1
