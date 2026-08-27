@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import tkinter as tk
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
@@ -205,6 +207,48 @@ class GuiPerformanceTests(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_all_tool_pages_keep_coalesced_scrolling_after_upload(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            tools = [
+                "social_security",
+                "insurance_ledger",
+                "data_statistics",
+                "salary_split",
+                "salary_merge",
+                "personnel_change_merge",
+                "archive_import",
+                "material_collector",
+                "folder_rename",
+            ]
+            with tempfile.TemporaryDirectory() as temp_dir:
+                paths = []
+                for index in range(12):
+                    path = Path(temp_dir) / f"输入_{index + 1:02d}.xlsx"
+                    path.write_bytes(b"test")
+                    paths.append(path)
+
+                for tool in tools:
+                    app._select_tool(tool)
+                    if app._input_allow_multi:
+                        app.change_input_paths = list(paths)
+                        app._sync_input_path_text()
+                    else:
+                        app.change_input_paths = None
+                        app.input_path.set(str(paths[0]))
+                    app._refresh_upload_card()
+                    self.root.update()
+                    for _ in range(40):
+                        app._right_canvas.event_generate("<MouseWheel>", delta=-120)
+                    self.assertTrue(app._right_scroll_controller.scheduled, tool)
+                    app._right_scroll_controller.flush_pending()
+                    self.assertFalse(app._right_scroll_controller.scheduled, tool)
+        finally:
+            if app is not None:
+                app.destroy()
+
     def test_small_window_reflows_forms_and_uses_temporary_workspace_drawer(self) -> None:
         app = None
         try:
@@ -287,6 +331,94 @@ class GuiPerformanceTests(unittest.TestCase):
         finally:
             if app is not None:
                 app.destroy()
+
+    def test_right_canvas_coalesces_wheel_event_burst(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.update()
+
+            canvas = app._right_canvas
+            original_scroll = canvas.yview_scroll
+            calls: list[tuple[int, str]] = []
+
+            def record_scroll(units: int, mode: str):
+                calls.append((units, mode))
+                return original_scroll(units, mode)
+
+            canvas.yview_scroll = record_scroll
+            for _ in range(240):
+                canvas.event_generate("<MouseWheel>", delta=-120)
+
+            self.assertTrue(app._right_scroll_controller.scheduled)
+            self.assertEqual(calls, [])
+            app._right_scroll_controller.flush_pending()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], "units")
+        finally:
+            if app is not None:
+                app.destroy()
+
+    def test_right_canvas_coalesces_touchpad_pixel_burst(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            controller = app._right_scroll_controller
+            controller.update_geometry(2000, 500)
+            controller.update_view(0.5, 0.75)
+            movements: list[float] = []
+            app._right_canvas.yview_moveto = lambda fraction: movements.append(float(fraction))
+
+            for _ in range(40):
+                controller.queue_pixels(2)
+
+            self.assertTrue(controller.scheduled)
+            controller.flush_pending()
+            self.assertEqual(len(movements), 1)
+            self.assertAlmostEqual(movements[0], 0.46, places=5)
+        finally:
+            if app is not None:
+                app.destroy()
+
+    def test_twelve_uploads_share_one_canvas_surface(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._select_tool("personnel_change_merge")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                paths = []
+                for index in range(12):
+                    path = Path(temp_dir) / f"异动表_{index + 1:02d}.xlsx"
+                    path.write_bytes(b"test")
+                    paths.append(path)
+                app.change_input_paths = paths
+                app._sync_input_path_text()
+                app._refresh_upload_card()
+                self.root.update()
+
+                children = app.upload_body.winfo_children()
+                self.assertEqual(len(children), 1)
+                self.assertIsInstance(children[0], tk.Canvas)
+                self.assertTrue(children[0].find_withtag("chip_close_0"))
+                self.assertTrue(children[0].find_withtag("chip_close_11"))
+                expected_height = 12 * app._px(44) + 11 * app._px(8)
+                self.assertEqual(int(float(children[0].cget("height"))), expected_height)
+
+                removed_path = paths[5]
+                close_x = children[0].winfo_width() - app._px(20)
+                close_y = 5 * (app._px(44) + app._px(8)) + app._px(22)
+                children[0].event_generate("<Motion>", x=close_x, y=close_y)
+                self.root.update()
+                children[0].event_generate("<Button-1>", x=close_x, y=close_y)
+                self.root.update()
+                self.assertEqual(len(app.change_input_paths or []), 11)
+                self.assertNotIn(removed_path, app.change_input_paths or [])
+        finally:
+            if app is not None:
+                app.destroy()
+
     def test_paint_codex_badge_icon(self) -> None:
         from hr_toolkit.gui.widgets import _paint_codex_badge_icon
 

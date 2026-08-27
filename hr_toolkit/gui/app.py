@@ -222,6 +222,121 @@ def _is_excel_or_archive_file(path: Path) -> bool:
     return path.suffix.lower() in {".xlsx", ".xls"} or is_supported_archive_file(path)
 
 
+class _CoalescedCanvasScroller:
+    """Batch high-frequency wheel events into at most one canvas move per frame.
+
+    Older Windows/Tk builds repaint every exposed child canvas synchronously. A
+    touchpad can deliver hundreds of events per second, so applying every event
+    directly makes the main content pane visibly tear even when no widget is
+    being rebuilt. Keeping only one scheduled callback preserves the final
+    scroll distance while preventing an unbounded GDI repaint queue.
+    """
+
+    def __init__(self, root, canvas, *, frame_interval_ms: int = 16) -> None:
+        self._root = root
+        self._canvas = canvas
+        self._frame_interval_ms = max(1, int(frame_interval_ms))
+        self._pending_units = 0
+        self._pending_pixels = 0.0
+        self._job = None
+        self._total_height = 1.0
+        self._viewport_height = 1.0
+        self._top = 0.0
+
+    @property
+    def scheduled(self) -> bool:
+        return self._job is not None
+
+    def update_geometry(self, total_height: int | float, viewport_height: int | float) -> None:
+        self._total_height = max(float(total_height), 1.0)
+        self._viewport_height = max(float(viewport_height), 1.0)
+
+    def update_view(self, first, _last) -> None:
+        try:
+            self._top = max(0.0, min(float(first), 1.0))
+        except (TypeError, ValueError):
+            pass
+
+    def queue_units(self, units: int) -> None:
+        if units:
+            self._pending_units += int(units)
+            self._schedule()
+
+    def queue_pixels(self, delta_y: int | float) -> None:
+        if delta_y:
+            self._pending_pixels += float(delta_y)
+            self._schedule()
+
+    def _schedule(self) -> None:
+        if self._job is not None:
+            return
+        try:
+            self._job = self._root.after(self._frame_interval_ms, self._flush)
+        except Exception:
+            self._job = None
+
+    def flush_pending(self) -> None:
+        """Apply queued movement now; primarily useful for deterministic QA."""
+
+        job = self._job
+        self._job = None
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except Exception:
+                pass
+        self._flush()
+
+    def _flush(self) -> None:
+        self._job = None
+        units = self._pending_units
+        pixels = self._pending_pixels
+        self._pending_units = 0
+        self._pending_pixels = 0.0
+        if not units and not pixels:
+            return
+        try:
+            if not self._canvas.winfo_exists():
+                return
+        except Exception:
+            return
+
+        if units:
+            try:
+                self._canvas.yview_scroll(units, "units")
+            except Exception:
+                return
+
+        if pixels:
+            # Mouse-wheel and touchpad events are not normally mixed in one
+            # frame. If they are, read the post-unit position once so the
+            # second movement starts from the correct location.
+            top = self._top
+            if units:
+                try:
+                    top = float(self._canvas.yview()[0])
+                except Exception:
+                    pass
+            max_top = max(0.0, 1.0 - self._viewport_height / self._total_height)
+            new_top = max(0.0, min(max_top, top - pixels / self._total_height))
+            self._top = new_top
+            try:
+                self._canvas.yview_moveto(new_top)
+            except Exception:
+                pass
+
+    def cancel(self) -> None:
+        job = self._job
+        self._job = None
+        self._pending_units = 0
+        self._pending_pixels = 0.0
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except Exception:
+                pass
+
+
 class _DynamicProxy:
     def __init__(self, name: str):
         self._name = name
@@ -1576,9 +1691,18 @@ class HRToolkitApp:
             bg=COLOR_BG,
             highlightthickness=0,
             bd=0,
-            yscrollcommand=right_vscroll.set,
         )
         self._right_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self._right_scroll_controller = _CoalescedCanvasScroller(
+            self.root,
+            self._right_canvas,
+        )
+
+        def _update_right_scrollbar(first, last) -> None:
+            self._right_scroll_controller.update_view(first, last)
+            right_vscroll.set(first, last)
+
+        self._right_canvas.configure(yscrollcommand=_update_right_scrollbar)
         right_vscroll.config(command=self._right_canvas.yview)
 
         right_frame = ttk.Frame(self._right_canvas, padding=self._responsive_content_padding(), style="Content.TFrame")
@@ -1586,7 +1710,7 @@ class HRToolkitApp:
             (0, 0), window=right_frame, anchor="nw"
         )
         self._right_canvas_sync_pending = False
-        self._right_canvas_sync_repeat = 0
+        self._right_canvas_sync_job = None
 
         def _split_dimension_values(value) -> list[int]:
             try:
@@ -1668,18 +1792,22 @@ class HRToolkitApp:
                 self._right_canvas.configure(
                     scrollregion=region
                 )
+            self._right_scroll_controller.update_geometry(window_height, canvas_height)
             if window_height <= canvas_height:
                 self._right_canvas.yview_moveto(0)
 
         def _run_right_canvas_sync():
             self._right_canvas_sync_pending = False
+            self._right_canvas_sync_job = None
             _sync_right_canvas_window()
 
         def _queue_right_canvas_sync() -> None:
             if self._right_canvas_sync_pending:
                 return
             self._right_canvas_sync_pending = True
-            self.root.after_idle(_run_right_canvas_sync)
+            # Configure events from all child widgets are collapsed into one
+            # geometry pass after the current layout queue has drained.
+            self._right_canvas_sync_job = self.root.after_idle(_run_right_canvas_sync)
 
         def _schedule_right_canvas_sync(_event=None):
             _queue_right_canvas_sync()
@@ -1691,24 +1819,10 @@ class HRToolkitApp:
         SCROLL_TAG = "RightPanelScroll"
 
         def _scroll_page(delta_units: int) -> None:
-            self._right_canvas.yview_scroll(delta_units, "units")
+            self._right_scroll_controller.queue_units(delta_units)
 
         def _scroll_page_pixels(delta_y: int) -> None:
-            total_height = max(self._right_canvas.winfo_height(), 1)
-            try:
-                parts = [float(part) for part in self._right_canvas.cget("scrollregion").split()]
-                if len(parts) == 4:
-                    total_height = max(parts[3] - parts[1], 1)
-            except Exception:
-                try:
-                    bbox = self._right_canvas.bbox("all")
-                    if bbox:
-                        total_height = max(bbox[3] - bbox[1], 1)
-                except Exception:
-                    pass
-            top = self._right_canvas.yview()[0]
-            new_top = max(0.0, min(1.0, top - (delta_y / total_height)))
-            self._right_canvas.yview_moveto(new_top)
+            self._right_scroll_controller.queue_pixels(delta_y)
 
         def _touchpad_deltas(event) -> tuple[int, int]:
             encoded_delta = int(getattr(event, "delta", 0) or 0)
@@ -2730,7 +2844,7 @@ class HRToolkitApp:
             if (delta_units < 0 and can_scroll_up) or (delta_units > 0 and can_scroll_down):
                 self.log_text.yview_scroll(delta_units, "units")
             else:
-                self._right_canvas.yview_scroll(delta_units, "units")
+                _scroll_page(delta_units)
             return "break"
 
         def _scroll_log_text_pixels(delta_y: int) -> None:
@@ -7493,7 +7607,14 @@ class HRToolkitApp:
                 pass
         self._path_tooltip = None
 
-    def _show_path_tooltip(self, widget, text: str) -> None:
+    def _show_path_tooltip(
+        self,
+        widget,
+        text: str,
+        *,
+        local_y: int | None = None,
+        local_height: int | None = None,
+    ) -> None:
         # macOS Aqua 对 overrideredirect 顶层窗口不渲染，改为窗口内浮层，跨平台可靠
         self._hide_path_tooltip()
         if not text:
@@ -7503,7 +7624,10 @@ class HRToolkitApp:
                 return
             anchor_widget = widget.winfo_toplevel()
             x = widget.winfo_rootx() - anchor_widget.winfo_rootx() + self._px(12)
-            y = widget.winfo_rooty() - anchor_widget.winfo_rooty() + widget.winfo_height() + self._px(4)
+            widget_top = widget.winfo_rooty() - anchor_widget.winfo_rooty()
+            anchor_top = widget_top if local_y is None else widget_top + local_y
+            anchor_height = widget.winfo_height() if local_height is None else local_height
+            y = anchor_top + anchor_height + self._px(4)
         except Exception:
             return
         tip = Label(
@@ -7526,7 +7650,7 @@ class HRToolkitApp:
         tip_height = tip.winfo_reqheight()
         x = max(self._px(4), min(x, window_width - tip_width - self._px(8)))
         if y + tip_height > window_height - self._px(4):
-            y = widget.winfo_rooty() - anchor_widget.winfo_rooty() - tip_height - self._px(4)
+            y = anchor_top - tip_height - self._px(4)
         tip.place(x=x, y=y)
         tip.lift()
         self._path_tooltip = tip
@@ -7559,9 +7683,19 @@ class HRToolkitApp:
             font = cache[key] = tkfont.Font(root=self.root, font=font_spec)
         if font.measure(text) <= max_width:
             return text
-        while text and font.measure(text + "…") > max_width:
-            text = text[:-1]
-        return text + "…"
+        ellipsis = "…"
+        if font.measure(ellipsis) > max_width:
+            return ""
+        # Font measurement crosses the Python/Tcl boundary. Binary search
+        # avoids one Tcl call per removed character for long HR filenames.
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if font.measure(text[:middle] + ellipsis) <= max_width:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low] + ellipsis
 
     def _update_summary_display(self) -> None:
         if not hasattr(self, "summary_display"):
@@ -7687,70 +7821,185 @@ class HRToolkitApp:
             self.root.after_idle(self._sync_right_canvas_window)
 
     def _render_upload_items(self, items: list[Path]) -> None:
-        for index, path in enumerate(items):
-            self._render_upload_chip(index, path, last=index == len(items) - 1)
+        """Render all selected files on one canvas to minimize GDI surfaces."""
 
-    def _render_upload_chip(self, index: int, path: Path, *, last: bool) -> None:
-        """圆角文件条目：类型徽标 + 文件名（超长省略，悬停显示完整路径）+ 说明 + ✕。"""
-        badge_text, badge_bg, badge_fg, detail = self._upload_item_meta(path)
-        chip = Canvas(self.upload_body, height=self._px(44), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
-        chip.pack(fill="x", pady=0 if last else self._pad(0, 8))
+        row_height = self._px(44)
+        row_gap = self._px(8)
+        row_step = row_height + row_gap
+        total_height = len(items) * row_height + max(0, len(items) - 1) * row_gap
+        rows = [(path, *self._upload_item_meta(path)) for path in items]
+        chip = Canvas(
+            self.upload_body,
+            height=total_height,
+            bg=COLOR_SURFACE,
+            highlightthickness=0,
+            bd=0,
+        )
+        chip.pack(fill="x")
         name_font = (self.base_font[0], _font_size(10), "bold")
-        last_chip_size = (0, 0)
+        last_width = 0
+        hovered_index = -1
+
+        def _row_index_at(y: int) -> int:
+            if y < 0:
+                return -1
+            index = int(y // row_step)
+            if index < 0 or index >= len(rows):
+                return -1
+            if y - index * row_step >= row_height:
+                return -1
+            return index
+
+        def _remove_row(index: int) -> None:
+            self._hide_path_tooltip()
+            self._remove_upload_item(index)
 
         def redraw(_event=None) -> None:
-            nonlocal last_chip_size
-            width = max(chip.winfo_width(), 1)
-            height = max(chip.winfo_height(), 1)
-            if (width, height) == last_chip_size:
+            nonlocal last_width
+            width = chip.winfo_width()
+            if width <= 1 or width == last_width:
                 return
-            last_chip_size = (width, height)
+            last_width = width
             chip.delete("all")
-            CodexButton._draw_round_rect(
+            for index, (path, badge_text, badge_bg, badge_fg, detail) in enumerate(rows):
+                row_top = index * row_step
+                row_middle = row_top + row_height / 2
+                close_tag = f"chip_close_{index}"
+                CodexButton._draw_round_rect(
+                    chip,
+                    self._pxf(0.5),
+                    row_top + self._pxf(0.5),
+                    width - self._pxf(0.5),
+                    row_top + row_height - self._pxf(0.5),
+                    self._pxf(10),
+                    fill=COLOR_SURFACE_ALT,
+                    outline=COLOR_BORDER_FAINT,
+                    width=max(1.0, self._pxf(1)),
+                )
+                badge_x = self._pxf(13)
+                badge_size = self._pxf(26)
+                badge_y = row_top + (row_height - badge_size) / 2
+                CodexButton._draw_round_rect(
+                    chip,
+                    badge_x,
+                    badge_y,
+                    badge_x + badge_size,
+                    badge_y + badge_size,
+                    self._pxf(7),
+                    fill=badge_bg,
+                    outline="",
+                )
+                if badge_text:
+                    chip.create_text(
+                        badge_x + badge_size / 2,
+                        row_middle,
+                        text=badge_text,
+                        fill=badge_fg,
+                        font=(self.base_font[0], _font_size(7), "bold"),
+                    )
+                else:
+                    _paint_tool_icon(
+                        chip,
+                        "folder_rename",
+                        badge_fg,
+                        badge_x + badge_size * 0.25,
+                        badge_y + badge_size * 0.25,
+                        badge_size * 0.5,
+                        max(1.0, self._pxf(1.3)),
+                    )
+                close_x = width - self._pxf(20)
+                chip.create_text(
+                    close_x,
+                    row_middle,
+                    text="✕",
+                    fill="#C4C1B7",
+                    font=self.base_font,
+                    tags=(close_tag, "chip_close"),
+                )
+                right_edge = close_x - self._pxf(16)
+                if detail:
+                    meta_item = chip.create_text(
+                        right_edge,
+                        row_middle,
+                        text=detail,
+                        fill=COLOR_FAINT,
+                        font=self.small_font,
+                        anchor="e",
+                    )
+                    meta_bbox = chip.bbox(meta_item)
+                    if meta_bbox:
+                        right_edge = meta_bbox[0] - self._pxf(12)
+                name_x = badge_x + badge_size + self._pxf(11)
+                display_name = self._ellipsize(
+                    path.name or str(path),
+                    name_font,
+                    right_edge - name_x,
+                )
+                chip.create_text(
+                    name_x,
+                    row_middle,
+                    text=display_name,
+                    fill=COLOR_TEXT,
+                    font=name_font,
+                    anchor="w",
+                )
+                chip.tag_bind(
+                    close_tag,
+                    "<Button-1>",
+                    lambda _event, item_index=index: _remove_row(item_index),
+                )
+                chip.tag_bind(
+                    close_tag,
+                    "<Enter>",
+                    lambda _event, tag=close_tag: (
+                        chip.itemconfigure(tag, fill=COLOR_DANGER),
+                        chip.configure(cursor="hand2"),
+                    ),
+                )
+                chip.tag_bind(
+                    close_tag,
+                    "<Leave>",
+                    lambda _event, tag=close_tag: (
+                        chip.itemconfigure(tag, fill="#C4C1B7"),
+                        chip.configure(cursor=""),
+                    ),
+                )
+
+        def _show_hovered_path(expected_index: int) -> None:
+            if hovered_index != expected_index or expected_index < 0:
+                return
+            path = rows[expected_index][0]
+            self._show_path_tooltip(
                 chip,
-                self._pxf(0.5),
-                self._pxf(0.5),
-                width - self._pxf(0.5),
-                height - self._pxf(0.5),
-                self._pxf(10),
-                fill=COLOR_SURFACE_ALT,
-                outline=COLOR_BORDER_FAINT,
-                width=max(1.0, self._pxf(1)),
+                str(path),
+                local_y=expected_index * row_step,
+                local_height=row_height,
             )
-            badge_x = self._pxf(13)
-            badge_size = self._pxf(26)
-            badge_y = (height - badge_size) / 2
-            CodexButton._draw_round_rect(chip, badge_x, badge_y, badge_x + badge_size, badge_y + badge_size, self._pxf(7), fill=badge_bg, outline="")
-            if badge_text:
-                chip.create_text(badge_x + badge_size / 2, height / 2, text=badge_text, fill=badge_fg, font=(self.base_font[0], _font_size(7), "bold"))
-            else:
-                _paint_tool_icon(chip, "folder_rename", badge_fg, badge_x + badge_size * 0.25, badge_y + badge_size * 0.25, badge_size * 0.5, max(1.0, self._pxf(1.3)))
-            close_x = width - self._pxf(20)
-            chip.create_text(close_x, height / 2, text="✕", fill="#C4C1B7", font=self.base_font, tags="chip_close")
-            right_edge = close_x - self._pxf(16)
-            if detail:
-                meta_item = chip.create_text(right_edge, height / 2, text=detail, fill=COLOR_FAINT, font=self.small_font, anchor="e")
-                meta_bbox = chip.bbox(meta_item)
-                if meta_bbox:
-                    right_edge = meta_bbox[0] - self._pxf(12)
-            name_x = badge_x + badge_size + self._pxf(11)
-            display_name = self._ellipsize(path.name or str(path), name_font, right_edge - name_x)
-            chip.create_text(name_x, height / 2, text=display_name, fill=COLOR_TEXT, font=name_font, anchor="w")
+
+        def _update_hover(event) -> None:
+            nonlocal hovered_index
+            index = _row_index_at(int(getattr(event, "y", -1)))
+            if index == hovered_index:
+                return
+            hovered_index = index
+            self._hide_path_tooltip()
+            if index >= 0:
+                self._path_tooltip_job = self.root.after(
+                    450,
+                    lambda expected=index: _show_hovered_path(expected),
+                )
+
+        def _leave_upload_list(_event=None) -> None:
+            nonlocal hovered_index
+            hovered_index = -1
+            chip.configure(cursor="")
+            self._hide_path_tooltip()
 
         chip.bind("<Configure>", redraw)
-        chip.tag_bind("chip_close", "<Button-1>", lambda _event, item_index=index: self._remove_upload_item(item_index))
-        chip.tag_bind(
-            "chip_close",
-            "<Enter>",
-            lambda _event: (chip.itemconfigure("chip_close", fill=COLOR_DANGER), chip.configure(cursor="hand2")),
-        )
-        chip.tag_bind(
-            "chip_close",
-            "<Leave>",
-            lambda _event: (chip.itemconfigure("chip_close", fill="#C4C1B7"), chip.configure(cursor="")),
-        )
-        self._bind_path_tooltip(chip, lambda chip_path=path: str(chip_path))
-        redraw()
+        chip.bind("<Enter>", _update_hover, add="+")
+        chip.bind("<Motion>", _update_hover, add="+")
+        chip.bind("<Leave>", _leave_upload_list, add="+")
+        self.root.after_idle(redraw)
 
     def _render_upload_drop_zone(self) -> None:
         zone = Canvas(self.upload_body, height=self._px(118), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
@@ -10707,6 +10956,17 @@ class HRToolkitApp:
 
     def destroy(self) -> None:
         self._is_alive = False
+        scroll_controller = getattr(self, "_right_scroll_controller", None)
+        if scroll_controller is not None:
+            scroll_controller.cancel()
+        canvas_sync_job = getattr(self, "_right_canvas_sync_job", None)
+        if canvas_sync_job is not None:
+            try:
+                self.root.after_cancel(canvas_sync_job)
+            except Exception:
+                pass
+            self._right_canvas_sync_job = None
+            self._right_canvas_sync_pending = False
         if getattr(self, "_workspace_search_job", None) is not None:
             try:
                 self.root.after_cancel(self._workspace_search_job)
