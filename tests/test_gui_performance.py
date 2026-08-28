@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import tkinter as tk
 import unittest
 from collections import deque
@@ -47,6 +48,30 @@ class GuiPerformanceTests(unittest.TestCase):
                     child.destroy()
                 except Exception:
                     pass
+
+    def _run_event_loop_until(
+        self,
+        predicate,
+        *,
+        timeout_ms: int = 2000,
+        failure_message: str,
+    ) -> None:
+        """Wait for a Tk state transition without assuming event delivery speed."""
+
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        state = {"matched": bool(predicate())}
+
+        def poll() -> None:
+            state["matched"] = bool(predicate())
+            if state["matched"] or time.monotonic() >= deadline:
+                self.root.quit()
+                return
+            self.root.after(10, poll)
+
+        if not state["matched"]:
+            self.root.after_idle(poll)
+            self.root.mainloop()
+        self.assertTrue(state["matched"], failure_message)
 
     def test_tessellate_round_rect_geometry(self) -> None:
         from hr_toolkit.gui.widgets import _tessellate_round_rect
@@ -556,23 +581,46 @@ class GuiPerformanceTests(unittest.TestCase):
                 app = HRToolkitApp(self.root)
             self.root.deiconify()
             self.root.minsize(1, 1)
+            app._dismiss_startup_loading_screen()
+            self.root.update()
+            right_frame = self.root.nametowidget(
+                app._right_canvas.itemcget(app._right_canvas_window, "window")
+            )
+
+            def layout_is_settled(mode: str, workspace_small: bool) -> bool:
+                canvas_width = app._right_canvas.winfo_width()
+                canvas_height = app._right_canvas.winfo_height()
+                expected_window_size = (
+                    canvas_width,
+                    max(right_frame.winfo_reqheight(), canvas_height),
+                )
+                return (
+                    not app._window_resize_active
+                    and not app._window_resize_restoring
+                    and app._form_layout_mode == mode
+                    and app._workspace_small is workspace_small
+                    and app._form_resize_job is None
+                    and app._form_post_layout_sync_job is None
+                    and app._workspace_area_resize_job is None
+                    and not app._right_canvas_sync_pending
+                    and app._last_canvas_window_size == expected_window_size
+                )
 
             # Several native resize messages may arrive before the settle job.
             # Only the final dimensions must drive the expensive content reflow.
             for width in range(1180, 699, -40):
                 self.root.geometry(f"{width}x650")
                 self.root.update_idletasks()
-            self.root.after(250, self.root.quit)
-            self.root.mainloop()
+            self._run_event_loop_until(
+                lambda: layout_is_settled("narrow", True),
+                failure_message="narrow resize state did not settle",
+            )
 
             self.assertEqual(app._form_layout_mode, "narrow")
             self.assertTrue(app._workspace_small)
             self.assertEqual(
                 app._last_canvas_window_size[0],
                 app._right_canvas.winfo_width(),
-            )
-            right_frame = self.root.nametowidget(
-                app._right_canvas.itemcget(app._right_canvas_window, "window")
             )
             self.assertEqual(
                 app._last_canvas_window_size[1],
@@ -582,8 +630,10 @@ class GuiPerformanceTests(unittest.TestCase):
             for width in range(700, 1401, 50):
                 self.root.geometry(f"{width}x780")
                 self.root.update_idletasks()
-            self.root.after(250, self.root.quit)
-            self.root.mainloop()
+            self._run_event_loop_until(
+                lambda: layout_is_settled("wide", False),
+                failure_message="wide resize state did not settle",
+            )
 
             self.assertEqual(app._form_layout_mode, "wide")
             self.assertFalse(app._workspace_small)
@@ -727,25 +777,27 @@ class GuiPerformanceTests(unittest.TestCase):
             app.rename_text_widget.focus_force()
             pointer = {"down": True}
             app._window_resize_pointer_state_reader = lambda: pointer["down"]
-            observed = {}
 
             self.root.geometry("1080x690")
-            self.root.after(20, lambda: pointer.update(down=False))
+            self._run_event_loop_until(
+                lambda: (
+                    app._window_resize_active
+                    and app._window_resize_native_drag
+                ),
+                failure_message="native resize compositor did not start",
+            )
+            # A confirmed native drag has no inactivity timer. Releasing the
+            # mocked button can therefore complete only through the platform
+            # button-state poll, regardless of Configure delivery latency.
+            self.assertIsNone(app._window_resize_settle_job)
+            pointer["down"] = False
+            self._run_event_loop_until(
+                lambda: not app._window_resize_active,
+                failure_message="native resize compositor did not restore",
+            )
 
-            def inspect_after_release() -> None:
-                observed["active"] = app._window_resize_active
-                observed["manager"] = app._root_frame.winfo_manager()
-                observed["focus"] = self.root.focus_get()
-
-            # This is earlier than WINDOW_RESIZE_SETTLE_MS. Restoration here
-            # therefore proves the native button-release path was used.
-            self.root.after(80, inspect_after_release)
-            self.root.after(90, self.root.quit)
-            self.root.mainloop()
-
-            self.assertFalse(observed["active"])
-            self.assertEqual(observed["manager"], "pack")
-            self.assertIs(observed["focus"], app.rename_text_widget)
+            self.assertEqual(app._root_frame.winfo_manager(), "pack")
+            self.assertIs(self.root.focus_get(), app.rename_text_widget)
         finally:
             if app is not None:
                 app.destroy()
