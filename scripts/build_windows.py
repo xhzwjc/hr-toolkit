@@ -80,6 +80,7 @@ HIDDEN_IMPORTS = (
     "win32timezone",
     "py7zr",
     "pypdf",
+    "pypdfium2",
     "unrar.cffi.rarfile",
     "unrar.cffi.unrarlib",
     "xlrd",
@@ -641,9 +642,11 @@ def pyinstaller_commands(
         str(WINDOWS_WIN7_MANIFEST if target == WINDOWS_TARGET_WIN7 else WINDOWS_MANIFEST),
         "--add-data",
         f"{README_FILE};.",
-        "--copy-metadata",
-        "pypdfium2" if target == WINDOWS_TARGET_WIN7 else "pypdf",
     ]
+    for metadata_name in (
+        ("pypdfium2",) if target == WINDOWS_TARGET_WIN7 else ("pypdf", "pypdfium2")
+    ):
+        main.extend(["--copy-metadata", metadata_name])
     if target == WINDOWS_TARGET_WIN7:
         assert seven_zip_dir is not None
         main.extend(

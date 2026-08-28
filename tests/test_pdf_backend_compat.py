@@ -8,7 +8,12 @@ from pathlib import Path
 from hr_toolkit.tools import material_collector as mc
 
 
-def _write_minimal_pdf(path: Path, page_kinds: list[str]) -> None:
+def _write_minimal_pdf(
+    path: Path,
+    page_kinds: list[str],
+    *,
+    text_content: str = "FULL_TEXT_AFTER_LIMIT_MARKER",
+) -> None:
     """生成不依赖第三方写入库的严格 PDF，供现代与 Win7 后端共用。"""
     objects: list[bytes] = [b""]
 
@@ -27,7 +32,7 @@ def _write_minimal_pdf(path: Path, page_kinds: list[str]) -> None:
         if kind == "text":
             content = (
                 b"BT /F1 12 Tf 20 100 Td "
-                b"(FULL_TEXT_AFTER_LIMIT_MARKER) Tj ET"
+                + b"(" + text_content.encode("ascii") + b") Tj ET"
             )
             content_id = add_object(
                 b"<< /Length " + str(len(content)).encode("ascii") + b" >>\n"

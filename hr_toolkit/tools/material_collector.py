@@ -68,7 +68,7 @@ def _get_ocr_engine():
 
 # OCR 智能索引缓存：写入资料库根目录的隐藏 JSON 文件
 _OCR_CACHE_FILE_NAME = ".hr_material_index_cache.json"
-_OCR_CACHE_VERSION = 5
+_OCR_CACHE_VERSION = 6
 _OCR_CACHE_TEXT_SNIPPET_MAX = 4096
 _OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
@@ -1555,9 +1555,19 @@ def _iter_pdf_ocr_images(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    render_pages: bool = False,
 ) -> Iterator[bytes]:
     """逐页、逐图像产出 OCR 输入；每次只保留当前图像的解码结果。"""
     if _PDF_BACKEND == "pdfium":
+        yield from _iter_pdfium_ocr_images(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+        return
+    if render_pages and pdfium is not None:
+        # 显式整页渲染通道：渲染结果包含页面全部视觉信息（标题、照片等），
+        # 用于内嵌图通道无法定论时的二次识别。
         yield from _iter_pdfium_ocr_images(
             file_path,
             progress_callback=progress_callback,
@@ -1644,6 +1654,14 @@ def _iter_pdf_ocr_images(
                 image_count += 1
                 yield payload
         _raise_if_cancelled(cancelled)
+    if image_count == 0 and pdfium is not None:
+        # 无可提取内嵌图时整页渲染兜底，覆盖标题为图形的电子证书等场景。
+        yield from _iter_pdfium_ocr_images(
+            file_path,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+        )
+        return
     if image_count == 0:
         raise PDFRecognitionError(
             f"扫描型 PDF 未找到可安全提取的页面图片：{file_path.name}；"
@@ -1788,7 +1806,7 @@ _DOC_CONTENT_PATTERNS: dict[str, list[str]] = {
     "劳动合同": ["劳动合同", "用工合同", "劳务合同", "聘用合同", "用工协议", "劳动期限", "工作内容", "劳动报酬", "劳动争议", "解除劳动合同", "劳动法", "甲乙双方根据", "试用期"],
     "学历证明": ["毕业证书", "学位证书", "教育部学历证书", "学信网", "普通高等学校", "学士学位", "硕士学位", "博士学位"],
     "安全员证": ["安全生产考核合格证书", "建筑施工企业项目负责人安全生产考核合格证书", "建筑施工企业专职安全生产管理人员安全生产考核合格证书", "安全员考核合格证", "安全员C证", "安全员A证", "安全员B证"],
-    "特种证书": ["特种作业操作证", "特种作业人员操作证", "特种设备作业人员证", "特种作业", "特种设备作业"],
+    "特种证书": ["特种作业操作证", "特种作业人员操作证", "特种设备作业人员证", "特种作业", "特种设备作业", "应急管理局"],
     "资格证书": ["职业资格证书", "专业技术职务资格证书", "职称证书", "技能等级证书", "中华人民共和国机动车驾驶证"],
 }
 
@@ -1852,6 +1870,28 @@ def _extract_phone(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def _compact_for_window(text: str) -> str:
+    """去除空白与标点，仅保留中英文与数字，用于连续乱序窗口匹配。"""
+    return re.sub(r"[^0-9A-Za-z一-鿿]+", "", str(text or ""))
+
+
+def _has_reordered_name_window(compact_text: str, compact_name: str) -> bool:
+    """名称字符在正文中连续出现但顺序不同也算命中；被其他字符打断则不命中。
+
+    例如“我的证书天谴”包含“证书天谴”，视为“天谴证书”的乱序命中；
+    “我天，天谴的证书”去标点后仍被“的”打断，不命中。
+    """
+    length = len(compact_name)
+    if length < 3 or len(compact_text) < length:
+        return False
+    target = sorted(compact_name)
+    scan_limit = min(len(compact_text), 20000) - length + 1
+    for start in range(scan_limit):
+        if sorted(compact_text[start:start + length]) == target:
+            return True
+    return False
+
+
 def _classify_requested_material_text(
     text: str,
     requested_types: list[str] | None,
@@ -1866,6 +1906,12 @@ def _classify_requested_material_text(
         compact_material = re.sub(r"\s+", "", material)
         if compact_material and compact_material in compact_text:
             return material, f"{method_prefix}_custom", ""
+    window_text = _compact_for_window(full_text)
+    for requested in sorted(requested_types or [], key=len, reverse=True):
+        material = str(requested or "").strip()
+        window_name = _compact_for_window(material)
+        if _has_reordered_name_window(window_text, window_name):
+            return material, f"{method_prefix}_custom_reordered", ""
     return None, "", ""
 
 
@@ -1874,13 +1920,32 @@ def _classify_text_content(
     *,
     requested_types: list[str] | None = None,
     method_prefix: str = "ocr",
+    allow_weak_id_fallback: bool = True,
 ) -> tuple[str | None, str, str]:
-    """按正文判定材料类型；返回 (类型, 匹配方式, 正反面子类型)。"""
+    """按正文判定材料类型；返回 (类型, 匹配方式, 正反面子类型)。
+
+    自定义请求名称的正文匹配优先于标准分类：用户显式勾选的名称出现在
+    正文中是最明确的意图，不应被标准分支（含 18 位证号兜底）抢占。
+    """
     full_text = str(text or "")
     if not full_text.strip():
         return None, "", ""
 
-    if any(keyword in full_text for keyword in ("特种作业操作证", "特种作业人员", "特种设备作业")):
+    custom_types = [
+        material_type
+        for material_type in (requested_types or [])
+        if str(material_type or "").strip() and material_type not in MATERIAL_SYNONYMS
+    ]
+    custom_material, custom_method, custom_subtype = _classify_requested_material_text(
+        full_text, custom_types, method_prefix=method_prefix,
+    )
+    if custom_material:
+        return custom_material, custom_method, custom_subtype
+
+    if any(
+        keyword in full_text
+        for keyword in ("特种作业操作证", "特种作业人员", "特种设备作业", "应急管理局")
+    ):
         return "特种证书", f"{method_prefix}_special_cert", ""
     if any(keyword in full_text for keyword in ("安全生产考核", "安全考核合格", "建安C证", "建安A证", "建安B证")):
         return "安全员证", f"{method_prefix}_safety_cert", ""
@@ -1904,7 +1969,7 @@ def _classify_text_content(
     if (
         "公民身份号码" in full_text
         or ("姓名" in full_text and any(keyword in full_text for keyword in ("住址", "民族", "出生")))
-        or extracted_id
+        or (extracted_id and allow_weak_id_fallback)
     ):
         return "身份证", f"{method_prefix}_id_front", "正面"
 
@@ -1920,12 +1985,14 @@ def _iter_ocr_targets(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    render_pages: bool = False,
 ) -> Iterator[str | bytes]:
     if file_path.suffix.lower() == ".pdf":
         yield from _iter_pdf_ocr_images(
             file_path,
             progress_callback=progress_callback,
             cancelled=cancelled,
+            render_pages=render_pages,
         )
         return
     _raise_if_cancelled(cancelled)
@@ -1937,6 +2004,7 @@ def _collect_ocr_items(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    render_pages: bool = False,
 ) -> tuple[list[Any], bool]:
     """逐个 OCR 当前文件或 PDF 页面，并保留现有引擎返回结构。"""
     engine = _get_ocr_engine()
@@ -1949,6 +2017,7 @@ def _collect_ocr_items(
             file_path,
             progress_callback=progress_callback,
             cancelled=cancelled,
+            render_pages=render_pages,
         ):
             _raise_if_cancelled(cancelled)
             with _OCR_LOCK:
@@ -1967,12 +2036,14 @@ def _read_ocr_text(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    render_pages: bool = False,
 ) -> tuple[str, list[str], bool]:
     """调用本地 OCR 并兼容 RapidOCR 与测试/旧适配器的两种结果形态。"""
     result, analysis_complete = _collect_ocr_items(
         file_path,
         progress_callback=progress_callback,
         cancelled=cancelled,
+        render_pages=render_pages,
     )
     if not result:
         return "", [], analysis_complete
@@ -1997,11 +2068,13 @@ def _analyze_ocr_file(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    render_pages: bool = False,
 ) -> tuple[str | None, str, str, str, str, str, list[str], bool]:
     full_text, _texts, analysis_complete = _read_ocr_text(
         file_path,
         progress_callback=progress_callback,
         cancelled=cancelled,
+        render_pages=render_pages,
     )
     names = _extract_person_names(full_text)
     extracted_name = names[0] if names else ""
@@ -2020,12 +2093,14 @@ def _analyze_folder_ocr_file(
     *,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    render_pages: bool = False,
 ) -> tuple[str | None, str, str, str, str, str, bool]:
     """保持既有标准材料规则，并返回可供自定义材料重分类的 OCR 文字。"""
     result, analysis_complete = _collect_ocr_items(
         file_path,
         progress_callback=progress_callback,
         cancelled=cancelled,
+        render_pages=render_pages,
     )
     if not result:
         return None, "", "", "", "", "", analysis_complete
@@ -2057,6 +2132,7 @@ def _analyze_folder_ocr_file(
     if (
         "特种作业操作证" in full_text or "特种作业" in full_text
         or "特种设备作业" in full_text or "特种作业人员" in full_text
+        or "应急管理局" in full_text
     ):
         material, method = "特种证书", "ocr_special_cert"
     elif (
@@ -2251,6 +2327,33 @@ def _classify_material_type(
             progress_callback=progress_callback,
             cancelled=cancelled,
         )
+        folder_wants_custom = any(
+            str(item or "").strip() and item not in MATERIAL_SYNONYMS
+            for item in (requested_types or [])
+        )
+        if (
+            file_path.suffix.lower() == ".pdf"
+            and pdfium is not None
+            and (
+                not ocr_mat
+                or (folder_wants_custom and ocr_mat not in (requested_types or []))
+            )
+        ):
+            (
+                ocr_mat,
+                ocr_method,
+                ocr_sub,
+                ocr_name,
+                ocr_id,
+                ocr_text,
+                analysis_complete,
+            ) = _analyze_folder_ocr_file(
+                file_path,
+                requested_types=requested_types,
+                progress_callback=progress_callback,
+                cancelled=cancelled,
+                render_pages=True,
+            )
         if use_cache and cache is not None and analysis_complete:
             stores_standard_result = ocr_mat in MATERIAL_SYNONYMS
             _store_ocr_cache(
@@ -2587,10 +2690,13 @@ def _analyze_flat_source(
     analysis_complete = True
     names = _extract_person_names(text)
     extracted_id = _extract_id_card(text)
+    # 文字层首轮分类禁用“18 位证号→身份证”弱兜底：电子证书的证号常嵌入
+    # 身份证号，会抢占真实分类；弱兜底放到视觉识别之后统一执行。
     material, method, subtype = _classify_text_content(
         text,
         requested_types=requested_types,
         method_prefix=method_prefix,
+        allow_weak_id_fallback=False,
     )
 
     ext = file_path.suffix.lower()
@@ -2620,6 +2726,51 @@ def _analyze_flat_source(
             if not material and ocr_material:
                 material, method, subtype = ocr_material, ocr_method, ocr_subtype
             text = " ".join(part for part in (text, ocr_text) if part)
+
+    wants_custom = any(
+        str(item or "").strip() and item not in MATERIAL_SYNONYMS
+        for item in (requested_types or [])
+    )
+    if (
+        ext == ".pdf"
+        and pdfium is not None
+        and (not material or (wants_custom and material not in (requested_types or [])))
+    ):
+        # 内嵌图通道（照片/国徽等局部图）定论不了、或结论无法满足当前自定义
+        # 请求时，整页渲染二次识别，让图形标题进入正文参与分类与缓存。
+        (
+            render_material,
+            render_method,
+            render_subtype,
+            _render_name,
+            render_id,
+            render_text,
+            render_names,
+            render_complete,
+        ) = _analyze_ocr_file(
+            file_path,
+            requested_types=requested_types,
+            progress_callback=progress_callback,
+            cancelled=cancelled,
+            render_pages=True,
+        )
+        if render_complete:
+            names = list(dict.fromkeys([*names, *render_names]))
+            extracted_id = extracted_id or render_id
+            if render_material:
+                material, method, subtype = render_material, render_method, render_subtype
+            text = " ".join(part for part in (text, render_text) if part)
+            analysis_complete = render_complete
+
+    if not material and text:
+        weak_material, weak_method, weak_subtype = _classify_text_content(
+            text,
+            requested_types=requested_types,
+            method_prefix=method_prefix,
+            allow_weak_id_fallback=True,
+        )
+        if weak_material:
+            material, method, subtype = weak_material, weak_method, weak_subtype
 
     if not material:
         material, filename_method = _classify_material_from_filename(file_path.name, requested_types)
@@ -2744,7 +2895,9 @@ def _build_flat_ocr_index(
                     warnings.append(
                         "部分图片或扫描版 PDF 暂时无法完成 OCR，未写入负缓存；下次查询会自动重试。"
                     )
-        elif entry.get("material_type") == "其他材料" and entry.get("ocr_text"):
+        elif entry.get("ocr_text") and str(
+            entry.get("material_type") or "其他材料"
+        ) not in requested_types:
             # 后续新增自定义材料时，直接用已缓存 OCR 文本重分类，不重新 OCR。
             material, method, subtype = _classify_text_content(
                 str(entry.get("ocr_text") or ""),
@@ -2756,6 +2909,37 @@ def _build_flat_ocr_index(
                 entry["match_method"] = method
                 entry["subtype"] = subtype
                 cache_changed_since_checkpoint = True
+            elif (
+                source_path.suffix.lower() == ".pdf"
+                and pdfium is not None
+                and any(
+                    str(item or "").strip() and item not in MATERIAL_SYNONYMS
+                    for item in requested_types
+                )
+            ):
+                # 缓存文本（可能只有文字层）满足不了自定义请求时，整页渲染
+                # 重新分析并回写合并文本，让图形标题进入缓存。
+                (
+                    fresh_material,
+                    fresh_method,
+                    fresh_subtype,
+                    fresh_names,
+                    _fresh_id,
+                    fresh_text,
+                    fresh_complete,
+                ) = _analyze_flat_source(
+                    source_path,
+                    requested_types,
+                    progress_callback=progress_callback,
+                )
+                if fresh_complete and fresh_material in requested_types:
+                    entry["material_type"] = fresh_material
+                    entry["match_method"] = fresh_method
+                    entry["subtype"] = fresh_subtype
+                    entry["ocr_text"] = _sanitize_cached_text(fresh_text)
+                    if fresh_names:
+                        entry["extracted_names"] = list(fresh_names)
+                    cache_changed_since_checkpoint = True
 
         indexed.append(_entry_to_flat_indexed_file(
             source_path,
@@ -3112,10 +3296,12 @@ def collect_employee_materials(
             warnings.append(
                 "名单中存在同名人员；无身份证号可核对的同名资料不会自动归属，请补充身份证号后重试。"
             )
+        # 只传真实请求：标准分类不依赖 requested，传全量标准名并集反而会让
+        # “缓存类型 ∉ 请求”的重分类/渲染重分析条件永远不成立。
         flat_index, checkpoint_ok = _build_flat_ocr_index(
             lib_path,
             out_path,
-            list(dict.fromkeys([*global_materials, *MATERIAL_SYNONYMS.keys()])),
+            list(dict.fromkeys(global_materials)),
             ocr_cache,
             cache_path,
             cache_stats,

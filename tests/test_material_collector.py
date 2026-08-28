@@ -873,7 +873,7 @@ class TestOCRCacheHelpers(unittest.TestCase):
         from hr_toolkit.tools import material_collector as mc
 
         cache = {
-            "version": 4,
+            "version": 5,
             "entries": {
                 "pdf-key": {
                     "sample_filename": "random.pdf",
@@ -893,7 +893,7 @@ class TestOCRCacheHelpers(unittest.TestCase):
         removed = mc._invalidate_legacy_pdf_cache_entries(cache)
 
         self.assertEqual(removed, 1)
-        self.assertEqual(cache["version"], 5)
+        self.assertEqual(cache["version"], 6)
         self.assertEqual(set(cache["entries"]), {"image-key"})
         self.assertEqual(set(cache["paths"]), {"random.jpg"})
 
@@ -914,7 +914,7 @@ class TestOCRCacheHelpers(unittest.TestCase):
         removed = mc._invalidate_legacy_pdf_cache_entries(cache)
 
         self.assertEqual(removed, 1)
-        self.assertEqual(cache["version"], 5)
+        self.assertEqual(cache["version"], 6)
         self.assertEqual(set(cache["entries"]), {"image-key"})
         self.assertEqual(set(cache["paths"]), {"archive/random.jpg"})
 
@@ -1873,7 +1873,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             self.assertEqual(self.engine_type.call_count, first_calls)
             migrated = json.loads(cache_path.read_text(encoding="utf-8"))
-            self.assertEqual(migrated["version"], 5)
+            self.assertEqual(migrated["version"], 6)
             self.assertIn("source_change_token", migrated["paths"]["000.png"])
             self.assertNotIn("source_ctime_ns", migrated["paths"]["000.png"])
 
@@ -2173,6 +2173,117 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                     library_mode=LIBRARY_MODE_FLAT_OCR,
                     use_ocr_cache=False,
                 )
+
+
+class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
+    """复盘会需求：图形标题 PDF 渲染兜底、自定义名称乱序窗口匹配、缓存重分类。"""
+
+    def setUp(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        self.mc = mc
+        self.real_engine = mc._OCR_ENGINE
+        self.real_attempted = mc._OCR_ATTEMPTED
+
+    def tearDown(self) -> None:
+        self.mc._OCR_ENGINE = self.real_engine
+        self.mc._OCR_ATTEMPTED = self.real_attempted
+
+    def _set_engine(self, lines):
+        class FixedEngine:
+            def __call__(self, source):
+                return ([list(item) for item in lines], None)
+
+        self.mc._OCR_ENGINE = FixedEngine()
+        self.mc._OCR_ATTEMPTED = True
+
+    def test_reordered_window_matching_boundaries(self) -> None:
+        mc = self.mc
+        hit = mc._classify_requested_material_text(
+            "我的证书天谴", ["天谴证书"], method_prefix="t",
+        )
+        self.assertEqual(hit[0], "天谴证书")
+        self.assertEqual(hit[1], "t_custom_reordered")
+        # 字符被其他字打断：不命中
+        self.assertIsNone(
+            mc._classify_requested_material_text(
+                "我天天谴的证书", ["天谴证书"], method_prefix="t",
+            )[0]
+        )
+        # 名称过短（<3）不走乱序窗口，且无精确子串：不命中
+        self.assertIsNone(
+            mc._classify_requested_material_text(
+                "的证书天", ["天谴"], method_prefix="t",
+            )[0]
+        )
+
+    def test_custom_priority_and_weak_id_gate(self) -> None:
+        mc = self.mc
+        text = "我的证书天谴 证号500237200308190399"
+        result = mc._classify_text_content(
+            text,
+            requested_types=["天谴证书"],
+            method_prefix="doc",
+            allow_weak_id_fallback=False,
+        )
+        self.assertEqual(result[0], "天谴证书")
+        # 弱兜底门禁：仅 18 位证号时，禁用→无结论，启用→身份证
+        self.assertIsNone(
+            mc._classify_text_content(
+                "T500237200308190399", allow_weak_id_fallback=False,
+            )[0]
+        )
+        self.assertEqual(
+            mc._classify_text_content(
+                "T500237200308190399", allow_weak_id_fallback=True,
+            )[0],
+            "身份证",
+        )
+        # 应急管理局关键词优先于证号兜底
+        self.assertEqual(
+            mc._classify_text_content(
+                "北京市应急管理局 500237200308190399",
+                allow_weak_id_fallback=False,
+            )[0],
+            "特种证书",
+        )
+
+    def test_flat_pdf_graphic_title_render_fallback(self) -> None:
+        from tests.test_pdf_backend_compat import _write_minimal_pdf
+
+        self._set_engine([("title", "中华人民共和国特种作业操作证")])
+        with tempfile.TemporaryDirectory() as td:
+            pdf = Path(td) / "cert.pdf"
+            _write_minimal_pdf(pdf, ["text"], text_content="T500237200308190399")
+            material, _method, _subtype, _names, _eid, text, complete = (
+                self.mc._analyze_flat_source(pdf, ["特种证书"])
+            )
+        self.assertTrue(complete)
+        self.assertEqual(material, "特种证书")
+        self.assertIn("特种作业操作证", text)
+
+    def test_flat_cache_reclassifies_cached_standard_type_against_new_request(self) -> None:
+        mc = self.mc
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "lib"
+            library.mkdir()
+            (library / "a.jpg").write_bytes(b"cert-number-only")
+            cache = {"version": mc._OCR_CACHE_VERSION}
+            cache_path = library / ".hr_material_index_cache.json"
+            warnings: list = []
+
+            self._set_engine([("n", "我的证书天谴 500237200308190399")])
+            first, _ = mc._build_flat_ocr_index(
+                library, root / "out1", ["身份证"], cache, cache_path, {}, warnings, None,
+            )
+            self.assertEqual(first[0].material_type, "身份证")
+
+            second, _ = mc._build_flat_ocr_index(
+                library, root / "out2", ["天谴证书"], cache, cache_path, {}, warnings, None,
+            )
+            self.assertEqual(second[0].material_type, "天谴证书")
+            self.assertTrue(second[0].cache_hit)
 
 
 if __name__ == "__main__":
