@@ -26,11 +26,9 @@ from hr_toolkit.tools.archive_import import (
 
 
 def _build_summary_fixture(path: Path, row_count: int) -> None:
-    with (
-        open_template_resource(DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE) as source,
-        path.open("wb") as target,
-    ):
-        shutil.copyfileobj(source, target)
+    with open_template_resource(DEFAULT_ARCHIVE_SUMMARY_TEMPLATE_RESOURCE) as source:
+        with path.open("wb") as target:
+            shutil.copyfileobj(source, target)
     workbook = load_workbook(path)
     try:
         worksheet = workbook[workbook.sheetnames[0]]
