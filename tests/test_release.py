@@ -368,6 +368,87 @@ class PrepareReleaseTest(unittest.TestCase):
                 release.prepare_release("0.2.1", root, git)
 
 
+class GithubCiGateTest(unittest.TestCase):
+    @staticmethod
+    def _runner(payload):
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.commands = []
+
+            def run(self, command, *, capture=True, check=True):
+                self.commands.append(list(command))
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(payload),
+                    stderr="",
+                )
+
+        return FakeRunner()
+
+    def test_exact_source_sha_requires_completed_successful_ci(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = self._runner(
+                [
+                    {
+                        "headSha": START_HEAD,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "createdAt": "2026-08-29T00:00:00Z",
+                        "databaseId": 123,
+                        "url": "https://github.com/example/actions/runs/123",
+                    }
+                ]
+            )
+
+            release.require_successful_github_ci(make_plan(Path(tmp)), runner)
+
+            command = runner.commands[0]
+            self.assertIn(START_HEAD, command)
+            self.assertIn("CI", command)
+            self.assertIn("github.com/xhzwjc/hr-toolkit", command)
+
+    def test_missing_running_failed_or_cancelled_ci_blocks_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = make_plan(Path(tmp))
+            scenarios = (
+                ([], "尚无 CI 结果"),
+                ([{"headSha": START_HEAD, "status": "in_progress", "conclusion": ""}], "尚未通过"),
+                ([{"headSha": START_HEAD, "status": "completed", "conclusion": "failure"}], "尚未通过"),
+                ([{"headSha": START_HEAD, "status": "completed", "conclusion": "cancelled"}], "尚未通过"),
+                ([{"headSha": "9" * 40, "status": "completed", "conclusion": "success"}], "尚无 CI 结果"),
+            )
+            for payload, message in scenarios:
+                with self.subTest(payload=payload):
+                    with self.assertRaisesRegex(release.ReleaseError, message):
+                        release.require_successful_github_ci(
+                            plan,
+                            self._runner(payload),
+                        )
+
+    def test_release_entrypoint_checks_ci_before_confirmation_or_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = make_plan(root)
+            git = object()
+            with mock.patch.object(
+                release, "GitRepository", return_value=git
+            ), mock.patch.object(
+                release, "prepare_release", return_value=plan
+            ), mock.patch.object(
+                release, "require_successful_github_ci"
+            ) as gate, mock.patch.object(
+                release, "confirm_release", return_value=False
+            ) as confirm, mock.patch.object(
+                release, "execute_release_plan"
+            ) as execute:
+                release.release("0.2.1", root=root)
+
+            gate.assert_called_once_with(plan)
+            confirm.assert_called_once()
+            execute.assert_not_called()
+
+
 class DryRunTest(unittest.TestCase):
     def test_dry_run_runs_checks_without_writing_or_git_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

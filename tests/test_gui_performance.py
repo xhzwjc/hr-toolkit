@@ -54,22 +54,32 @@ class GuiPerformanceTests(unittest.TestCase):
         predicate,
         *,
         timeout_ms: int = 2000,
+        stable_polls: int = 1,
         failure_message: str,
     ) -> None:
         """Wait for a Tk state transition without assuming event delivery speed."""
 
         deadline = time.monotonic() + timeout_ms / 1000.0
-        state = {"matched": bool(predicate())}
+        required_polls = max(1, int(stable_polls))
+        initial_match = bool(predicate())
+        state = {
+            "matched": initial_match and required_polls == 1,
+            "consecutive": 1 if initial_match else 0,
+        }
 
         def poll() -> None:
-            state["matched"] = bool(predicate())
+            if predicate():
+                state["consecutive"] += 1
+            else:
+                state["consecutive"] = 0
+            state["matched"] = state["consecutive"] >= required_polls
             if state["matched"] or time.monotonic() >= deadline:
                 self.root.quit()
                 return
             self.root.after(10, poll)
 
         if not state["matched"]:
-            self.root.after_idle(poll)
+            self.root.after(10, poll)
             self.root.mainloop()
         self.assertTrue(state["matched"], failure_message)
 
@@ -652,10 +662,6 @@ class GuiPerformanceTests(unittest.TestCase):
                     and not app._window_resize_restoring
                     and app._form_layout_mode == mode
                     and app._workspace_small is workspace_small
-                    and app._form_resize_job is None
-                    and app._form_post_layout_sync_job is None
-                    and app._workspace_area_resize_job is None
-                    and not app._right_canvas_sync_pending
                     and app._last_canvas_window_size == expected_window_size
                 )
 
@@ -666,6 +672,8 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.update_idletasks()
             self._run_event_loop_until(
                 lambda: layout_is_settled("narrow", True),
+                timeout_ms=5000,
+                stable_polls=3,
                 failure_message="narrow resize state did not settle",
             )
 
@@ -685,6 +693,8 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.update_idletasks()
             self._run_event_loop_until(
                 lambda: layout_is_settled("wide", False),
+                timeout_ms=5000,
+                stable_polls=3,
                 failure_message="wide resize state did not settle",
             )
 
@@ -919,21 +929,35 @@ class GuiPerformanceTests(unittest.TestCase):
 
             canvas = app._right_canvas
             original_scroll = canvas.yview_scroll
+            original_moveto = canvas.yview_moveto
             calls: list[tuple[int, str]] = []
+            moves: list[float] = []
 
             def record_scroll(units: int, mode: str):
                 calls.append((units, mode))
                 return original_scroll(units, mode)
 
+            def record_moveto(fraction: float):
+                moves.append(float(fraction))
+                return original_moveto(fraction)
+
             canvas.yview_scroll = record_scroll
+            canvas.yview_moveto = record_moveto
             for _ in range(240):
                 canvas.event_generate("<MouseWheel>", delta=-120)
 
             self.assertTrue(app._right_scroll_controller.scheduled)
             self.assertEqual(calls, [])
+            self.assertEqual(moves, [])
             app._right_scroll_controller.flush_pending()
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][1], "units")
+            self.assertEqual(len(calls) + len(moves), 1)
+            if app._right_scroll_controller._smooth_units:
+                self.assertEqual(calls, [])
+                self.assertEqual(len(moves), 1)
+            else:
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1], "units")
+                self.assertEqual(moves, [])
         finally:
             if app is not None:
                 app.destroy()

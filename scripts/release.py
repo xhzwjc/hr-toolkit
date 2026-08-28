@@ -636,6 +636,72 @@ def run_full_checks(root: Path = REPO_ROOT) -> None:
         runner.run(command, capture=False)
 
 
+def require_successful_github_ci(
+    plan: ReleasePlan,
+    runner: Optional[CommandRunner] = None,
+) -> None:
+    """Refuse to create a release tag before the exact source SHA passes CI."""
+
+    repository = canonical_remote_identity(plan.remote_url)
+    if repository.startswith("file:"):
+        raise ReleaseError("正式发布前无法从本地 origin 核验 GitHub CI。")
+    command = [
+        "gh",
+        "run",
+        "list",
+        "--repo",
+        repository,
+        "--workflow",
+        "CI",
+        "--commit",
+        plan.start_head,
+        "--event",
+        "push",
+        "--limit",
+        "10",
+        "--json",
+        "headSha,status,conclusion,createdAt,databaseId,url",
+    ]
+    command_runner = runner or CommandRunner(plan.root)
+    try:
+        result = command_runner.run(command)
+    except ReleaseError as error:
+        raise ReleaseError(
+            "无法核验发布源提交的 GitHub CI；发布已在创建版本提交和 Tag 前停止。"
+            f"\n{error}"
+        ) from error
+    try:
+        payload = json.loads(result.stdout or "[]")
+    except (AttributeError, json.JSONDecodeError) as error:
+        raise ReleaseError("GitHub CI 返回内容无法解析，发布已停止。") from error
+    if not isinstance(payload, list):
+        raise ReleaseError("GitHub CI 返回格式不正确，发布已停止。")
+    matching_runs = [
+        item
+        for item in payload
+        if isinstance(item, dict) and item.get("headSha") == plan.start_head
+    ]
+    if not matching_runs:
+        raise ReleaseError(
+            "发布源提交尚无 CI 结果。请先推送 main，并等待包含现代 Windows、"
+            "Win7、Linux 和依赖审计的 CI 完成后再发布。"
+        )
+    matching_runs.sort(key=lambda item: str(item.get("createdAt") or ""))
+    latest = matching_runs[-1]
+    status = str(latest.get("status") or "unknown")
+    conclusion = str(latest.get("conclusion") or "pending")
+    url = str(latest.get("url") or "").strip()
+    if status != "completed" or conclusion != "success":
+        detail = f"状态 {status}/{conclusion}"
+        if url:
+            detail = f"{detail}\n{url}"
+        raise ReleaseError(
+            "发布源提交尚未通过完整 GitHub CI，拒绝创建版本提交和 Tag。"
+            f"\n{detail}"
+        )
+    print(f"GitHub CI 已通过：{plan.start_head[:12]}{f'（{url}）' if url else ''}")
+
+
 def _assert_only_version_changes(git: GitRepository) -> None:
     staged = git.staged_paths()
     unstaged = git.unstaged_paths()
@@ -1020,6 +1086,7 @@ def release(
 ) -> None:
     git = GitRepository(root)
     plan = prepare_release(version, root, git)
+    require_successful_github_ci(plan)
     print(
         f"发布计划：{plan.current_version} -> {plan.target_version}，"
         f"分支 {MAIN_BRANCH}，Tag {plan.tag}"
