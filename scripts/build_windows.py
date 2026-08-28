@@ -74,6 +74,8 @@ WIN7_PINNED_DISTRIBUTIONS = {
     "rapidocr-onnxruntime": "1.4.4",
 }
 HIDDEN_IMPORTS = (
+    "PIL.ImageGrab",
+    "PIL.ImageTk",
     "pythoncom",
     "pywintypes",
     "win32com.client",
@@ -85,6 +87,8 @@ HIDDEN_IMPORTS = (
     "xlrd",
 )
 WIN7_HIDDEN_IMPORTS = (
+    "PIL.ImageGrab",
+    "PIL.ImageTk",
     "pythoncom",
     "pywintypes",
     "win32com.client",

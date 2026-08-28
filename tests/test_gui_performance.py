@@ -12,7 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
-from hr_toolkit.gui.app import HRToolkitApp
+from hr_toolkit.gui.app import (
+    HRToolkitApp,
+    WINDOW_RESIZE_SETTLE_MS,
+)
 from hr_toolkit.gui.widgets import CodexButton, RoundedCard, SidebarItem
 
 
@@ -462,6 +465,188 @@ class GuiPerformanceTests(unittest.TestCase):
                     child.destroy()
                 except Exception:
                     pass
+
+    def test_live_resize_uses_one_preview_surface_and_restores_widget_tree(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.minsize(1, 1)
+            app._dismiss_startup_loading_screen()
+            # Keep this test independent of desktop screenshot permissions.
+            snapshot_job = app._window_resize_snapshot_job
+            if snapshot_job is not None:
+                self.root.after_cancel(snapshot_job)
+                app._window_resize_snapshot_job = None
+            app._window_resize_snapshot_supported = False
+            observed = {}
+
+            def inspect_during_drag() -> None:
+                observed["active"] = app._window_resize_active
+                observed["manager"] = app._root_frame.winfo_manager()
+                observed["overlay"] = app._window_resize_overlay.winfo_manager()
+                observed["activations"] = app._window_resize_overlay_activations
+
+            for index in range(18):
+                width = 1180 - index * 14
+                height = 760 - index * 4
+                self.root.after(
+                    index * 5,
+                    lambda w=width, h=height: self.root.geometry(f"{w}x{h}"),
+                )
+            self.root.after(60, inspect_during_drag)
+            self.root.after(300, self.root.quit)
+            self.root.mainloop()
+
+            self.assertTrue(observed["active"])
+            self.assertEqual(observed["manager"], "")
+            self.assertEqual(observed["overlay"], "place")
+            self.assertEqual(observed["activations"], 1)
+            self.assertFalse(app._window_resize_active)
+            self.assertEqual(app._root_frame.winfo_manager(), "pack")
+            self.assertEqual(app._window_resize_overlay.winfo_manager(), "")
+            self.assertGreater(app._window_resize_overlay_frames, 0)
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    def test_live_resize_can_render_cached_ui_snapshot(self) -> None:
+        try:
+            from PIL import Image, ImageTk
+        except ImportError as exc:
+            self.skipTest(f"Pillow is unavailable: {exc}")
+
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._dismiss_startup_loading_screen()
+            self.root.update()
+            width = max(app.root.winfo_width(), 2)
+            height = max(app.root.winfo_height(), 2)
+            snapshot = Image.new("RGB", (width, height), "#F5F5F4")
+            app._window_resize_snapshot_image = snapshot
+            app._window_resize_snapshot_photo = ImageTk.PhotoImage(
+                snapshot,
+                master=self.root,
+            )
+
+            app._begin_window_resize_composite()
+            app._window_resize_overlay_target_size = (width - 20, height - 10)
+            app._render_window_resize_overlay()
+
+            self.assertTrue(app._window_resize_active)
+            self.assertIsNotNone(app._window_resize_overlay_photo)
+            self.assertEqual(
+                app._window_resize_overlay.itemcget(
+                    app._window_resize_overlay_image_item,
+                    "state",
+                ),
+                "normal",
+            )
+            self.assertGreater(app._window_resize_overlay_frames, 0)
+            app._flush_window_resize_composite()
+            self.assertFalse(app._window_resize_active)
+        finally:
+            if app is not None:
+                app.destroy()
+
+    def test_resize_compositor_shutdown_cancels_jobs_and_releases_preview(self) -> None:
+        app = HRToolkitApp(self.root)
+        self.root.deiconify()
+        app._dismiss_startup_loading_screen()
+        self.root.geometry("1080x690")
+        self.root.after(20, self.root.quit)
+        self.root.mainloop()
+        self.assertTrue(app._window_resize_active)
+        bindtag = app._window_resize_configure_bindtag
+        self.assertIn(bindtag, self.root.bindtags())
+        self.assertNotIn(bindtag, app._right_canvas.bindtags())
+
+        overlay = app._window_resize_overlay
+        app.destroy()
+
+        self.assertFalse(app._window_resize_active)
+        self.assertIsNone(app._window_resize_settle_job)
+        self.assertIsNone(app._window_resize_render_job)
+        self.assertIsNone(app._window_resize_snapshot_job)
+        self.assertNotIn(bindtag, self.root.bindtags())
+        self.assertFalse(overlay.winfo_exists())
+
+    def test_native_resize_release_restores_immediately_and_preserves_focus(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._dismiss_startup_loading_screen()
+            app._select_tool("folder_rename")
+            self.root.update()
+            app.rename_text_widget.focus_force()
+            pointer = {"down": True}
+            app._window_resize_pointer_state_reader = lambda: pointer["down"]
+            observed = {}
+
+            self.root.geometry("1080x690")
+            self.root.after(20, lambda: pointer.update(down=False))
+
+            def inspect_after_release() -> None:
+                observed["active"] = app._window_resize_active
+                observed["manager"] = app._root_frame.winfo_manager()
+                observed["focus"] = self.root.focus_get()
+
+            # This is earlier than WINDOW_RESIZE_SETTLE_MS. Restoration here
+            # therefore proves the native button-release path was used.
+            self.root.after(80, inspect_after_release)
+            self.root.after(90, self.root.quit)
+            self.root.mainloop()
+
+            self.assertFalse(observed["active"])
+            self.assertEqual(observed["manager"], "pack")
+            self.assertIs(observed["focus"], app.rename_text_widget)
+        finally:
+            if app is not None:
+                app.destroy()
+
+    def test_native_resize_pause_keeps_single_surface_until_release(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._dismiss_startup_loading_screen()
+            pointer = {"down": True}
+            app._window_resize_pointer_state_reader = lambda: pointer["down"]
+            observed = {}
+
+            self.root.geometry("1080x690")
+
+            def inspect_while_held() -> None:
+                observed["active_while_held"] = app._window_resize_active
+                observed["manager_while_held"] = app._root_frame.winfo_manager()
+                pointer["down"] = False
+
+            def inspect_after_release() -> None:
+                observed["active_after_release"] = app._window_resize_active
+                observed["manager_after_release"] = app._root_frame.winfo_manager()
+
+            # Hold the border motionless beyond the inactivity fallback.  The
+            # complex widget tree must remain unmapped until the real release.
+            self.root.after(WINDOW_RESIZE_SETTLE_MS + 60, inspect_while_held)
+            self.root.after(WINDOW_RESIZE_SETTLE_MS + 130, inspect_after_release)
+            self.root.after(WINDOW_RESIZE_SETTLE_MS + 150, self.root.quit)
+            self.root.mainloop()
+
+            self.assertTrue(observed["active_while_held"])
+            self.assertEqual(observed["manager_while_held"], "")
+            self.assertFalse(observed["active_after_release"])
+            self.assertEqual(observed["manager_after_release"], "pack")
+        finally:
+            if app is not None:
+                app.destroy()
 
     def test_right_canvas_scrolling_does_not_mutate_items(self) -> None:
         app = None

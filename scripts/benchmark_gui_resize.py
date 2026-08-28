@@ -37,6 +37,7 @@ def run_benchmark(
     file_count: int,
     duration_seconds: float,
     request_interval_ms: int,
+    prewarm_ms: int = 0,
 ) -> dict[str, object]:
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -66,8 +67,15 @@ def run_benchmark(
                 app._refresh_upload_card()
                 root.update()
 
+            if prewarm_ms > 0:
+                root.after(prewarm_ms, root.quit)
+                root.mainloop()
+
             root_configures = 0
+            native_tree_configures = 0
             canvas_window_resizes = 0
+            root_frame_widget = root.winfo_children()[0]
+            root_frame_path = str(root_frame_widget)
             original_itemconfigure = app._right_canvas.itemconfig
 
             def counted_itemconfigure(item, *args, **kwargs):
@@ -81,9 +89,15 @@ def run_benchmark(
             app._right_canvas.itemconfig = counted_itemconfigure
 
             def count_root_configure(event) -> None:
-                nonlocal root_configures
+                nonlocal root_configures, native_tree_configures
                 if event.widget is root:
                     root_configures += 1
+                    return
+                widget_path = str(event.widget)
+                if widget_path == root_frame_path or widget_path.startswith(
+                    root_frame_path + "."
+                ):
+                    native_tree_configures += 1
 
             root.bind("<Configure>", count_root_configure, add="+")
             started_at = time.perf_counter()
@@ -135,8 +149,13 @@ def run_benchmark(
                 "file_count": file_count,
                 "duration_seconds": duration_seconds,
                 "request_interval_ms": request_interval_ms,
+                "prewarm_ms": prewarm_ms,
+                "snapshot_ready": bool(
+                    getattr(app, "_window_resize_snapshot_image", None)
+                ),
                 "resize_requests_sent": sent_requests,
                 "root_configure_events": root_configures,
+                "native_tree_configure_events": native_tree_configures,
                 "request_gap_median_ms": round(
                     statistics.median(measured_gaps) if measured_gaps else 0.0,
                     2,
@@ -153,6 +172,14 @@ def run_benchmark(
                     2,
                 ),
                 "canvas_window_resizes": canvas_window_resizes,
+                "preview_activations": getattr(
+                    app, "_window_resize_overlay_activations", 0
+                ),
+                "preview_frames": getattr(app, "_window_resize_overlay_frames", 0),
+                "preview_tree_restored": (
+                    getattr(app, "_root_frame", None) is not None
+                    and app._root_frame.winfo_manager() == "pack"
+                ),
                 "canvas_width_settled": frame_size[0] == canvas_size[0],
                 "canvas_width": canvas_size[0],
                 "canvas_window_width": frame_size[0],
@@ -169,11 +196,18 @@ def main() -> None:
     parser.add_argument("--files", type=int, default=40)
     parser.add_argument("--duration", type=float, default=2.0)
     parser.add_argument("--interval", type=int, default=8)
+    parser.add_argument(
+        "--prewarm",
+        type=int,
+        default=0,
+        help="缩放前保持窗口静止的毫秒数（用于准备后台合成快照）。",
+    )
     args = parser.parse_args()
     result = run_benchmark(
         file_count=max(0, args.files),
         duration_seconds=max(0.25, args.duration),
         request_interval_ms=max(1, args.interval),
+        prewarm_ms=max(0, args.prewarm),
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
