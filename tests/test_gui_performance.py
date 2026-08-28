@@ -767,6 +767,69 @@ class GuiPerformanceTests(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_delayed_title_wrap_resyncs_canvas_natural_height(self) -> None:
+        app = None
+        try:
+            with patch.dict(os.environ, {FORCE_UI_SCALE_ENV: "1"}, clear=False):
+                app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.minsize(1, 1)
+            app._window_resize_pointer_state_reader = lambda: False
+            app._dismiss_startup_loading_screen()
+            self.root.geometry("700x650")
+            self.root.update()
+            self._run_event_loop_until(
+                lambda: (
+                    not app._window_resize_active
+                    and app._form_layout_mode == "narrow"
+                ),
+                failure_message="narrow layout did not settle",
+            )
+
+            right_frame = self.root.nametowidget(
+                app._right_canvas.itemcget(app._right_canvas_window, "window")
+            )
+            app.tool_description.set("延迟换行高度验证文本" * 35)
+            app.subtitle_label.configure(wraplength=100000)
+            app._last_text_wraps = None
+            self.root.update_idletasks()
+            app._sync_right_canvas_window_now()
+            stale_height = app._last_canvas_window_size[1]
+
+            # The delayed header callback changes requested height without
+            # changing right_frame's assigned Canvas height. It must therefore
+            # request its own Canvas/scrollregion synchronization.
+            app._update_title_text_wraps()
+            self._run_event_loop_until(
+                lambda: (
+                    app._title_wrap_job is None
+                    and app._last_canvas_window_size[1]
+                    == max(
+                        right_frame.winfo_reqheight(),
+                        app._right_canvas.winfo_height(),
+                    )
+                ),
+                stable_polls=3,
+                failure_message="delayed title wrap left a stale canvas height",
+                diagnostics=lambda: repr(
+                    {
+                        "title_wrap_job": app._title_wrap_job,
+                        "canvas_window": app._last_canvas_window_size,
+                        "requested_height": right_frame.winfo_reqheight(),
+                        "canvas_height": app._right_canvas.winfo_height(),
+                    }
+                ),
+            )
+            self.assertGreater(right_frame.winfo_reqheight(), stale_height)
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
     def test_live_resize_uses_one_preview_surface_and_restores_widget_tree(self) -> None:
         app = None
         try:

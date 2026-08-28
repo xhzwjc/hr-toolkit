@@ -2895,7 +2895,7 @@ class HRToolkitApp:
         self._last_text_wraps = None
         self._last_header_layout = None
 
-        def _update_text_wraps(_event=None) -> None:
+        def _update_text_wraps(_event=None) -> bool:
             title_row_width = title_row.winfo_width()
             if title_row_width <= 1:
                 title_row_width = self._px(240)
@@ -2908,7 +2908,8 @@ class HRToolkitApp:
 
             title_wrap = max(1, title_wrap)
             subtitle_wrap = max(1, title_row_width - self._px(8))
-            if tight_header != self._last_header_layout:
+            header_layout_changed = tight_header != self._last_header_layout
+            if header_layout_changed:
                 self._last_header_layout = tight_header
                 if tight_header:
                     title_actions.grid_configure(
@@ -2931,16 +2932,24 @@ class HRToolkitApp:
 
             wraps_key = (title_wrap, subtitle_wrap)
             if wraps_key == self._last_text_wraps:
-                return
+                return header_layout_changed
             self._last_text_wraps = wraps_key
 
             self.title_label.configure(wraplength=title_wrap)
             self.subtitle_label.configure(wraplength=subtitle_wrap)
+            return True
 
         def _run_title_text_wraps() -> None:
             self._title_wrap_job = None
             if getattr(self, "_is_alive", True):
-                _update_text_wraps()
+                if _update_text_wraps():
+                    # The Canvas window assigns right_frame a fixed height.
+                    # Changing label wraplength updates only its *requested*
+                    # height, so right_frame may emit no Configure event. Queue
+                    # a measurement explicitly after Tk propagates the new
+                    # geometry or the scrollregion can remain permanently
+                    # shorter after a narrow Windows resize.
+                    self.root.after_idle(self._sync_right_canvas_window)
 
         def _schedule_title_text_wraps(_event=None) -> None:
             if not getattr(self, "_is_alive", True):
