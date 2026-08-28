@@ -4281,10 +4281,7 @@ class HRToolkitApp:
                 self._workspace_area_resize_job = None
             return
         self._workspace_area_resize_job = None
-        try:
-            logical_width = self._workspace_main_area.winfo_width() / max(self.ui_scale, 1.0)
-        except Exception:
-            logical_width = WORKSPACE_DRAWER_BREAKPOINT
+        logical_width = self._workspace_available_width_units()
         small = logical_width < WORKSPACE_DRAWER_BREAKPOINT
         if small != self._workspace_small:
             self._workspace_small = small
@@ -4293,15 +4290,78 @@ class HRToolkitApp:
         elif hasattr(self, "_workspace_panel"):
             self._apply_workspace_panel_mode()
 
+    def _workspace_available_width_units(self) -> float:
+        """Return the visible workspace width, excluding stale requested sizes."""
+
+        scale = max(float(getattr(self, "ui_scale", 1.0)), 1.0)
+        widths: list[int] = []
+        try:
+            measured_width = int(self._workspace_main_area.winfo_width())
+            if measured_width > 1:
+                widths.append(measured_width)
+        except Exception:
+            pass
+        try:
+            root_width = int(self.root.winfo_width())
+            workspace_left = int(
+                self._workspace_main_area.winfo_rootx() - self.root.winfo_rootx()
+            )
+            visible_width = root_width - max(workspace_left, 0)
+            if root_width > 1 and visible_width > 1:
+                widths.append(visible_width)
+        except Exception:
+            pass
+        if not widths:
+            return float(WORKSPACE_DRAWER_BREAKPOINT)
+        # During the resize compositor the unmapped widget tree may still
+        # report its previous requested width. The root client budget is the
+        # hard upper bound and prevents a small window being classified wide.
+        return min(widths) / scale
+
+    def _workspace_panel_layout_matches(self, *, small: bool, expanded: bool) -> bool:
+        """Check cached workspace mode against the actual Tk geometry managers."""
+
+        try:
+            panel_manager = self._workspace_panel.winfo_manager()
+            expanded_manager = self._workspace_expanded_body.winfo_manager()
+            collapsed_manager = self._workspace_collapsed_body.winfo_manager()
+            handle_manager = self._workspace_resize_handle.winfo_manager()
+        except Exception:
+            return False
+        if small and expanded:
+            return (
+                panel_manager == "place"
+                and expanded_manager == "pack"
+                and collapsed_manager == ""
+                and handle_manager == ""
+            )
+        if small:
+            return (
+                panel_manager == ""
+                and expanded_manager == ""
+                and collapsed_manager == ""
+                and handle_manager == ""
+            )
+        if expanded:
+            return (
+                panel_manager == "grid"
+                and expanded_manager == "pack"
+                and collapsed_manager == ""
+                and handle_manager == "grid"
+            )
+        return (
+            panel_manager == "grid"
+            and expanded_manager == ""
+            and collapsed_manager == "pack"
+            and handle_manager == ""
+        )
+
     def _apply_workspace_panel_mode(self) -> None:
         if not hasattr(self, "_workspace_panel"):
             return
         small = self._workspace_small
         expanded = self._workspace_drawer_open if small else self._workspace_preferred_expanded
-        try:
-            available_units = self._workspace_main_area.winfo_width() / max(self.ui_scale, 1.0)
-        except Exception:
-            available_units = WORKSPACE_DRAWER_BREAKPOINT
+        available_units = self._workspace_available_width_units()
         drawer_width_units = _responsive_drawer_width(
             available_units,
             self._workspace_width_units,
@@ -4312,7 +4372,10 @@ class HRToolkitApp:
             drawer_width_units if small and expanded else 0,
         )
         previous_mode_key = getattr(self, "_workspace_panel_mode_key", None)
-        if previous_mode_key == mode_key:
+        if previous_mode_key == mode_key and self._workspace_panel_layout_matches(
+            small=small,
+            expanded=expanded,
+        ):
             return
         if (
             previous_mode_key is not None
@@ -4370,6 +4433,12 @@ class HRToolkitApp:
         elif self._workspace_small:
             # 小屏关闭状态只保留标题区入口，不再用 46px 竖栏挤占工具内容。
             self.workspace_collapse_button.configure(text="关闭")
+            try:
+                # Raising the exposed content window invalidates the region
+                # previously covered by the native drawer on macOS/Windows.
+                self._main_view_host.lift()
+            except Exception:
+                pass
         else:
             self.workspace_collapse_button.configure(text="收起")
             width_units = self._workspace_width_units if expanded else WORKSPACE_COLLAPSED_WIDTH
@@ -4404,9 +4473,27 @@ class HRToolkitApp:
 
     def _toggle_workspace_panel(self) -> None:
         self._flush_window_resize_composite()
-        if self._workspace_small:
+        actual_small = (
+            self._workspace_available_width_units() < WORKSPACE_DRAWER_BREAKPOINT
+        )
+        mode_key = getattr(self, "_workspace_panel_mode_key", None)
+        try:
+            placed_drawer = self._workspace_panel.winfo_manager() == "place"
+        except Exception:
+            placed_drawer = False
+        placed_drawer = placed_drawer or bool(
+            mode_key and mode_key[:2] == ("place", "expanded")
+        )
+        self._workspace_small = actual_small
+        if placed_drawer:
+            # The close button belongs to the currently visible temporary
+            # drawer. Honour that visible state even if a delayed resize
+            # callback briefly left the logical breakpoint flag stale.
+            self._workspace_drawer_open = False
+        elif actual_small:
             self._workspace_drawer_open = not self._workspace_drawer_open
         else:
+            self._workspace_drawer_open = False
             self._workspace_preferred_expanded = not self._workspace_preferred_expanded
         self._apply_workspace_panel_mode()
 
@@ -4416,8 +4503,21 @@ class HRToolkitApp:
         return bool(getattr(self, "_workspace_preferred_expanded", False))
 
     def _close_workspace_drawer(self, _event=None) -> None:
-        if self._workspace_small and self._workspace_drawer_open:
+        mode_key = getattr(self, "_workspace_panel_mode_key", None)
+        try:
+            placed_drawer = self._workspace_panel.winfo_manager() == "place"
+        except Exception:
+            placed_drawer = False
+        if (
+            self._workspace_drawer_open
+            or placed_drawer
+            or bool(mode_key and mode_key[:2] == ("place", "expanded"))
+        ):
             self._workspace_drawer_open = False
+            self._workspace_small = (
+                self._workspace_available_width_units()
+                < WORKSPACE_DRAWER_BREAKPOINT
+            )
             self._apply_workspace_panel_mode()
 
     def _close_workspace_drawer_on_outside_click(self, event=None) -> None:

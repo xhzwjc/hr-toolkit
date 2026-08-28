@@ -574,6 +574,59 @@ class GuiPerformanceTests(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_small_drawer_close_recovers_from_stale_responsive_state(self) -> None:
+        app = None
+        try:
+            with patch.dict(os.environ, {FORCE_UI_SCALE_ENV: "1"}, clear=False):
+                app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.geometry("900x650")
+            self.root.update()
+
+            app.workspace_title_button.event_generate(
+                "<Button-1>",
+                x=max(1, app.workspace_title_button.winfo_width() // 2),
+                y=max(1, app.workspace_title_button.winfo_height() // 2),
+            )
+            self.root.update()
+            self.assertEqual(app._workspace_panel.winfo_manager(), "place")
+            self.assertTrue(app._workspace_drawer_open)
+
+            # A delayed breakpoint callback used to redirect the close-button
+            # command into the desktop expansion branch, leaving a fixed panel
+            # over the narrow tool page.
+            app._workspace_small = False
+            app.workspace_collapse_button.event_generate(
+                "<Button-1>",
+                x=max(1, app.workspace_collapse_button.winfo_width() // 2),
+                y=max(1, app.workspace_collapse_button.winfo_height() // 2),
+            )
+            self.root.update()
+
+            self.assertTrue(app._workspace_small)
+            self.assertFalse(app._workspace_drawer_open)
+            self.assertFalse(app._workspace_preferred_expanded)
+            self.assertEqual(app._workspace_panel.winfo_manager(), "")
+            self.assertEqual(app._workspace_expanded_body.winfo_manager(), "")
+            self.assertTrue(app._main_view_host.winfo_viewable())
+
+            # A cached mode may never suppress repair of a divergent native
+            # geometry-manager state.
+            app._workspace_panel.place(x=0, y=0, width=200, height=200)
+            app._workspace_expanded_body.pack(fill="both", expand=True)
+            app._apply_workspace_panel_mode()
+            self.root.update()
+            self.assertEqual(app._workspace_panel.winfo_manager(), "")
+            self.assertEqual(app._workspace_expanded_body.winfo_manager(), "")
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
     def test_rapid_window_resize_settles_canvas_and_responsive_layout(self) -> None:
         app = None
         try:
