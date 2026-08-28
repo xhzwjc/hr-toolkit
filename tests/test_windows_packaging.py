@@ -486,7 +486,7 @@ class WindowsPackagingTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("onnxruntime==1.11.1", win7_constraints)
         self.assertIn("opencv-python==4.8.1.78", win7_constraints)
-        self.assertIn("pypdfium2==5.13.0", win7_constraints)
+        self.assertIn("pypdfium2==4.27.0", win7_constraints)
         self.assertNotIn("pypdf==", win7_constraints)
         self.assertIn("pyinstaller==6.21.0", win7_constraints)
 

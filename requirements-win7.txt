@@ -3,7 +3,9 @@
 certifi>=2024.8.30
 openpyxl>=3.1,<4
 py7zr==0.22.0
-pypdfium2==5.13.0
+# 4.27.0 is the latest wheel whose bundled x64 pdfium.dll still targets a
+# pre-Windows-10 PE subsystem; 4.28.0+ cannot load on Windows 7.
+pypdfium2==4.27.0
 xlrd>=2.0,<3
 rapidocr_onnxruntime==1.4.4
 pywin32==306; platform_system=="Windows"

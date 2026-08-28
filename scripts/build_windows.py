@@ -69,7 +69,7 @@ WIN7_PINNED_DISTRIBUTIONS = {
     "Pillow": "10.4.0",
     "PyInstaller": "6.21.0",
     "py7zr": "0.22.0",
-    "pypdfium2": "5.13.0",
+    "pypdfium2": "4.27.0",
     "pywin32": "306",
     "rapidocr-onnxruntime": "1.4.4",
 }

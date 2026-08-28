@@ -30,7 +30,9 @@ pyclipper==1.3.0.post6
 pycryptodomex==3.23.0
 pyinstaller==6.21.0
 pyinstaller-hooks-contrib==2026.6
-pypdfium2==5.13.0
+# Final verified pypdfium2 wheel before its bundled x64 PDFium switched to a
+# Windows 10 PE subsystem. Keep this frozen until the Win7 lane is retired.
+pypdfium2==4.27.0
 pyppmd==1.1.0
 pywin32==306; platform_system == "Windows"
 pywin32-ctypes==0.2.3; platform_system == "Windows"

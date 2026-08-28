@@ -1345,7 +1345,10 @@ def _extract_pdfium_text(
             try:
                 page = document[page_index]
                 text_page = page.get_textpage()
-                page_text = text_page.get_text_range() or ""
+                # pypdfium2 4.27 is the final Win7-compatible binary. Its
+                # upstream range helper has a known allocation regression;
+                # bounded extraction is the documented full-page safe path.
+                page_text = text_page.get_text_bounded() or ""
             except Exception as exc:
                 raise PDFRecognitionError(
                     f"PDF 第 {page_number} 页文字层损坏：{file_path.name}"
