@@ -408,6 +408,61 @@ class GuiPerformanceTests(unittest.TestCase):
                 except Exception:
                     pass
 
+    def test_rapid_window_resize_settles_canvas_and_responsive_layout(self) -> None:
+        app = None
+        try:
+            with patch.dict(os.environ, {FORCE_UI_SCALE_ENV: "1"}, clear=False):
+                app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.minsize(1, 1)
+
+            # Several native resize messages may arrive before the settle job.
+            # Only the final dimensions must drive the expensive content reflow.
+            for width in range(1180, 699, -40):
+                self.root.geometry(f"{width}x650")
+                self.root.update_idletasks()
+            self.root.after(250, self.root.quit)
+            self.root.mainloop()
+
+            self.assertEqual(app._form_layout_mode, "narrow")
+            self.assertTrue(app._workspace_small)
+            self.assertEqual(
+                app._last_canvas_window_size[0],
+                app._right_canvas.winfo_width(),
+            )
+            right_frame = self.root.nametowidget(
+                app._right_canvas.itemcget(app._right_canvas_window, "window")
+            )
+            self.assertEqual(
+                app._last_canvas_window_size[1],
+                max(right_frame.winfo_reqheight(), app._right_canvas.winfo_height()),
+            )
+
+            for width in range(700, 1401, 50):
+                self.root.geometry(f"{width}x780")
+                self.root.update_idletasks()
+            self.root.after(250, self.root.quit)
+            self.root.mainloop()
+
+            self.assertEqual(app._form_layout_mode, "wide")
+            self.assertFalse(app._workspace_small)
+            self.assertEqual(
+                app._last_canvas_window_size[0],
+                app._right_canvas.winfo_width(),
+            )
+            self.assertEqual(
+                app._last_canvas_window_size[1],
+                max(right_frame.winfo_reqheight(), app._right_canvas.winfo_height()),
+            )
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
     def test_right_canvas_scrolling_does_not_mutate_items(self) -> None:
         app = None
         try:
@@ -513,6 +568,143 @@ class GuiPerformanceTests(unittest.TestCase):
         finally:
             if app is not None:
                 app.destroy()
+
+    def test_upload_canvases_reuse_items_during_width_changes(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._select_tool("personnel_change_merge")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                paths = []
+                for index in range(12):
+                    path = Path(temp_dir) / f"异动表_{index + 1:02d}.xlsx"
+                    path.write_bytes(b"test")
+                    paths.append(path)
+                app.change_input_paths = paths
+                app._sync_input_path_text()
+                app._refresh_upload_card()
+                self.root.update()
+
+                upload_canvas = app.upload_body.winfo_children()[0]
+                initial_items = upload_canvas.find_all()
+                app._refresh_upload_card()
+                self.root.update()
+                self.assertIs(app.upload_body.winfo_children()[0], upload_canvas)
+                self.root.minsize(1, 1)
+                self.root.geometry("900x650")
+                self.root.after(250, self.root.quit)
+                self.root.mainloop()
+                self.assertEqual(upload_canvas.find_all(), initial_items)
+
+                app.change_input_paths = None
+                app._sync_input_path_text()
+                app._refresh_upload_card()
+                self.root.update()
+                drop_zone = app.upload_body.winfo_children()[0]
+                initial_drop_items = drop_zone.find_all()
+                self.root.geometry("1180x760")
+                self.root.after(250, self.root.quit)
+                self.root.mainloop()
+                self.assertEqual(drop_zone.find_all(), initial_drop_items)
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    def test_empty_upload_zone_is_reused_across_tool_switches(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            self.root.update()
+            drop_zone = app.upload_body.winfo_children()[0]
+
+            app._select_tool("insurance_ledger")
+            self.root.update()
+
+            self.assertIs(app.upload_body.winfo_children()[0], drop_zone)
+            text_items = [
+                drop_zone.itemcget(item_id, "text")
+                for item_id in drop_zone.find_all()
+                if drop_zone.type(item_id) == "text"
+            ]
+            self.assertIn("选择保单清单、压缩包或文件夹", text_items)
+
+            app._select_tool("material_collector")
+            self.root.update()
+
+            self.assertIs(app.upload_body.winfo_children()[0], drop_zone)
+            text_items = [
+                drop_zone.itemcget(item_id, "text")
+                for item_id in drop_zone.find_all()
+                if drop_zone.type(item_id) == "text"
+            ]
+            self.assertIn("点击浏览文件夹路径", text_items)
+
+            folder_command = Mock()
+            app._input_folder_cmd = folder_command
+            app._refresh_upload_card()
+            self.root.update()
+            folder_link = next(
+                item_id
+                for item_id in drop_zone.find_all()
+                if drop_zone.type(item_id) == "text"
+                and drop_zone.itemcget(item_id, "text") == "点击浏览文件夹路径"
+            )
+            x1, y1, x2, y2 = drop_zone.bbox(folder_link)
+            drop_zone.event_generate(
+                "<Button-1>",
+                x=(x1 + x2) // 2,
+                y=(y1 + y2) // 2,
+            )
+            self.root.update()
+            folder_command.assert_called_once_with()
+        finally:
+            if app is not None:
+                app.destroy()
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+    def test_duplicate_configure_events_use_cached_dimensions(self) -> None:
+        button = CodexButton(self.root, text="测试按钮", variant="primary")
+        sidebar = SidebarItem(self.root, text="社保明细", icon_id="social_security")
+        card = RoundedCard(self.root, padding=(20, 16, 20, 18))
+        self.root.update_idletasks()
+
+        button_event = SimpleNamespace(
+            width=button._last_draw_key[0],
+            height=button._last_draw_key[1],
+        )
+        sidebar_event = SimpleNamespace(
+            width=sidebar._last_draw_key[0],
+            height=sidebar._last_draw_key[1],
+        )
+        card_size = (card.winfo_width(), card.winfo_height())
+        card._last_self_event_size = card_size
+        card_event = SimpleNamespace(
+            widget=card,
+            width=card_size[0],
+            height=card_size[1],
+        )
+
+        with patch.object(button, "winfo_width", side_effect=AssertionError("button geometry query")):
+            button._on_configure(button_event)
+        with patch.object(sidebar, "winfo_width", side_effect=AssertionError("sidebar geometry query")):
+            sidebar._on_configure(sidebar_event)
+        with patch.object(card, "winfo_width", side_effect=AssertionError("card geometry query")):
+            card._sync(card_event)
+
+        button.destroy()
+        sidebar.destroy()
+        card.destroy()
 
     def test_paint_codex_badge_icon(self) -> None:
         from hr_toolkit.gui.widgets import _paint_codex_badge_icon

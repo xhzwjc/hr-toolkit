@@ -124,6 +124,7 @@ class CodexButton(Canvas):
         self._text_id: int | None = None
         display_text = self._display_text()
         initial_width = self._px(width) if width is not None else self._measure_width(display_text, icon, self._min_width)
+        self._requested_width = initial_width
         self._canvas_bg = self._resolve_parent_bg(master)
         super().__init__(
             master,
@@ -142,8 +143,12 @@ class CodexButton(Canvas):
         self._redraw()
 
     def _on_configure(self, _event=None) -> None:
-        w = max(self.winfo_width(), int(float(self.cget("width"))))
-        h = max(self.winfo_height(), self._height)
+        if _event is not None:
+            w = max(int(getattr(_event, "width", 1)), 1)
+            h = max(int(getattr(_event, "height", self._height)), 1)
+        else:
+            w = max(self.winfo_width(), self._requested_width)
+            h = max(self.winfo_height(), self._height)
         if self._last_draw_key is None or (w, h) != (self._last_draw_key[0], self._last_draw_key[1]):
             self._redraw()
 
@@ -163,6 +168,11 @@ class CodexButton(Canvas):
             self._icon = kwargs.pop("icon")
         if "variant" in kwargs:
             self._variant = kwargs.pop("variant")
+        if "width" in kwargs:
+            try:
+                self._requested_width = max(1, int(float(kwargs["width"])))
+            except (TypeError, ValueError):
+                pass
         if kwargs:
             super().configure(**kwargs)
         self._redraw()
@@ -484,8 +494,12 @@ class SidebarItem(Canvas):
         self._redraw()
 
     def _on_configure(self, _event=None) -> None:
-        w = max(self.winfo_width(), 1)
-        h = max(self.winfo_height(), 1)
+        if _event is not None:
+            w = max(int(getattr(_event, "width", 1)), 1)
+            h = max(int(getattr(_event, "height", 1)), 1)
+        else:
+            w = max(self.winfo_width(), 1)
+            h = max(self.winfo_height(), 1)
         if self._last_draw_key is None or (w, h) != (self._last_draw_key[0], self._last_draw_key[1]):
             self._redraw()
 
@@ -622,6 +636,8 @@ class RoundedCard(Canvas):
         self._shadow_poly: int | None = None
         self._card_poly: int | None = None
         self._syncing = False
+        self._last_self_event_size = (0, 0)
+        self._last_inner_event_size = (0, 0)
         self.set_padding(padding, sync=False)
         self.inner.bind("<Configure>", self._sync)
         self.bind("<Configure>", self._sync)
@@ -635,6 +651,19 @@ class RoundedCard(Canvas):
     def _sync(self, _event=None) -> None:
         if self._syncing:
             return
+        if _event is not None:
+            event_size = (
+                max(int(getattr(_event, "width", 1)), 1),
+                max(int(getattr(_event, "height", 1)), 1),
+            )
+            if getattr(_event, "widget", None) is self.inner:
+                if event_size == self._last_inner_event_size:
+                    return
+                self._last_inner_event_size = event_size
+            else:
+                if event_size == self._last_self_event_size:
+                    return
+                self._last_self_event_size = event_size
         self._syncing = True
         try:
             left, top, right, bottom = self._pads

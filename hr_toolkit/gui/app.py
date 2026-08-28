@@ -179,6 +179,7 @@ from .widgets import (
     CodexButton,
     RoundedCard,
     SidebarItem,
+    _tessellate_round_rect,
     _paint_tool_icon,
     _paint_codex_badge_icon,
     _get_default_font_family,
@@ -219,6 +220,8 @@ EXCEL_ARCHIVE_FORMAT_TEXT = f".xlsx、.xls 以及 {ARCHIVE_FORMAT_DESCRIPTION} �
 WORKSPACE_UI_SETTINGS_VERSION = 2
 UPLOAD_DIRECTORY_COUNT_LIMIT = 200
 LOG_FLUSH_BATCH_SIZE = 200
+WINDOW_RESIZE_FRAME_MS = 16
+WINDOW_RESIZE_SETTLE_MS = 100
 
 
 def _is_excel_or_archive_file(path: Path) -> bool:
@@ -616,8 +619,13 @@ class HRToolkitApp:
             runlog.log_exception("历史资料库初始化失败", exc)
 
         self._is_alive = True
+        self._window_resize_optimizations_ready = False
         self._poll_update_timer = None
         self._startup_check_timer = None
+        self._title_wrap_job = None
+        self._form_resize_job = None
+        self._form_post_layout_sync_job = None
+        self._workspace_area_resize_job = None
 
         try:
             tk_scaling = float(self.root.tk.call("tk", "scaling"))
@@ -963,6 +971,9 @@ class HRToolkitApp:
 
     def _dismiss_startup_loading_screen(self) -> None:
         """Dismiss the startup loading overlay after all initial UI rendering has settled."""
+        self._window_resize_optimizations_ready = bool(
+            getattr(self, "_is_alive", True)
+        )
         overlay = getattr(self, "_loading_overlay", None)
         if overlay is None:
             return
@@ -1445,10 +1456,23 @@ class HRToolkitApp:
 
         left_content = ttk.Frame(left_canvas, padding=self._pad(12, 16, 12, 14), style="Sidebar.TFrame")
         left_canvas_window = left_canvas.create_window((0, 0), window=left_content, anchor="nw")
+        left_sync_event_sizes: dict[object, tuple[int, int]] = {}
 
         def _sync_left_canvas(_event=None) -> None:
-            canvas_width = max(left_canvas.winfo_width(), 1)
-            canvas_height = max(left_canvas.winfo_height(), 1)
+            if _event is not None:
+                event_size = (
+                    max(int(getattr(_event, "width", 1)), 1),
+                    max(int(getattr(_event, "height", 1)), 1),
+                )
+                event_widget = getattr(_event, "widget", None)
+                if left_sync_event_sizes.get(event_widget) == event_size:
+                    return
+                left_sync_event_sizes[event_widget] = event_size
+            if _event is not None and getattr(_event, "widget", None) is left_canvas:
+                canvas_width, canvas_height = event_size
+            else:
+                canvas_width = max(left_canvas.winfo_width(), 1)
+                canvas_height = max(left_canvas.winfo_height(), 1)
             content_height = left_content.winfo_reqheight()
             window_height = max(content_height, canvas_height)
             left_canvas.itemconfig(left_canvas_window, width=canvas_width, height=window_height)
@@ -1733,65 +1757,19 @@ class HRToolkitApp:
         self._right_canvas_sync_pending = False
         self._right_canvas_sync_job = None
 
-        def _split_dimension_values(value) -> list[int]:
-            try:
-                if isinstance(value, tuple):
-                    parts = value
-                else:
-                    parts = self.root.tk.splitlist(value)
-                return [int(round(float(part))) for part in parts]
-            except Exception:
-                try:
-                    return [int(round(float(value)))]
-                except Exception:
-                    return []
-
-        def _frame_vertical_padding_sum(value) -> int:
-            parts = _split_dimension_values(value)
-            if not parts:
-                return 0
-            if len(parts) == 1:
-                return parts[0] * 2
-            if len(parts) == 2:
-                return parts[1] * 2
-            if len(parts) >= 4:
-                return parts[1] + parts[3]
-            return parts[1] * 2
-
-        def _pack_vertical_padding_sum(value) -> int:
-            parts = _split_dimension_values(value)
-            if not parts:
-                return 0
-            if len(parts) == 1:
-                return parts[0] * 2
-            return parts[0] + parts[1]
-
         def _right_frame_natural_height() -> int:
-            try:
-                height = _frame_vertical_padding_sum(right_frame.cget("padding"))
-            except Exception:
-                height = 0
-            children = []
-            try:
-                children = list(right_frame.pack_slaves())
-            except Exception:
-                pass
-            if not children:
-                return right_frame.winfo_reqheight()
-            for child in children:
-                try:
-                    pack_info = child.pack_info()
-                except Exception:
-                    continue
-                try:
-                    height += child.winfo_reqheight()
-                except Exception:
-                    height += child.winfo_height()
-                height += _pack_vertical_padding_sum(pack_info.get("pady", 0))
-            return height
+            # Tk already keeps the frame's requested (natural) height separate
+            # from the height assigned by the canvas window.  Reading that one
+            # value avoids walking every top-level child on every resize frame.
+            return right_frame.winfo_reqheight()
 
         self._last_canvas_window_size = (0, 0)
         self._last_scroll_region = (0, 0, 0, 0)
+        self._right_canvas_sync_running = False
+        self._right_canvas_sync_dirty = False
+        self._right_canvas_sync_is_resize = False
+        right_sync_event_sizes: dict[object, tuple[int, int]] = {}
+        last_canvas_resize_at = 0.0
 
         def _sync_right_canvas_window(_event=None):
             canvas_width = self._right_canvas.winfo_width()
@@ -1818,24 +1796,102 @@ class HRToolkitApp:
                 self._right_canvas.yview_moveto(0)
 
         def _run_right_canvas_sync():
-            self._right_canvas_sync_pending = False
             self._right_canvas_sync_job = None
-            _sync_right_canvas_window()
+            self._right_canvas_sync_is_resize = False
+            self._right_canvas_sync_running = True
+            self._right_canvas_sync_dirty = False
+            try:
+                _sync_right_canvas_window()
+            finally:
+                self._right_canvas_sync_running = False
+                self._right_canvas_sync_pending = False
+            if self._right_canvas_sync_dirty:
+                # Updating the embedded window can itself emit Configure.
+                # Treat that as settling work, otherwise it forms an idle-time
+                # feedback loop that reflows on every native resize message.
+                resize_active = (
+                    time.monotonic() - last_canvas_resize_at
+                    < WINDOW_RESIZE_SETTLE_MS / 1000.0
+                )
+                _queue_right_canvas_sync(resize_event=resize_active)
 
-        def _queue_right_canvas_sync() -> None:
-            if self._right_canvas_sync_pending:
+        def _queue_right_canvas_sync(*, resize_event: bool = False) -> None:
+            if self._right_canvas_sync_running:
+                self._right_canvas_sync_dirty = True
                 return
+            if self._right_canvas_sync_pending:
+                if resize_event and self._right_canvas_sync_is_resize:
+                    try:
+                        self.root.after_cancel(self._right_canvas_sync_job)
+                    except Exception:
+                        pass
+                elif not resize_event and self._right_canvas_sync_is_resize:
+                    try:
+                        self.root.after_cancel(self._right_canvas_sync_job)
+                    except Exception:
+                        pass
+                else:
+                    return
             self._right_canvas_sync_pending = True
-            # Configure events from all child widgets are collapsed into one
-            # geometry pass after the current layout queue has drained.
-            self._right_canvas_sync_job = self.root.after_idle(_run_right_canvas_sync)
+            self._right_canvas_sync_is_resize = resize_event
+            # Keep the complex child layout stable while the native window
+            # border is moving. The canvas viewport itself follows the mouse;
+            # its embedded form reflows once, immediately after the drag has
+            # paused. This avoids synchronous GDI relayout on every WM_SIZE.
+            if resize_event:
+                self._right_canvas_sync_job = self.root.after(
+                    WINDOW_RESIZE_SETTLE_MS,
+                    _run_right_canvas_sync,
+                )
+            else:
+                self._right_canvas_sync_job = self.root.after_idle(_run_right_canvas_sync)
 
         def _schedule_right_canvas_sync(_event=None):
+            if not getattr(self, "_is_alive", True):
+                return
             _queue_right_canvas_sync()
 
+        def _resize_event_changed(_event) -> bool:
+            if _event is not None:
+                event_size = (
+                    max(int(getattr(_event, "width", 1)), 1),
+                    max(int(getattr(_event, "height", 1)), 1),
+                )
+                event_widget = getattr(_event, "widget", None)
+                if right_sync_event_sizes.get(event_widget) == event_size:
+                    return False
+                right_sync_event_sizes[event_widget] = event_size
+            return True
+
+        def _schedule_right_canvas_resize_sync(_event=None):
+            nonlocal last_canvas_resize_at
+            if not getattr(self, "_is_alive", True):
+                return
+            if not _resize_event_changed(_event):
+                return
+            if not getattr(self, "_window_resize_optimizations_ready", False):
+                _queue_right_canvas_sync()
+                return
+            last_canvas_resize_at = time.monotonic()
+            _queue_right_canvas_sync(resize_event=True)
+
+        def _schedule_right_frame_sync(_event=None):
+            if not getattr(self, "_is_alive", True):
+                return
+            if not _resize_event_changed(_event):
+                return
+            if not getattr(self, "_window_resize_optimizations_ready", False):
+                _queue_right_canvas_sync()
+                return
+            resize_active = (
+                time.monotonic() - last_canvas_resize_at
+                < WINDOW_RESIZE_SETTLE_MS / 1000.0
+            )
+            _queue_right_canvas_sync(resize_event=resize_active)
+
         self._sync_right_canvas_window = _schedule_right_canvas_sync
-        right_frame.bind("<Configure>", _schedule_right_canvas_sync)
-        self._right_canvas.bind("<Configure>", _schedule_right_canvas_sync)
+        right_frame.bind("<Configure>", _schedule_right_frame_sync)
+        self._right_canvas.bind("<Configure>", _schedule_right_canvas_resize_sync)
 
         SCROLL_TAG = "RightPanelScroll"
 
@@ -1965,6 +2021,7 @@ class HRToolkitApp:
         self.subtitle_label.pack(anchor="w", fill="x", pady=self._pad(8, 22))
 
         self._last_text_wraps = None
+        self._last_header_layout = None
 
         def _update_text_wraps(_event=None) -> None:
             title_row_width = title_row.winfo_width()
@@ -1979,22 +2036,73 @@ class HRToolkitApp:
 
             title_wrap = max(1, title_wrap)
             subtitle_wrap = max(1, title_row_width - self._px(8))
-            wraps_key = (tight_header, title_wrap, subtitle_wrap)
+            if tight_header != self._last_header_layout:
+                self._last_header_layout = tight_header
+                if tight_header:
+                    title_actions.grid_configure(
+                        row=2,
+                        column=0,
+                        columnspan=2,
+                        rowspan=1,
+                        sticky="w",
+                        pady=self._pad(12, 0),
+                    )
+                else:
+                    title_actions.grid_configure(
+                        row=0,
+                        column=1,
+                        columnspan=1,
+                        rowspan=2,
+                        sticky="ne",
+                        pady=0,
+                    )
+
+            wraps_key = (title_wrap, subtitle_wrap)
             if wraps_key == self._last_text_wraps:
                 return
             self._last_text_wraps = wraps_key
 
-            if tight_header:
-                title_actions.grid_configure(row=2, column=0, columnspan=2, rowspan=1, sticky="w", pady=self._pad(12, 0))
-            else:
-                title_actions.grid_configure(row=0, column=1, columnspan=1, rowspan=2, sticky="ne", pady=0)
-
             self.title_label.configure(wraplength=title_wrap)
             self.subtitle_label.configure(wraplength=subtitle_wrap)
 
-        self._update_title_text_wraps = _update_text_wraps
-        title_row.bind("<Configure>", _update_text_wraps, add="+")
-        right_frame.bind("<Configure>", _update_text_wraps, add="+")
+        def _run_title_text_wraps() -> None:
+            self._title_wrap_job = None
+            if getattr(self, "_is_alive", True):
+                _update_text_wraps()
+
+        def _schedule_title_text_wraps(_event=None) -> None:
+            if not getattr(self, "_is_alive", True):
+                return
+            if _event is not None:
+                event_size = (
+                    max(int(getattr(_event, "width", 1)), 1),
+                    max(int(getattr(_event, "height", 1)), 1),
+                )
+                event_widget = getattr(_event, "widget", None)
+                event_sizes = getattr(self, "_title_wrap_event_sizes", None)
+                if event_sizes is None:
+                    event_sizes = self._title_wrap_event_sizes = {}
+                if event_sizes.get(event_widget) == event_size:
+                    return
+                event_sizes[event_widget] = event_size
+            if self._title_wrap_job is not None:
+                return
+            try:
+                if getattr(self, "_window_resize_optimizations_ready", False):
+                    self._title_wrap_job = self.root.after(
+                        WINDOW_RESIZE_FRAME_MS,
+                        _run_title_text_wraps,
+                    )
+                else:
+                    self._title_wrap_job = self.root.after_idle(
+                        _run_title_text_wraps
+                    )
+            except Exception:
+                self._title_wrap_job = None
+
+        self._update_title_text_wraps = _schedule_title_text_wraps
+        title_row.bind("<Configure>", _schedule_title_text_wraps, add="+")
+        right_frame.bind("<Configure>", _schedule_title_text_wraps, add="+")
         self.root.after_idle(_update_text_wraps)
 
         self.change_tabs = ttk.Notebook(right_frame, style="Change.TNotebook")
@@ -2018,7 +2126,13 @@ class HRToolkitApp:
             min_width=56,
             height=24,
         )
-        self.upload_body = ttk.Frame(self.upload_card.inner, style="InputWrap.TFrame")
+        self._upload_body_height = self._px(118)
+        self.upload_body = ttk.Frame(
+            self.upload_card.inner,
+            height=self._upload_body_height,
+            style="InputWrap.TFrame",
+        )
+        self.upload_body.pack_propagate(False)
         self.upload_body.pack(fill="x")
 
         self.form_card = RoundedCard(right_frame, padding=self._responsive_form_padding_units())
@@ -2724,15 +2838,12 @@ class HRToolkitApp:
                 base_left, pad_top, base_right, pad_bottom = content_padding
                 extra = max(0, (canvas_width - base_left - base_right - self._px(820)) // 2)
                 content_padding = (base_left + extra, pad_top, base_right + extra, pad_bottom)
-            layout_changed = False
             if getattr(self, "_right_content_padding", None) != content_padding:
                 self._right_content_padding = content_padding
                 right_frame.configure(padding=content_padding)
-                layout_changed = True
             if getattr(self, "_form_padding", None) != form_padding:
                 self._form_padding = form_padding
                 self.form_card.set_padding(form_padding)
-                layout_changed = True
             if canvas_width > 1:
                 usable_width = (
                     canvas_width
@@ -2744,22 +2855,84 @@ class HRToolkitApp:
             else:
                 layout_mode = LAYOUT_MODE_WIDE
             compact = layout_mode != LAYOUT_MODE_WIDE
+            structure_changed = False
             if layout_mode != self._form_layout_mode:
                 self._form_layout_mode = layout_mode
-                layout_changed = True
+                structure_changed = True
             if compact != self._form_compact_layout:
                 self._form_compact_layout = compact
-                layout_changed = True
-            if layout_changed:
+                structure_changed = True
+            # Padding changes are handled by Tk's geometry manager. Repacking
+            # every field is only necessary when a responsive breakpoint is
+            # crossed; doing it for each pixel was the dominant resize stall.
+            if structure_changed:
                 _apply_form_layout()
+
+        def _run_form_responsive_layout() -> None:
+            self._form_resize_job = None
+            if getattr(self, "_is_alive", True):
+                _update_form_responsive_layout()
+                # The geometry manager publishes the new requested height on
+                # a later idle turn. Sync once more on the next frame so a
+                # breakpoint/padding change cannot leave the scroll region at
+                # the previous height after the user releases the border.
+                if not getattr(self, "_window_resize_optimizations_ready", False):
+                    self.root.after_idle(self._sync_right_canvas_window)
+                    return
+                post_layout_job = getattr(self, "_form_post_layout_sync_job", None)
+                if post_layout_job is not None:
+                    try:
+                        self.root.after_cancel(post_layout_job)
+                    except Exception:
+                        pass
+                self._form_post_layout_sync_job = self.root.after(
+                    WINDOW_RESIZE_FRAME_MS,
+                    _run_post_layout_canvas_sync,
+                )
+
+        def _run_post_layout_canvas_sync() -> None:
+            self._form_post_layout_sync_job = None
+            if getattr(self, "_is_alive", True):
+                self._sync_right_canvas_window()
+
+        def _schedule_form_responsive_layout(_event=None) -> None:
+            if not getattr(self, "_is_alive", True):
+                return
+            if _event is not None:
+                event_size = (
+                    max(int(getattr(_event, "width", 1)), 1),
+                    max(int(getattr(_event, "height", 1)), 1),
+                )
+                if getattr(self, "_last_form_resize_event_size", None) == event_size:
+                    return
+                self._last_form_resize_event_size = event_size
+            if self._form_resize_job is not None:
+                try:
+                    self.root.after_cancel(self._form_resize_job)
+                except Exception:
+                    pass
+                self._form_resize_job = None
+            try:
+                if getattr(self, "_window_resize_optimizations_ready", False):
+                    self._form_resize_job = self.root.after(
+                        WINDOW_RESIZE_SETTLE_MS,
+                        _run_form_responsive_layout,
+                    )
+                else:
+                    self._form_resize_job = self.root.after_idle(
+                        _run_form_responsive_layout
+                    )
+            except Exception:
+                self._form_resize_job = None
 
         self._apply_form_layout = _apply_form_layout
         self._update_form_responsive_layout = _update_form_responsive_layout
+        self._flush_form_responsive_layout = _run_form_responsive_layout
         self._show_picker_button = lambda button: _set_picker_button_visible(button, True)
         self._hide_picker_button = lambda button: _set_picker_button_visible(button, False)
         self._right_content_padding = self._responsive_content_padding()
         self._form_padding = self._responsive_form_padding_units()
-        self._right_canvas.bind("<Configure>", _update_form_responsive_layout, add="+")
+        self._right_canvas.bind("<Configure>", _schedule_form_responsive_layout, add="+")
         self.root.after_idle(_update_form_responsive_layout)
         self._update_change_tabs_visibility()
         self._update_change_picker_buttons()
@@ -3180,6 +3353,36 @@ class HRToolkitApp:
         self.root.after_idle(self._apply_workspace_panel_mode)
 
     def _on_workspace_area_resize(self, _event=None) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
+        if _event is not None:
+            event_size = (
+                max(int(getattr(_event, "width", 1)), 1),
+                max(int(getattr(_event, "height", 1)), 1),
+            )
+            if getattr(self, "_last_workspace_resize_event_size", None) == event_size:
+                return
+            self._last_workspace_resize_event_size = event_size
+            job = getattr(self, "_workspace_area_resize_job", None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+            try:
+                if getattr(self, "_window_resize_optimizations_ready", False):
+                    self._workspace_area_resize_job = self.root.after(
+                        WINDOW_RESIZE_SETTLE_MS,
+                        self._on_workspace_area_resize,
+                    )
+                else:
+                    self._workspace_area_resize_job = self.root.after_idle(
+                        self._on_workspace_area_resize
+                    )
+            except Exception:
+                self._workspace_area_resize_job = None
+            return
+        self._workspace_area_resize_job = None
         try:
             logical_width = self._workspace_main_area.winfo_width() / max(self.ui_scale, 1.0)
         except Exception:
@@ -3210,6 +3413,23 @@ class HRToolkitApp:
             "expanded" if expanded else "collapsed",
             drawer_width_units if small and expanded else 0,
         )
+        previous_mode_key = getattr(self, "_workspace_panel_mode_key", None)
+        if previous_mode_key == mode_key:
+            return
+        if (
+            previous_mode_key is not None
+            and previous_mode_key[:2] == mode_key[:2] == ("place", "expanded")
+        ):
+            # A narrow-screen drawer only needs its width adjusted while the
+            # outer window is being dragged. Tearing down and repacking the
+            # complete workspace tree for every pixel causes visible stalls.
+            self._workspace_panel_mode_key = mode_key
+            self._workspace_panel.configure(width=self._px(drawer_width_units))
+            self._workspace_panel.place_configure(width=self._px(drawer_width_units))
+            self.root.after_idle(self._update_workspace_text_wraps)
+            return
+        self._workspace_panel_mode_key = mode_key
+
         title_button = getattr(self, "workspace_title_button", None)
         if title_button is not None:
             if small:
@@ -3224,11 +3444,6 @@ class HRToolkitApp:
             if hasattr(self, "_update_title_text_wraps"):
                 self.root.after_idle(self._update_title_text_wraps)
 
-        previous_mode_key = getattr(self, "_workspace_panel_mode_key", None)
-        if previous_mode_key == mode_key:
-            self.root.after_idle(self._update_workspace_text_wraps)
-            return
-        self._workspace_panel_mode_key = mode_key
         was_expanded = bool(previous_mode_key and previous_mode_key[1] == "expanded")
 
         self._workspace_panel.place_forget()
@@ -3337,6 +3552,11 @@ class HRToolkitApp:
         if not hasattr(self, "_workspace_panel"):
             return
         width = max(self._workspace_panel.winfo_width() - self._px(36), self._px(190))
+        sidebar_width = max(self._responsive_sidebar_width() - self._px(48), self._px(120))
+        wraps_key = (width, sidebar_width)
+        if getattr(self, "_last_workspace_text_wraps", None) == wraps_key:
+            return
+        self._last_workspace_text_wraps = wraps_key
         for label in (
             getattr(self, "workspace_project_name_label", None),
             getattr(self, "workspace_project_path_label", None),
@@ -3344,7 +3564,6 @@ class HRToolkitApp:
         ):
             if label is not None:
                 label.configure(wraplength=width)
-        sidebar_width = max(self._responsive_sidebar_width() - self._px(48), self._px(120))
         if hasattr(self, "sidebar_project_name_label"):
             self.sidebar_project_name_label.configure(wraplength=sidebar_width)
         if hasattr(self, "sidebar_project_path_label"):
@@ -7400,6 +7619,23 @@ class HRToolkitApp:
         self.rename_replacement_name.set("")
         if not self.output_dir_user_selected:
             self.output_dir.set(str(default_output_parent_dir(self.current_tool)))
+        # If a tool is selected before a just-finished native resize debounce
+        # fires, flush only that pending geometry state. Normal tool switches
+        # should not pay for an extra responsive-layout pass.
+        if getattr(self, "_form_resize_job", None) is not None:
+            try:
+                self.root.after_cancel(self._form_resize_job)
+            except Exception:
+                pass
+            self._form_resize_job = None
+            self._flush_form_responsive_layout()
+        if getattr(self, "_workspace_area_resize_job", None) is not None:
+            try:
+                self.root.after_cancel(self._workspace_area_resize_job)
+            except Exception:
+                pass
+            self._workspace_area_resize_job = None
+            self._on_workspace_area_resize()
         self._set_tool_texts()
         self._update_project_output_controls()
         self._clear_log()
@@ -7861,15 +8097,60 @@ class HRToolkitApp:
     def _refresh_upload_card(self) -> None:
         if not hasattr(self, "upload_body"):
             return
-        for child in self.upload_body.winfo_children():
-            child.destroy()
         items = self._upload_items()
         if items and self._input_allow_multi:
             self.upload_add_button.pack(side=RIGHT)
         else:
             self.upload_add_button.pack_forget()
+        rows = None
+        upload_render_key = None
         if items:
-            self._render_upload_items(items)
+            rows = [(path, *self._upload_item_meta(path)) for path in items]
+            upload_render_key = tuple(rows)
+            upload_canvas = getattr(self, "_upload_items_canvas", None)
+            try:
+                reusable_upload_canvas = (
+                    upload_render_key
+                    == getattr(self, "_upload_items_render_key", None)
+                    and upload_canvas is not None
+                    and upload_canvas.winfo_exists()
+                    and upload_canvas.master is self.upload_body
+                    and self.upload_body.winfo_children() == [upload_canvas]
+                )
+            except Exception:
+                reusable_upload_canvas = False
+            if reusable_upload_canvas:
+                if hasattr(self, "_apply_content_scroll_tag"):
+                    self._apply_content_scroll_tag(self.upload_body)
+                if hasattr(self, "_sync_right_canvas_window"):
+                    self.root.after_idle(self._sync_right_canvas_window)
+                return
+        drop_zone = getattr(self, "_upload_drop_zone", None)
+        if not items and drop_zone is not None:
+            try:
+                reusable_drop_zone = (
+                    drop_zone.winfo_exists()
+                    and drop_zone.master is self.upload_body
+                    and self.upload_body.winfo_children() == [drop_zone]
+                )
+            except Exception:
+                reusable_drop_zone = False
+            if reusable_drop_zone:
+                self._refresh_upload_drop_zone_content()
+                if hasattr(self, "_apply_content_scroll_tag"):
+                    self._apply_content_scroll_tag(self.upload_body)
+                if hasattr(self, "_sync_right_canvas_window"):
+                    self.root.after_idle(self._sync_right_canvas_window)
+                return
+        for child in self.upload_body.winfo_children():
+            child.destroy()
+        self._upload_drop_zone = None
+        self._refresh_upload_drop_zone_content = None
+        self._upload_items_canvas = None
+        self._upload_items_render_key = None
+        if items:
+            self._upload_items_render_key = upload_render_key
+            self._render_upload_items(items, rows=rows)
         else:
             self._render_upload_drop_zone()
         if hasattr(self, "_apply_content_scroll_tag"):
@@ -7877,25 +8158,37 @@ class HRToolkitApp:
         if hasattr(self, "_sync_right_canvas_window"):
             self.root.after_idle(self._sync_right_canvas_window)
 
-    def _render_upload_items(self, items: list[Path]) -> None:
+    def _render_upload_items(
+        self,
+        items: list[Path],
+        *,
+        rows: list[tuple[Path, str, str, str, str]] | None = None,
+    ) -> None:
         """Render all selected files on one canvas to minimize GDI surfaces."""
 
         row_height = self._px(44)
         row_gap = self._px(8)
         row_step = row_height + row_gap
         total_height = len(items) * row_height + max(0, len(items) - 1) * row_gap
-        rows = [(path, *self._upload_item_meta(path)) for path in items]
+        if rows is None:
+            rows = [(path, *self._upload_item_meta(path)) for path in items]
+        if total_height != self._upload_body_height:
+            self._upload_body_height = total_height
+            self.upload_body.configure(height=total_height)
+        initial_width = max(self.upload_body.winfo_width(), 1)
         chip = Canvas(
             self.upload_body,
+            width=initial_width,
             height=total_height,
             bg=COLOR_SURFACE,
             highlightthickness=0,
             bd=0,
         )
-        chip.pack(fill="x")
+        chip.place(x=0, y=0, relwidth=1, height=total_height)
         name_font = (self.base_font[0], _font_size(10), "bold")
         last_width = 0
         hovered_index = -1
+        row_items: list[dict[str, object]] = []
 
         def _row_index_at(y: int) -> int:
             if y < 0:
@@ -7913,22 +8206,62 @@ class HRToolkitApp:
 
         def redraw(_event=None) -> None:
             nonlocal last_width
-            width = chip.winfo_width()
+            width = (
+                int(getattr(_event, "width", 0))
+                if _event is not None
+                else chip.winfo_width()
+            )
             if width <= 1 or width == last_width:
                 return
             last_width = width
-            chip.delete("all")
+            if not row_items:
+                _create_row_items(width)
+                return
+            for index, (path, _badge_text, _badge_bg, _badge_fg, _detail) in enumerate(rows):
+                items = row_items[index]
+                row_top = index * row_step
+                row_middle = row_top + row_height / 2
+                chip.coords(
+                    items["background"],
+                    *_tessellate_round_rect(
+                        self._pxf(0.5),
+                        row_top + self._pxf(0.5),
+                        width - self._pxf(0.5),
+                        row_top + row_height - self._pxf(0.5),
+                        self._pxf(10),
+                    ),
+                )
+                close_x = width - self._pxf(20)
+                chip.coords(items["close"], close_x, row_middle)
+                right_edge = close_x - self._pxf(16)
+                meta_item = items["meta"]
+                if meta_item is not None:
+                    chip.coords(meta_item, right_edge, row_middle)
+                    meta_bbox = chip.bbox(meta_item)
+                    if meta_bbox:
+                        right_edge = meta_bbox[0] - self._pxf(12)
+                display_name = self._ellipsize(
+                    path.name or str(path),
+                    name_font,
+                    right_edge - float(items["name_x"]),
+                )
+                if display_name != items["display_name"]:
+                    items["display_name"] = display_name
+                    chip.itemconfigure(items["name"], text=display_name)
+
+        def _create_row_items(width: int) -> None:
             for index, (path, badge_text, badge_bg, badge_fg, detail) in enumerate(rows):
                 row_top = index * row_step
                 row_middle = row_top + row_height / 2
                 close_tag = f"chip_close_{index}"
-                CodexButton._draw_round_rect(
-                    chip,
-                    self._pxf(0.5),
-                    row_top + self._pxf(0.5),
-                    width - self._pxf(0.5),
-                    row_top + row_height - self._pxf(0.5),
-                    self._pxf(10),
+                background = chip.create_polygon(
+                    *_tessellate_round_rect(
+                        self._pxf(0.5),
+                        row_top + self._pxf(0.5),
+                        width - self._pxf(0.5),
+                        row_top + row_height - self._pxf(0.5),
+                        self._pxf(10),
+                    ),
                     fill=COLOR_SURFACE_ALT,
                     outline=COLOR_BORDER_FAINT,
                     width=max(1.0, self._pxf(1)),
@@ -7936,13 +8269,14 @@ class HRToolkitApp:
                 badge_x = self._pxf(13)
                 badge_size = self._pxf(26)
                 badge_y = row_top + (row_height - badge_size) / 2
-                CodexButton._draw_round_rect(
-                    chip,
-                    badge_x,
-                    badge_y,
-                    badge_x + badge_size,
-                    badge_y + badge_size,
-                    self._pxf(7),
+                chip.create_polygon(
+                    *_tessellate_round_rect(
+                        badge_x,
+                        badge_y,
+                        badge_x + badge_size,
+                        badge_y + badge_size,
+                        self._pxf(7),
+                    ),
                     fill=badge_bg,
                     outline="",
                 )
@@ -7965,7 +8299,7 @@ class HRToolkitApp:
                         max(1.0, self._pxf(1.3)),
                     )
                 close_x = width - self._pxf(20)
-                chip.create_text(
+                close_item = chip.create_text(
                     close_x,
                     row_middle,
                     text="✕",
@@ -7974,6 +8308,7 @@ class HRToolkitApp:
                     tags=(close_tag, "chip_close"),
                 )
                 right_edge = close_x - self._pxf(16)
+                meta_item = None
                 if detail:
                     meta_item = chip.create_text(
                         right_edge,
@@ -7992,13 +8327,23 @@ class HRToolkitApp:
                     name_font,
                     right_edge - name_x,
                 )
-                chip.create_text(
+                name_item = chip.create_text(
                     name_x,
                     row_middle,
                     text=display_name,
                     fill=COLOR_TEXT,
                     font=name_font,
                     anchor="w",
+                )
+                row_items.append(
+                    {
+                        "background": background,
+                        "close": close_item,
+                        "meta": meta_item,
+                        "name": name_item,
+                        "name_x": name_x,
+                        "display_name": display_name,
+                    }
                 )
                 chip.tag_bind(
                     close_tag,
@@ -8056,52 +8401,113 @@ class HRToolkitApp:
         chip.bind("<Enter>", _update_hover, add="+")
         chip.bind("<Motion>", _update_hover, add="+")
         chip.bind("<Leave>", _leave_upload_list, add="+")
+        self._upload_items_canvas = chip
         self.root.after_idle(redraw)
 
     def _render_upload_drop_zone(self) -> None:
-        zone = Canvas(self.upload_body, height=self._px(118), bg=COLOR_SURFACE, highlightthickness=0, bd=0)
-        zone.pack(fill="x")
+        zone_height = self._px(118)
+        if zone_height != self._upload_body_height:
+            self._upload_body_height = zone_height
+            self.upload_body.configure(height=zone_height)
+        initial_width = max(self.upload_body.winfo_width(), 1)
+        zone = Canvas(
+            self.upload_body,
+            width=initial_width,
+            height=zone_height,
+            bg=COLOR_SURFACE,
+            highlightthickness=0,
+            bd=0,
+        )
+        zone.place(x=0, y=0, relwidth=1, height=zone_height)
         last_zone_size = (0, 0)
+        last_center_x = 0.0
+        background_item = None
+        border_lines: list[int] = []
+        border_arcs: list[int] = []
 
         def redraw(_event=None) -> None:
-            nonlocal last_zone_size
-            width = max(zone.winfo_width(), 1)
-            height = max(zone.winfo_height(), 1)
+            nonlocal last_zone_size, last_center_x, background_item
+            if _event is not None:
+                width = max(int(getattr(_event, "width", 1)), 1)
+                height = max(int(getattr(_event, "height", 1)), 1)
+            else:
+                width = max(zone.winfo_width(), 1)
+                height = max(zone.winfo_height(), 1)
             if (width, height) == last_zone_size:
                 return
             last_zone_size = (width, height)
-            zone.delete("all")
             x1, y1 = self._pxf(1), self._pxf(1)
             x2, y2 = width - self._pxf(1), height - self._pxf(1)
             radius = self._pxf(12)
-            self._draw_round_rect(zone, x1, y1, x2, y2, radius, fill=COLOR_SURFACE, outline="")
             # 虚线圆角边框：平滑多边形加 dash 会在角上留下墨点，改用直线 + 圆弧拼接
             dash = (5, 4)
             border = {"fill": COLOR_DROP_BORDER, "width": max(1.0, self._pxf(1.5)), "dash": dash}
             arc = {"outline": COLOR_DROP_BORDER, "width": max(1.0, self._pxf(1.5)), "dash": dash, "style": "arc"}
-            zone.create_line(x1 + radius, y1, x2 - radius, y1, **border)
-            zone.create_line(x2, y1 + radius, x2, y2 - radius, **border)
-            zone.create_line(x2 - radius, y2, x1 + radius, y2, **border)
-            zone.create_line(x1, y2 - radius, x1, y1 + radius, **border)
-            zone.create_arc(x1, y1, x1 + 2 * radius, y1 + 2 * radius, start=90, extent=90, **arc)
-            zone.create_arc(x2 - 2 * radius, y1, x2, y1 + 2 * radius, start=0, extent=90, **arc)
-            zone.create_arc(x2 - 2 * radius, y2 - 2 * radius, x2, y2, start=270, extent=90, **arc)
-            zone.create_arc(x1, y2 - 2 * radius, x1 + 2 * radius, y2, start=180, extent=90, **arc)
             center_x = width / 2
-            icon_size = self._pxf(34)
-            icon_top = self._pxf(16)
-            self._draw_round_rect(
-                zone,
-                center_x - icon_size / 2,
-                icon_top,
-                center_x + icon_size / 2,
-                icon_top + icon_size,
-                self._pxf(10),
-                fill=COLOR_PRIMARY_SOFT,
+            if background_item is not None:
+                zone.coords(
+                    background_item,
+                    *_tessellate_round_rect(x1, y1, x2, y2, radius),
+                )
+                line_coords = (
+                    (x1 + radius, y1, x2 - radius, y1),
+                    (x2, y1 + radius, x2, y2 - radius),
+                    (x2 - radius, y2, x1 + radius, y2),
+                    (x1, y2 - radius, x1, y1 + radius),
+                )
+                arc_coords = (
+                    (x1, y1, x1 + 2 * radius, y1 + 2 * radius),
+                    (x2 - 2 * radius, y1, x2, y1 + 2 * radius),
+                    (x2 - 2 * radius, y2 - 2 * radius, x2, y2),
+                    (x1, y2 - 2 * radius, x1 + 2 * radius, y2),
+                )
+                for item_id, coordinates in zip(border_lines, line_coords):
+                    zone.coords(item_id, *coordinates)
+                for item_id, coordinates in zip(border_arcs, arc_coords):
+                    zone.coords(item_id, *coordinates)
+                delta_x = center_x - last_center_x
+                if delta_x:
+                    zone.move("drop_centered", delta_x, 0)
+                last_center_x = center_x
+                return
+
+            background_item = zone.create_polygon(
+                *_tessellate_round_rect(x1, y1, x2, y2, radius),
+                fill=COLOR_SURFACE,
                 outline="",
             )
+            border_lines.extend(
+                (
+                    zone.create_line(x1 + radius, y1, x2 - radius, y1, **border),
+                    zone.create_line(x2, y1 + radius, x2, y2 - radius, **border),
+                    zone.create_line(x2 - radius, y2, x1 + radius, y2, **border),
+                    zone.create_line(x1, y2 - radius, x1, y1 + radius, **border),
+                )
+            )
+            border_arcs.extend(
+                (
+                    zone.create_arc(x1, y1, x1 + 2 * radius, y1 + 2 * radius, start=90, extent=90, **arc),
+                    zone.create_arc(x2 - 2 * radius, y1, x2, y1 + 2 * radius, start=0, extent=90, **arc),
+                    zone.create_arc(x2 - 2 * radius, y2 - 2 * radius, x2, y2, start=270, extent=90, **arc),
+                    zone.create_arc(x1, y2 - 2 * radius, x1 + 2 * radius, y2, start=180, extent=90, **arc),
+                )
+            )
+            icon_size = self._pxf(34)
+            icon_top = self._pxf(16)
+            zone.create_polygon(
+                *_tessellate_round_rect(
+                    center_x - icon_size / 2,
+                    icon_top,
+                    center_x + icon_size / 2,
+                    icon_top + icon_size,
+                    self._pxf(10),
+                ),
+                fill=COLOR_PRIMARY_SOFT,
+                outline="",
+                tags=("drop_centered",),
+            )
             if self.current_tool in {"material_collector", "folder_rename"}:
-                _paint_tool_icon(
+                icon_items = _paint_tool_icon(
                     zone,
                     "folder_rename",
                     COLOR_PRIMARY,
@@ -8110,8 +8516,16 @@ class HRToolkitApp:
                     icon_size * 0.5,
                     max(1.0, self._pxf(1.6)),
                 )
+                for item_id in icon_items:
+                    zone.addtag_withtag("drop_centered", item_id)
             else:
-                arrow = {"fill": COLOR_PRIMARY, "width": max(1.0, self._pxf(1.6)), "capstyle": "round", "joinstyle": "round"}
+                arrow = {
+                    "fill": COLOR_PRIMARY,
+                    "width": max(1.0, self._pxf(1.6)),
+                    "capstyle": "round",
+                    "joinstyle": "round",
+                    "tags": ("drop_centered",),
+                }
                 icon_cx = center_x
                 icon_cy = icon_top + icon_size / 2
                 zone.create_line(icon_cx, icon_cy + self._pxf(5), icon_cx, icon_cy - self._pxf(7), **arrow)
@@ -8124,6 +8538,7 @@ class HRToolkitApp:
                 text=self._input_drop_title,
                 fill=COLOR_TEXT,
                 font=(self.base_font[0], _font_size(10), "bold"),
+                tags=("drop_centered",),
             )
             links = []
             if self._input_file_cmd is not None:
@@ -8150,13 +8565,32 @@ class HRToolkitApp:
                 total_width += segment_width
             cursor_x = center_x - total_width / 2
             for text, color, command, font, segment_width in measured:
-                item = zone.create_text(cursor_x, link_y, text=text, fill=color, font=font, anchor="w")
+                item = zone.create_text(
+                    cursor_x,
+                    link_y,
+                    text=text,
+                    fill=color,
+                    font=font,
+                    anchor="w",
+                    tags=("drop_centered",),
+                )
                 if command is not None:
                     zone.addtag_withtag("link", item)
                     zone.tag_bind(item, "<Button-1>", lambda _event, cmd=command: cmd())
                     zone.tag_bind(item, "<Enter>", lambda _event: zone.configure(cursor="hand2"))
                     zone.tag_bind(item, "<Leave>", lambda _event: zone.configure(cursor=""))
                 cursor_x += segment_width
+            last_center_x = center_x
+
+        def refresh_content() -> None:
+            nonlocal last_zone_size, last_center_x, background_item
+            zone.delete("all")
+            last_zone_size = (0, 0)
+            last_center_x = 0.0
+            background_item = None
+            border_lines.clear()
+            border_arcs.clear()
+            redraw()
 
         def on_zone_click(_event=None):
             # 链接文字有自己的点击动作，避免和整块区域的默认动作重复触发
@@ -8167,6 +8601,8 @@ class HRToolkitApp:
 
         zone.bind("<Configure>", redraw)
         zone.bind("<Button-1>", on_zone_click)
+        self._upload_drop_zone = zone
+        self._refresh_upload_drop_zone_content = refresh_content
         redraw()
 
     def _on_drop_zone_click(self) -> None:
@@ -11173,6 +11609,19 @@ class HRToolkitApp:
 
     def destroy(self) -> None:
         self._is_alive = False
+        for job_name in (
+            "_title_wrap_job",
+            "_form_resize_job",
+            "_form_post_layout_sync_job",
+            "_workspace_area_resize_job",
+        ):
+            job = getattr(self, job_name, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_name, None)
         log_flush_job = getattr(self, "_log_flush_job", None)
         if log_flush_job is not None:
             try:
@@ -11190,8 +11639,11 @@ class HRToolkitApp:
                 self.root.after_cancel(canvas_sync_job)
             except Exception:
                 pass
-            self._right_canvas_sync_job = None
-            self._right_canvas_sync_pending = False
+        self._right_canvas_sync_job = None
+        self._right_canvas_sync_pending = False
+        self._right_canvas_sync_running = False
+        self._right_canvas_sync_dirty = False
+        self._right_canvas_sync_is_resize = False
         if getattr(self, "_workspace_search_job", None) is not None:
             try:
                 self.root.after_cancel(self._workspace_search_job)
