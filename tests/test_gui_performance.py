@@ -17,9 +17,11 @@ from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
 from hr_toolkit.gui.app import (
     HRToolkitApp,
     UPLOAD_LIST_VISIBLE_ROWS,
+    WORKSPACE_DRAWER_BREAKPOINT,
     WORKSPACE_TREE_RENDER_BATCH,
     WINDOW_RESIZE_SETTLE_MS,
     _CoalescedCanvasScroller,
+    _responsive_layout_mode,
 )
 from hr_toolkit.gui.widgets import CodexButton, RoundedCard, SidebarItem
 
@@ -706,6 +708,32 @@ class GuiPerformanceTests(unittest.TestCase):
                     and app._last_canvas_window_size == expected_window_size
                 )
 
+            def expected_layout_for_actual_viewport() -> tuple[str, bool]:
+                canvas_width = app._right_canvas.winfo_width()
+                scale = max(app.ui_scale, 1.0)
+                logical_canvas_width = (
+                    canvas_width / scale
+                    if canvas_width > 1
+                    else app._logical_screen_width()
+                )
+                content_padding = app._responsive_content_padding(
+                    logical_canvas_width
+                )
+                form_padding = app._responsive_form_padding_units(
+                    logical_canvas_width
+                )
+                usable_width = (
+                    canvas_width
+                    - content_padding[0]
+                    - content_padding[2]
+                    - app._px(form_padding[0] + form_padding[2])
+                ) / scale
+                return (
+                    _responsive_layout_mode(usable_width),
+                    app._workspace_available_width_units()
+                    < WORKSPACE_DRAWER_BREAKPOINT,
+                )
+
             def layout_diagnostics() -> str:
                 canvas_width = app._right_canvas.winfo_width()
                 canvas_height = app._right_canvas.winfo_height()
@@ -758,15 +786,20 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.geometry(f"{width}x780")
                 self.root.update_idletasks()
             self._run_event_loop_until(
-                lambda: layout_is_settled("wide", False),
+                lambda: layout_is_settled(
+                    *expected_layout_for_actual_viewport()
+                ),
                 timeout_ms=5000,
                 stable_polls=3,
-                failure_message="wide resize state did not settle",
+                failure_message="maximum available resize state did not settle",
                 diagnostics=layout_diagnostics,
             )
 
-            self.assertEqual(app._form_layout_mode, "wide")
-            self.assertFalse(app._workspace_small)
+            expected_mode, expected_workspace_small = (
+                expected_layout_for_actual_viewport()
+            )
+            self.assertEqual(app._form_layout_mode, expected_mode)
+            self.assertIs(app._workspace_small, expected_workspace_small)
             self.assertEqual(
                 app._last_canvas_window_size[0],
                 app._right_canvas.winfo_width(),
