@@ -7,6 +7,7 @@ record can still be inspected or recovered without the application.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import stat as stat_module
 import struct
 import sys
 import threading
+import time
 import unicodedata
 import uuid
 import weakref
@@ -94,6 +96,16 @@ CREATE INDEX IF NOT EXISTS idx_files_display_name ON files(display_name);
 # registry avoids retaining one Python lock forever for every historical task.
 _PROCESS_FILE_LOCKS_GUARD = threading.Lock()
 _PROCESS_FILE_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
+_WINDOWS_FILE_LOCK_RETRY_SECONDS = 0.05
+_WINDOWS_FILE_LOCK_CONTENTION_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EACCES,
+        errno.EAGAIN,
+        getattr(errno, "EDEADLK", None),
+    )
+    if value is not None
+)
 
 
 class HistoryStoreError(RuntimeError):
@@ -2037,6 +2049,26 @@ def _process_file_lock(path: Path) -> threading.RLock:
         return lock
 
 
+def _acquire_windows_file_lock(
+    file_descriptor: int,
+    *,
+    blocking: bool,
+    locking: Callable[[int, int, int], None],
+    nonblocking_mode: int,
+) -> None:
+    """Acquire one byte without msvcrt.LK_LOCK's fixed ten-second limit."""
+    while True:
+        try:
+            locking(file_descriptor, nonblocking_mode, 1)
+            return
+        except OSError as exc:
+            if not blocking:
+                raise BlockingIOError(str(exc)) from exc
+            if exc.errno not in _WINDOWS_FILE_LOCK_CONTENTION_ERRNOS:
+                raise
+            time.sleep(_WINDOWS_FILE_LOCK_RETRY_SECONDS)
+
+
 @contextmanager
 def _exclusive_file_lock(
     path: Path,
@@ -2075,13 +2107,12 @@ def _exclusive_file_lock(
         if os.name == "nt":
             import msvcrt
 
-            lock_mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-            try:
-                msvcrt.locking(file_descriptor, lock_mode, 1)
-            except OSError as exc:
-                if not blocking:
-                    raise BlockingIOError(str(exc)) from exc
-                raise
+            _acquire_windows_file_lock(
+                file_descriptor,
+                blocking=blocking,
+                locking=msvcrt.locking,
+                nonblocking_mode=msvcrt.LK_NBLCK,
+            )
         else:
             import fcntl
 

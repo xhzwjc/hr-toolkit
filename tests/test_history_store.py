@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from hr_toolkit.common.paths import path_is_relative_to
 from hr_toolkit.history_store import (
@@ -25,6 +26,7 @@ from hr_toolkit.history_store import (
     HistoryStore,
     HistoryStoreError,
     SourceSpec,
+    _acquire_windows_file_lock,
     default_history_root,
 )
 
@@ -65,6 +67,57 @@ class HistoryStoreTests(unittest.TestCase):
             stdout, stderr = process.communicate(timeout=20)
             results.append(subprocess.CompletedProcess(command, process.returncode, stdout, stderr))
         return results
+
+    def test_windows_blocking_file_lock_waits_beyond_msvcrt_retry_limit(self) -> None:
+        attempts = 0
+
+        def delayed_lock(_file_descriptor: int, _mode: int, _size: int) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 11:
+                raise OSError(errno.EACCES, "lock is busy")
+
+        with patch("hr_toolkit.history_store.time.sleep") as sleep:
+            _acquire_windows_file_lock(
+                7,
+                blocking=True,
+                locking=delayed_lock,
+                nonblocking_mode=2,
+            )
+
+        self.assertEqual(attempts, 12)
+        self.assertEqual(sleep.call_count, 11)
+
+    def test_windows_nonblocking_file_lock_fails_without_retry(self) -> None:
+        locking = Mock(side_effect=OSError(errno.EACCES, "lock is busy"))
+
+        with patch("hr_toolkit.history_store.time.sleep") as sleep:
+            with self.assertRaises(BlockingIOError):
+                _acquire_windows_file_lock(
+                    7,
+                    blocking=False,
+                    locking=locking,
+                    nonblocking_mode=2,
+                )
+
+        locking.assert_called_once_with(7, 2, 1)
+        sleep.assert_not_called()
+
+    def test_windows_blocking_file_lock_does_not_hide_invalid_handle(self) -> None:
+        locking = Mock(side_effect=OSError(errno.EBADF, "invalid handle"))
+
+        with patch("hr_toolkit.history_store.time.sleep") as sleep:
+            with self.assertRaises(OSError) as raised:
+                _acquire_windows_file_lock(
+                    7,
+                    blocking=True,
+                    locking=locking,
+                    nonblocking_mode=2,
+                )
+
+        self.assertEqual(raised.exception.errno, errno.EBADF)
+        locking.assert_called_once_with(7, 2, 1)
+        sleep.assert_not_called()
 
     def test_complete_lifecycle_persists_inputs_outputs_and_manifest(self) -> None:
         original = self.source_dir / "7月工资.xlsx"
