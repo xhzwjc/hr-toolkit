@@ -598,6 +598,23 @@ class GuiPerformanceTests(unittest.TestCase):
             self.root.deiconify()
             self.root.geometry("900x650")
             self.root.update()
+            self._run_event_loop_until(
+                lambda: (
+                    app._workspace_small
+                    and app._workspace_panel.winfo_manager() == ""
+                    and app.workspace_title_button.winfo_viewable()
+                ),
+                failure_message="small workspace entry did not settle",
+                diagnostics=lambda: repr(
+                    {
+                        "workspace_small": app._workspace_small,
+                        "available_width": app._workspace_available_width_units(),
+                        "panel_manager": app._workspace_panel.winfo_manager(),
+                        "title_button_viewable": app.workspace_title_button.winfo_viewable(),
+                        "resize_job": app._workspace_area_resize_job,
+                    }
+                ),
+            )
 
             app.workspace_title_button.event_generate(
                 "<Button-1>",
