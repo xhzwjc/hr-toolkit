@@ -10,7 +10,7 @@ import unittest
 import zipfile
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 from openpyxl import load_workbook
@@ -3375,6 +3375,60 @@ class TestLargeBatchCandidateIndexes(unittest.TestCase):
             "intra_op_num_threads": 1,
             "inter_op_num_threads": 1,
         }])
+
+    def test_ocr_engine_disables_memory_pattern_only_during_session_creation(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        observed_memory_patterns: list[bool] = []
+
+        class FakeSessionOptions:
+            enable_mem_pattern = True
+
+        class FakeOrtInferSession:
+            @staticmethod
+            def _init_sess_opts(_config):
+                return FakeSessionOptions()
+
+        original_descriptor = FakeOrtInferSession.__dict__["_init_sess_opts"]
+
+        class FakeRapidOCR:
+            def __init__(self, **_kwargs):
+                options = FakeOrtInferSession._init_sess_opts({})
+                observed_memory_patterns.append(options.enable_mem_pattern)
+
+        rapidocr_module = ModuleType("rapidocr_onnxruntime")
+        rapidocr_module.__path__ = []
+        rapidocr_module.RapidOCR = FakeRapidOCR
+        utils_module = ModuleType("rapidocr_onnxruntime.utils")
+        utils_module.__path__ = []
+        infer_module = ModuleType("rapidocr_onnxruntime.utils.infer_engine")
+        infer_module.OrtInferSession = FakeOrtInferSession
+        fake_modules = {
+            "rapidocr_onnxruntime": rapidocr_module,
+            "rapidocr_onnxruntime.utils": utils_module,
+            "rapidocr_onnxruntime.utils.infer_engine": infer_module,
+        }
+
+        original_engine = mc._OCR_ENGINE
+        original_attempted = mc._OCR_ATTEMPTED
+        try:
+            mc._OCR_ENGINE = None
+            mc._OCR_ATTEMPTED = False
+            with mock.patch.dict(sys.modules, fake_modules):
+                engine = mc._get_ocr_engine()
+        finally:
+            mc._OCR_ENGINE = original_engine
+            mc._OCR_ATTEMPTED = original_attempted
+
+        self.assertIsInstance(engine, FakeRapidOCR)
+        self.assertEqual(observed_memory_patterns, [False])
+        self.assertIs(
+            FakeOrtInferSession.__dict__["_init_sess_opts"],
+            original_descriptor,
+        )
+        self.assertTrue(
+            FakeOrtInferSession._init_sess_opts({}).enable_mem_pattern
+        )
 
 
 if __name__ == "__main__":

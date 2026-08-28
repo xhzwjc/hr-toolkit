@@ -69,6 +69,53 @@ def _ocr_runtime_options() -> dict[str, int]:
     }
 
 
+@contextmanager
+def _rapidocr_low_memory_session_options() -> Iterator[None]:
+    """Disable ONNX's retained input-shape allocation plan during engine init.
+
+    RapidOCR 1.4.4 creates its three ONNX sessions through one private factory.
+    ONNX Runtime's default memory-pattern planner can retain hundreds of MB
+    after the second high-resolution image even though RapidOCR already turns
+    off the CPU arena.  Disabling only that allocator optimization leaves the
+    model, preprocessing, tensors, and recognition rules unchanged.  Keep the
+    hook scoped to construction and fall back silently if a future compatible
+    RapidOCR version moves the factory or an older runtime lacks the option.
+    """
+
+    try:
+        from rapidocr_onnxruntime.utils.infer_engine import OrtInferSession
+
+        original_descriptor = OrtInferSession.__dict__.get("_init_sess_opts")
+        original_factory = getattr(OrtInferSession, "_init_sess_opts")
+        if original_descriptor is None or not callable(original_factory):
+            yield
+            return
+    except Exception:
+        yield
+        return
+
+    def _bounded_session_options(config):
+        session_options = original_factory(config)
+        try:
+            session_options.enable_mem_pattern = False
+        except Exception:
+            pass
+        return session_options
+
+    try:
+        OrtInferSession._init_sess_opts = staticmethod(_bounded_session_options)
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            OrtInferSession._init_sess_opts = original_descriptor
+        except Exception:
+            pass
+
+
 def _get_ocr_engine():
     global _OCR_ENGINE, _OCR_ATTEMPTED
     with _OCR_LOCK:
@@ -77,12 +124,13 @@ def _get_ocr_engine():
             try:
                 from rapidocr_onnxruntime import RapidOCR
                 options = _ocr_runtime_options()
-                try:
-                    _OCR_ENGINE = RapidOCR(**options)
-                except TypeError:
-                    # Forward-compatible fallback if a future RapidOCR removes
-                    # the thread-control keyword arguments.
-                    _OCR_ENGINE = RapidOCR()
+                with _rapidocr_low_memory_session_options():
+                    try:
+                        _OCR_ENGINE = RapidOCR(**options)
+                    except TypeError:
+                        # Forward-compatible fallback if a future RapidOCR removes
+                        # the thread-control keyword arguments.
+                        _OCR_ENGINE = RapidOCR()
             except Exception:
                 _OCR_ENGINE = None
         return _OCR_ENGINE
