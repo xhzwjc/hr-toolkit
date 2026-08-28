@@ -431,7 +431,11 @@ class GuiPerformanceTests(unittest.TestCase):
             }
             self.assertLessEqual(max(material_columns, default=0), 1)
 
-            app._toggle_workspace_panel()
+            app.workspace_title_button.event_generate(
+                "<Button-1>",
+                x=max(1, app.workspace_title_button.winfo_width() // 2),
+                y=max(1, app.workspace_title_button.winfo_height() // 2),
+            )
             self.root.update()
             self.assertEqual(app._workspace_panel.winfo_manager(), "place")
             self.assertLessEqual(

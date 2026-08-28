@@ -4418,8 +4418,9 @@ class HRToolkitApp:
         if not self._workspace_small or not self._workspace_drawer_open or event is None:
             return
         widget = getattr(event, "widget", None)
+        title_button = getattr(self, "workspace_title_button", None)
         while widget is not None:
-            if widget is self._workspace_panel:
+            if widget is self._workspace_panel or widget is title_button:
                 return
             widget = getattr(widget, "master", None)
         self._close_workspace_drawer()
