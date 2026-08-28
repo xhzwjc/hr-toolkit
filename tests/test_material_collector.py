@@ -111,6 +111,46 @@ def _write_scanned_pdf(
         writer.write(stream)
 
 
+def _write_mixed_text_image_pdf(path: Path, *, text_layer: str) -> None:
+    """写入“字段值在文字层、标题和标签在内嵌图片”的电子证书结构。"""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    image = EncodedStreamObject()
+    image._data = zlib.compress(bytes([180, 180, 180]) * 32 * 32)
+    image.update({
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Image"),
+        NameObject("/Width"): NumberObject(32),
+        NameObject("/Height"): NumberObject(32),
+        NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+        NameObject("/BitsPerComponent"): NumberObject(8),
+        NameObject("/Filter"): NameObject("/FlateDecode"),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): writer._add_object(font),
+        }),
+        NameObject("/XObject"): DictionaryObject({
+            NameObject("/Im0"): writer._add_object(image),
+        }),
+    })
+    content = DecodedStreamObject()
+    content.set_data(
+        b"q 300 0 0 300 0 0 cm /Im0 Do Q\n"
+        b"BT /F1 10 Tf 10 20 Td ("
+        + text_layer.encode("ascii")
+        + b") Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with path.open("wb") as stream:
+        writer.write(stream)
+
+
 class TestResolveMAterialText(unittest.TestCase):
     def test_single_keyword(self) -> None:
         self.assertEqual(_resolve_material_text("身份证"), ["身份证"])
@@ -2273,6 +2313,400 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                     use_ocr_cache=False,
                 )
 
+    def test_separate_contract_images_are_grouped_and_reused_from_cache(self) -> None:
+        mc = self.mc
+        page_texts = {
+            "page-1": "劳动合同",
+            "page-2": "第一章 工作地点",
+            "page-3": "第二章 劳动报酬",
+            "page-4": "第三章 合同期限",
+            "page-5": "乙方签字 姓名：张三 签署日期：2026年8月28日",
+        }
+
+        class ContractPageEngine:
+            call_count = 0
+
+            def __call__(self, source):
+                type(self).call_count += 1
+                marker = Path(source).read_text(encoding="utf-8")
+                return ([[None, page_texts[marker]]], None)
+
+        mc._OCR_ENGINE = ContractPageEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            source_hashes: dict[str, str] = {}
+            for page_number in range(1, 6):
+                source = library / f"scan_{page_number:03d}.png"
+                source.write_text(f"page-{page_number}", encoding="utf-8")
+                source_hashes[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+
+            first = collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+            )
+            first_calls = ContractPageEngine.call_count
+            second = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+            )
+
+            copied = sorted((root / "输出2" / "张三").glob("张三_劳动合同_*.png"))
+            copied_hashes = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in copied
+            }
+            final_source_hashes = {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in library.glob("scan_*.png")
+            }
+            cache_payload = json.loads(
+                (library / _OCR_CACHE_FILE_NAME).read_text(encoding="utf-8")
+            )
+            cached_text_lengths = [
+                len(str(entry.get("ocr_text") or ""))
+                for entry in cache_payload.get("entries", {}).values()
+                if isinstance(entry, dict)
+            ]
+
+        self.assertEqual(first.matched_file_count, 5)
+        self.assertEqual(second.matched_file_count, 5)
+        self.assertEqual(first_calls, 5)
+        self.assertEqual(ContractPageEngine.call_count, first_calls)
+        self.assertEqual(second.ocr_cache_hits, 5)
+        self.assertEqual(len(copied_hashes), 5)
+        self.assertEqual(sorted(copied_hashes.values()), sorted(source_hashes.values()))
+        self.assertEqual(final_source_hashes, source_hashes)
+        self.assertTrue(all("document_group" in match.matched_by for match in second.matches))
+        self.assertNotIn("document_group", json.dumps(cache_payload, ensure_ascii=False))
+        self.assertTrue(all(length <= 4096 for length in cached_text_lengths))
+
+    def test_adjacent_contracts_for_different_people_do_not_cross_group(self) -> None:
+        mc = self.mc
+        page_texts = {
+            1: "劳动合同 合同编号：HT-001",
+            2: "第一章 工作地点",
+            3: "第二章 劳动报酬",
+            4: "第三章 合同期限",
+            5: "乙方签字 姓名：张三 签署日期：2026年8月28日",
+            6: "劳动合同 合同编号：HT-002",
+            7: "第一章 工作地点",
+            8: "第二章 劳动报酬",
+            9: "第三章 合同期限",
+            10: "乙方签字 姓名：李四 签署日期：2026年8月28日",
+        }
+
+        class TwoContractEngine:
+            def __call__(self, source):
+                page_number = int(Path(source).read_text(encoding="utf-8"))
+                return ([[None, page_texts[page_number]]], None)
+
+        mc._OCR_ENGINE = TwoContractEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for page_number in range(1, 11):
+                (library / f"scan_{page_number:03d}.png").write_text(
+                    str(page_number), encoding="utf-8",
+                )
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source=["张三", "李四"],
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+            )
+
+            zhang_sources = {
+                match.relative_source_path for match in result.matches
+                if match.employee_name == "张三"
+            }
+            li_sources = {
+                match.relative_source_path for match in result.matches
+                if match.employee_name == "李四"
+            }
+
+        self.assertEqual(result.matched_file_count, 10)
+        self.assertEqual(zhang_sources, {f"scan_{number:03d}.png" for number in range(1, 6)})
+        self.assertEqual(li_sources, {f"scan_{number:03d}.png" for number in range(6, 11)})
+
+    def test_contract_group_can_use_close_scan_time_and_matching_dimensions(self) -> None:
+        mc = self.mc
+        page_texts = {
+            "cover": "劳动合同 合同编号：HT-003",
+            "body": "工作地点及劳动报酬",
+            "signature": "乙方签字 姓名：张三 签署日期：2026年8月28日",
+        }
+
+        class MetadataGroupEngine:
+            def __call__(self, source):
+                marker = Path(source).read_text(encoding="utf-8")
+                return ([[None, page_texts[marker]]], None)
+
+        mc._OCR_ENGINE = MetadataGroupEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for filename, marker in (
+                ("a-cover.png", "cover"),
+                ("b-body.png", "body"),
+                ("c-signature.png", "signature"),
+            ):
+                (library / filename).write_text(marker, encoding="utf-8")
+
+            with mock.patch.object(
+                mc, "_read_image_dimensions", return_value=(1200, 1600),
+            ) as read_dimensions:
+                result = collect_employee_materials(
+                    library,
+                    root / "输出",
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                    generate_report=False,
+                )
+
+        self.assertEqual(result.matched_file_count, 3)
+        self.assertLessEqual(read_dimensions.call_count, 3)
+
+    def test_time_and_dimensions_do_not_absorb_unrelated_image(self) -> None:
+        mc = self.mc
+        page_texts = {
+            "cover": "劳动合同",
+            "unrelated": "公司活动宣传材料",
+            "signature": "乙方签字 姓名：张三 签署日期",
+        }
+
+        class MixedBatchEngine:
+            def __call__(self, source):
+                marker = Path(source).read_text(encoding="utf-8")
+                return ([[None, page_texts[marker]]], None)
+
+        mc._OCR_ENGINE = MixedBatchEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for filename, marker in (
+                ("a-cover.png", "cover"),
+                ("b-unrelated.png", "unrelated"),
+                ("c-signature.png", "signature"),
+            ):
+                (library / filename).write_text(marker, encoding="utf-8")
+
+            with mock.patch.object(
+                mc, "_read_image_dimensions", return_value=(1200, 1600),
+            ):
+                result = collect_employee_materials(
+                    library,
+                    root / "输出",
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                    generate_report=False,
+                )
+
+        self.assertEqual(result.matched_file_count, 0)
+        self.assertEqual(result.missing_records["张三"], ["劳动合同"])
+
+    def test_explicit_page_markers_group_without_file_metadata_reads(self) -> None:
+        mc = self.mc
+        root = Path("not-read") / "document-pages"
+        items = [
+            mc._FlatIndexedFile(
+                source_path=root / filename,
+                relative_path=filename,
+                cache_key=filename,
+                material_type=material,
+                match_method=method,
+                subtype="",
+                extracted_names=names,
+                extracted_id_hash="",
+                text_snippet=text,
+            )
+            for filename, material, method, names, text in (
+                ("a.png", "劳动合同", "ocr_contract", (), "劳动合同 第1页 共3页"),
+                ("b.png", "其他材料", "unrecognized", (), "合同正文 第2页 共3页"),
+                ("c.png", "其他材料", "unrecognized", ("张三",), "姓名：张三 第3页 共3页"),
+            )
+        ]
+        with mock.patch.object(
+            mc, "_read_image_dimensions",
+            side_effect=AssertionError("明确页码不应读取图片尺寸"),
+        ):
+            result = mc._enrich_flat_index_with_document_groups(
+                items, [], ["劳动合同"],
+            )
+
+        self.assertEqual(len(result), 3)
+        self.assertTrue(all(item.material_type == "劳动合同" for item in result))
+        self.assertTrue(all(item.extracted_names == ("张三",) for item in result))
+
+    def test_document_group_is_recomputed_after_member_content_changes(self) -> None:
+        mc = self.mc
+        page_texts = {
+            "page-1": "劳动合同",
+            "page-2": "第一章 工作地点",
+            "page-3": "第二章 劳动报酬",
+            "page-4": "第三章 合同期限",
+            "page-5-z": "乙方签字 姓名：张三 签署日期",
+            "page-5-l": "乙方签字 姓名：李四 签署日期",
+        }
+
+        class MutableContractEngine:
+            call_count = 0
+
+            def __call__(self, source):
+                type(self).call_count += 1
+                marker = Path(source).read_text(encoding="utf-8")
+                return ([[None, page_texts[marker]]], None)
+
+        mc._OCR_ENGINE = MutableContractEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for page_number in range(1, 5):
+                (library / f"scan_{page_number:03d}.png").write_text(
+                    f"page-{page_number}", encoding="utf-8",
+                )
+            signature = library / "scan_005.png"
+            signature.write_text("page-5-z", encoding="utf-8")
+
+            first = collect_employee_materials(
+                library,
+                root / "输出1",
+                roster_source=["张三", "李四"],
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+            )
+            previous_stat = signature.stat()
+            signature.write_text("page-5-l", encoding="utf-8")
+            os.utime(
+                signature,
+                ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000),
+            )
+            second = collect_employee_materials(
+                library,
+                root / "输出2",
+                roster_source=["张三", "李四"],
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+            )
+
+        self.assertEqual(first.matched_file_count, 5)
+        self.assertEqual({match.employee_name for match in first.matches}, {"张三"})
+        self.assertEqual(second.matched_file_count, 5)
+        self.assertEqual({match.employee_name for match in second.matches}, {"李四"})
+        self.assertGreaterEqual(second.ocr_cache_invalidated, 1)
+        self.assertEqual(MutableContractEngine.call_count, 6)
+
+    def test_whole_document_group_is_skipped_if_member_changes_after_index(self) -> None:
+        mc = self.mc
+        page_texts = {
+            "page-1": "劳动合同",
+            "page-2": "第一章 工作地点",
+            "page-3": "第二章 劳动报酬",
+            "page-4": "第三章 合同期限",
+            "page-5": "乙方签字 姓名：张三 签署日期",
+        }
+
+        class RaceContractEngine:
+            def __call__(self, source):
+                marker = Path(source).read_text(encoding="utf-8")
+                return ([[None, page_texts[marker]]], None)
+
+        mc._OCR_ENGINE = RaceContractEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for page_number in range(1, 6):
+                (library / f"scan_{page_number:03d}.png").write_text(
+                    f"page-{page_number}", encoding="utf-8",
+                )
+            changed_page = library / "scan_005.png"
+            changed = False
+
+            def mutate_after_index(_current, _total, message):
+                nonlocal changed
+                if not changed and "正在检索与匹配" in message:
+                    changed_page.write_text("changed-after-index", encoding="utf-8")
+                    changed = True
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+                progress_callback=mutate_after_index,
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(result.matched_file_count, 0)
+        self.assertEqual(result.missing_records["张三"], ["劳动合同"])
+        self.assertTrue(any("整组已跳过" in warning for warning in result.warnings))
+
+    def test_conflicting_names_prevent_ambiguous_image_group(self) -> None:
+        mc = self.mc
+        page_texts = {
+            1: "劳动合同 合同编号：HT-001",
+            2: "姓名：张三",
+            3: "姓名：李四",
+        }
+
+        class ConflictingPageEngine:
+            def __call__(self, source):
+                page_number = int(Path(source).read_text(encoding="utf-8"))
+                return ([[None, page_texts[page_number]]], None)
+
+        mc._OCR_ENGINE = ConflictingPageEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            for page_number in range(1, 4):
+                (library / f"scan_{page_number:03d}.png").write_text(
+                    str(page_number), encoding="utf-8",
+                )
+
+            result = collect_employee_materials(
+                library,
+                root / "输出",
+                roster_source="张三",
+                material_types=["劳动合同"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+                generate_report=False,
+            )
+
+        self.assertEqual(result.matched_file_count, 0)
+        self.assertEqual(result.missing_records["张三"], ["劳动合同"])
+        self.assertTrue(any("姓名冲突" in warning for warning in result.warnings))
+
 
 class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
     """复盘会需求：图形标题 PDF 渲染兜底、自定义名称乱序窗口匹配、缓存重分类。"""
@@ -2369,6 +2803,160 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             "特种证书",
         )
 
+    def test_official_special_certificate_title_maps_to_requested_label(self) -> None:
+        mc = self.mc
+        self.assertEqual(
+            mc._requested_label_for_detected_material(
+                "特种证书", ["特种作业操作证"],
+            ),
+            "特种作业操作证",
+        )
+        # “证书”等宽泛词不能因标准同义词表而变成等价材料。
+        self.assertIsNone(
+            mc._requested_label_for_detected_material(
+                "资格证书", ["证书"],
+            )
+        )
+
+    def test_special_certificate_custom_label_collects_in_folder_and_flat_modes(self) -> None:
+        mc = self.mc
+        lines = [
+            ("标题", "中华人民共和国特种作业操作证"),
+            ("姓名", "张三"),
+            ("作业类别", "低压电工作业"),
+            ("机关", "北京市应急管理局"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            folder_library = root / "人员资料库"
+            employee_dir = folder_library / "张三"
+            employee_dir.mkdir(parents=True)
+            folder_source = employee_dir / "random.jpg"
+            folder_source.write_bytes(b"special-certificate-folder")
+            folder_hash = hashlib.sha256(folder_source.read_bytes()).hexdigest()
+
+            self._set_engine(lines)
+            folder_result = collect_employee_materials(
+                folder_library,
+                root / "文件夹输出",
+                roster_source="张三",
+                material_types=["特种作业操作证"],
+            )
+
+            class FailingEngine:
+                def __call__(self, _source):
+                    raise AssertionError("正式名称映射命中缓存后不应重复 OCR")
+
+            mc._OCR_ENGINE = FailingEngine()
+            cached_folder_result = collect_employee_materials(
+                folder_library,
+                root / "文件夹缓存输出",
+                roster_source="张三",
+                material_types=["特种作业操作证"],
+            )
+
+            flat_library = root / "无序资料库"
+            flat_library.mkdir()
+            flat_source = flat_library / "random.jpg"
+            flat_source.write_bytes(b"special-certificate-flat")
+            flat_hash = hashlib.sha256(flat_source.read_bytes()).hexdigest()
+            self._set_engine(lines)
+            flat_result = collect_employee_materials(
+                flat_library,
+                root / "平铺输出",
+                roster_source="张三",
+                material_types=["特种作业操作证"],
+                library_mode=LIBRARY_MODE_FLAT_OCR,
+            )
+            final_folder_hash = hashlib.sha256(folder_source.read_bytes()).hexdigest()
+            final_flat_hash = hashlib.sha256(flat_source.read_bytes()).hexdigest()
+            copied_folder_hash = hashlib.sha256(
+                folder_result.matches[0].target_path.read_bytes()
+            ).hexdigest()
+            copied_flat_hash = hashlib.sha256(
+                flat_result.matches[0].target_path.read_bytes()
+            ).hexdigest()
+            workbook = load_workbook(flat_result.report_path, data_only=True)
+            try:
+                report_sheet = workbook["资料提取汇总与缺失清单"]
+                report_material_header = report_sheet["F7"].value
+                report_material_status = report_sheet["F8"].value
+            finally:
+                workbook.close()
+
+        self.assertEqual(folder_result.matched_file_count, 1)
+        self.assertEqual(folder_result.matches[0].material_type, "特种作业操作证")
+        self.assertNotIn("张三", folder_result.missing_records)
+        self.assertEqual(cached_folder_result.matched_file_count, 1)
+        self.assertTrue(cached_folder_result.matches[0].cache_hit)
+        self.assertEqual(flat_result.matched_file_count, 1)
+        self.assertEqual(flat_result.matches[0].material_type, "特种作业操作证")
+        self.assertNotIn("张三", flat_result.missing_records)
+        self.assertEqual(final_folder_hash, folder_hash)
+        self.assertEqual(final_flat_hash, flat_hash)
+        self.assertEqual(copied_folder_hash, folder_hash)
+        self.assertEqual(copied_flat_hash, flat_hash)
+        self.assertEqual(report_material_header, "特种作业操作证")
+        self.assertEqual(report_material_status, "已提取(1份)")
+
+    def test_modern_lightweight_path_ocr_embedded_certificate_image(self) -> None:
+        mc = self.mc
+
+        class CertificateImageEngine:
+            call_count = 0
+
+            def __call__(self, _source):
+                type(self).call_count += 1
+                return ([
+                    [None, "中华人民共和国特种作业操作证"],
+                    [None, "姓名：张三"],
+                    [None, "作业类别：低压电工作业"],
+                    [None, "北京市应急管理局"],
+                ], None)
+
+        mc._OCR_ENGINE = CertificateImageEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "无序资料库"
+            library.mkdir()
+            source = library / "certificate.pdf"
+            _write_mixed_text_image_pdf(
+                source,
+                text_layer="ZhangSan T500237200308190399 low-voltage Beijing remarks",
+            )
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            with mock.patch.object(mc, "pdfium", None):
+                with mock.patch.object(mc, "_PDF_BACKEND", "pypdf"):
+                    standard_result = collect_employee_materials(
+                        library,
+                        root / "标准输出",
+                        roster_source="张三",
+                        material_types=["特种证书"],
+                        library_mode=LIBRARY_MODE_FLAT_OCR,
+                        generate_report=False,
+                    )
+                    first_calls = CertificateImageEngine.call_count
+                    custom_result = collect_employee_materials(
+                        library,
+                        root / "自定义输出",
+                        roster_source="张三",
+                        material_types=["特种作业操作证"],
+                        library_mode=LIBRARY_MODE_FLAT_OCR,
+                        generate_report=False,
+                    )
+
+            final_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+        self.assertEqual(standard_result.matched_file_count, 1)
+        self.assertEqual(standard_result.matches[0].material_type, "特种证书")
+        self.assertEqual(custom_result.matched_file_count, 1)
+        self.assertEqual(custom_result.matches[0].material_type, "特种作业操作证")
+        self.assertEqual(first_calls, 1)
+        self.assertEqual(CertificateImageEngine.call_count, first_calls)
+        self.assertEqual(custom_result.ocr_cache_hits, 1)
+        self.assertEqual(final_hash, source_hash)
+
     def test_flat_pdf_graphic_title_render_fallback(self) -> None:
         from tests.test_pdf_backend_compat import _write_minimal_pdf
 
@@ -2386,7 +2974,7 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
         self.assertEqual(material, "特种证书")
         self.assertIn("特种作业操作证", text)
 
-    def test_modern_lightweight_path_uses_text_layer_signal_combination(self) -> None:
+    def test_complete_text_layer_signal_skips_embedded_image_ocr(self) -> None:
         mc = self.mc
         text_layer = (
             "姓名：张三 证号：T500237200308190399 "

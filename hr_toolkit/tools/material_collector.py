@@ -11,7 +11,7 @@ import time
 import zipfile
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -618,6 +618,21 @@ MATERIAL_SYNONYMS: dict[str, list[str]] = {
     ],
 }
 
+# 只允许业务含义明确、不会扩张匹配范围的正式名称映射。
+# MATERIAL_SYNONYMS 中含“证书/合同/协议/照片/id”等检索关键词，不能直接
+# 当作请求类型等价表，否则用户新增同名自定义材料时会发生跨类型误收集。
+_SAFE_REQUEST_MATERIAL_ALIASES: dict[str, frozenset[str]] = {
+    "特种证书": frozenset({
+        "中华人民共和国特种作业操作证",
+        "特种作业证",
+        "特种作业证书",
+        "特种作业操作证",
+        "特种作业人员操作证",
+        "特种操作证",
+        "特种设备作业人员证",
+    }),
+}
+
 _NOISE_WORDS: set[str] = {
     "序号", "姓名", "员工", "人员", "名字", "部门", "项目", "项目部", "所属部门", "归属部门",
     "身份证", "身份证号码", "身份证号", "证件号码", "工号", "员工编号", "职务", "岗位", "状态",
@@ -639,6 +654,13 @@ SUPPORTED_FILE_EXTENSIONS = {
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 DOC_EXTENSIONS = {".doc", ".docx", ".pdf", ".txt"}
+
+# 无序资料库中，仅对已确认存在跨图片需求的劳动合同启用保守分组。
+# 采用有界连续窗口，避免在老电脑上进行 O(n^2) 全量文件比较。
+_DOCUMENT_GROUPABLE_MATERIALS = frozenset({"劳动合同"})
+_DOCUMENT_GROUP_MAX_PAGES = 32
+_DOCUMENT_GROUP_MAX_TIME_GAP_SECONDS = 5 * 60
+_DOCUMENT_GROUP_TEXT_MAX_CHARS = 20_000
 
 _IGNORED_FILENAMES = {
     ".ds_store", "thumbs.db", "desktop.ini", ".localized", "ehthumbs.db",
@@ -1891,6 +1913,41 @@ def _compact_for_window(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z一-鿿]+", "", str(text or ""))
 
 
+def _canonical_material_for_request_label(material: str) -> str | None:
+    """将明确的正式请求名称映射到内部标准类型；宽泛关键词不参与。"""
+    label = str(material or "").strip()
+    if label in MATERIAL_SYNONYMS:
+        return label
+    compact_label = _compact_for_window(label)
+    for canonical, aliases in _SAFE_REQUEST_MATERIAL_ALIASES.items():
+        if any(_compact_for_window(alias) == compact_label for alias in aliases):
+            return canonical
+    return None
+
+
+def _requested_label_for_detected_material(
+    detected_material: str,
+    requested_materials: list[str] | tuple[str, ...],
+) -> str | None:
+    """把内部标准分类安全地还原为用户本次请求的显示名称。"""
+    detected = str(detected_material or "").strip()
+    if not detected:
+        return None
+    for requested in requested_materials:
+        label = str(requested or "").strip()
+        if label == detected:
+            return label
+    detected_canonical = _canonical_material_for_request_label(detected) or detected
+    for requested in requested_materials:
+        label = str(requested or "").strip()
+        if (
+            label
+            and _canonical_material_for_request_label(label) == detected_canonical
+        ):
+            return label
+    return None
+
+
 def _has_reordered_name_window(compact_text: str, compact_name: str) -> bool:
     """仅允许把材料名拆成两段后前后互换；不接受任意字符排列。
 
@@ -2355,7 +2412,10 @@ def _classify_material_type(
                 if is_pdf:
                     with _open_pdf_document(file_path):
                         pass
-                return mat_type, "filename_keyword", sub, "", "", False
+                requested_label = _requested_label_for_detected_material(
+                    mat_type, requested_types,
+                )
+                return requested_label or mat_type, "filename_keyword", sub, "", "", False
 
     # 3. 文档内部文本内容深度检索（针对文件名如 01.docx, file.pdf 等非标准命名）
     doc_text = _extract_document_text(
@@ -2365,11 +2425,17 @@ def _classify_material_type(
     )
     if doc_text:
         if _has_special_certificate_evidence(doc_text):
-            return "特种证书", "doc_content", "", "", "", False
+            requested_label = _requested_label_for_detected_material(
+                "特种证书", requested_types,
+            )
+            return requested_label or "特种证书", "doc_content", "", "", "", False
         for mat_type, content_keywords in _DOC_CONTENT_PATTERNS.items():
             for kw in content_keywords:
                 if kw in doc_text:
-                    return mat_type, "doc_content", "", "", "", False
+                    requested_label = _requested_label_for_detected_material(
+                        mat_type, requested_types,
+                    )
+                    return requested_label or mat_type, "doc_content", "", "", "", False
         custom_types = [
             material_type
             for material_type in requested_types
@@ -2405,21 +2471,25 @@ def _classify_material_type(
                     method,
                     cached_text,
                 )
+                matched_request = _requested_label_for_detected_material(
+                    mat, requested_types,
+                )
                 has_alternative_request = any(
-                    requested != mat for requested in requested_types
+                    _requested_label_for_detected_material(mat, [requested]) is None
+                    for requested in requested_types
                 )
                 visual_query_attempted = _visual_ocr_query_was_attempted(
                     cached_entry,
                     requested_types,
                 )
-                if mat in requested_types and (
+                if matched_request is not None and (
                     not weak_cached_result
                     or not has_alternative_request
                     or visual_query_attempted
                 ):
                     if cache_stats is not None:
                         cache_stats["hits"] = cache_stats.get("hits", 0) + 1
-                    return mat, method, sub, name, "", True
+                    return matched_request, method, sub, name, "", True
                 if analysis_complete:
                     cached_mat, cached_method, cached_sub = _classify_text_content(
                         cached_text,
@@ -2427,21 +2497,24 @@ def _classify_material_type(
                         method_prefix="cached_text",
                         allow_weak_id_fallback=False,
                     )
-                    if cached_mat in requested_types:
+                    cached_request = _requested_label_for_detected_material(
+                        cached_mat or "", requested_types,
+                    )
+                    if cached_request is not None:
                         if cache_stats is not None:
                             cache_stats["hits"] = cache_stats.get("hits", 0) + 1
-                        return cached_mat, cached_method, cached_sub, name, "", True
+                        return cached_request, cached_method, cached_sub, name, "", True
                     should_retry_visual_ocr = (
                         is_pdf
                         and pdfium is not None
                         and weak_cached_result
                         and not visual_query_attempted
-                        and (mat not in requested_types or has_alternative_request)
+                        and (matched_request is None or has_alternative_request)
                     )
                     if not should_retry_visual_ocr:
                         if cache_stats is not None:
                             cache_stats["hits"] = cache_stats.get("hits", 0) + 1
-                        return mat or None, method, sub, name, "", True
+                        return matched_request or mat or None, method, sub, name, "", True
                 if cache_stats is not None:
                     cache_stats["invalidated"] = cache_stats.get("invalidated", 0) + 1
             if cache_stats is not None:
@@ -2549,7 +2622,10 @@ def _classify_material_type(
                 ),
             )
         if ocr_mat:
-            return ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id, False
+            requested_label = _requested_label_for_detected_material(
+                ocr_mat, requested_types,
+            )
+            return requested_label or ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id, False
 
     return None, "", "", "", "", False
 
@@ -2601,6 +2677,9 @@ class _FlatIndexedFile:
     text_snippet: str = ""
     extracted_id_card: str = ""
     cache_hit: bool = False
+    document_group_id: str = ""
+    document_page_number: int = 0
+    document_page_count: int = 0
 
 
 def _scan_flat_library_files(lib_path: Path, skip_dir: Path | None = None) -> list[Path]:
@@ -3020,6 +3099,409 @@ def _entry_to_flat_indexed_file(
     )
 
 
+def _natural_file_key(path: Path) -> tuple[Any, ...]:
+    """按数字自然排序文件名，保证 scan_2 位于 scan_10 之前。"""
+    return tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", path.name)
+    )
+
+
+def _filename_page_sequence(path: Path) -> tuple[str, int] | None:
+    """提取连续扫描文件名末尾的短序号；身份证号等长数字不会被当页码。"""
+    stem = path.stem.casefold()
+    match = re.search(r"(?<!\d)(\d{1,6})$", stem)
+    if match is None:
+        return None
+    prefix = stem[:match.start()].rstrip(" _-.()（）[]【】")
+    return prefix, int(match.group(1))
+
+
+def _explicit_page_marker(item: _FlatIndexedFile) -> tuple[int, int | None] | None:
+    """从文件名和 OCR 摘要提取“第 N 页”或“N/总页数”标记。"""
+    sample = f"{item.source_path.stem} {item.text_snippet[:2000]}"
+    patterns = (
+        r"第\s*(\d{1,3})\s*页(?:\s*[/共]\s*(\d{1,3})\s*页?)?",
+        r"(?<![\d/.-])(\d{1,3})\s*/\s*(\d{1,3})(?![\d/.-])",
+        r"\bpage\s*(\d{1,3})(?:\s*(?:of|/)\s*(\d{1,3}))?\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, sample, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        page_number = int(match.group(1))
+        total_pages = int(match.group(2)) if match.group(2) else None
+        if page_number <= 0 or total_pages is not None and (
+            total_pages <= 0 or page_number > total_pages
+        ):
+            continue
+        return page_number, total_pages
+    return None
+
+
+def _effective_group_material(item: _FlatIndexedFile) -> str:
+    """弱身份证兜底不作为跨页分组边界，避免合同证件号抢占页面。"""
+    if _is_weak_cached_material_result(
+        item.material_type,
+        item.match_method,
+        item.text_snippet,
+    ):
+        return ""
+    return item.material_type if item.material_type in MATERIAL_SYNONYMS else ""
+
+
+def _looks_like_document_start(item: _FlatIndexedFile) -> bool:
+    material = _effective_group_material(item)
+    if material not in _DOCUMENT_GROUPABLE_MATERIALS:
+        return False
+    marker = _explicit_page_marker(item)
+    if marker is not None:
+        return marker[0] == 1
+    text = item.text_snippet
+    return "劳动合同" in text
+
+
+def _has_document_end_evidence(item: _FlatIndexedFile) -> bool:
+    marker = _explicit_page_marker(item)
+    if marker is not None and marker[1] is not None and marker[0] == marker[1]:
+        return True
+    text = item.text_snippet
+    return any(
+        keyword in text
+        for keyword in (
+            "乙方签字", "乙方（签字", "乙方(签字", "劳动者签字",
+            "本人签字", "签字盖章", "签署日期", "合同签订日期",
+        )
+    )
+
+
+def _has_contract_continuation_evidence(item: _FlatIndexedFile) -> bool:
+    """扫描时间/尺寸属于弱信号，正文还必须具有合同连续页特征。"""
+    text = item.text_snippet
+    return any(
+        keyword in text
+        for keyword in (
+            "劳动", "合同", "甲方", "乙方", "用人单位", "工作地点",
+            "工作内容", "劳动报酬", "工资", "社会保险", "合同期限",
+            "违约责任", "劳动争议", "签字", "签署",
+        )
+    )
+
+
+def _normalized_group_names(item: _FlatIndexedFile) -> set[str]:
+    return {
+        normalized
+        for normalized in (
+            _normalize_person_name(name) for name in item.extracted_names
+        )
+        if normalized
+    }
+
+
+def _read_image_dimensions(file_path: Path) -> tuple[int, int] | None:
+    """只读取图片头部尺寸，不解码完整像素；失败时降级为其他连续性信号。"""
+    try:
+        from PIL import Image
+
+        with Image.open(file_path) as image:
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            return None
+        return int(width), int(height)
+    except Exception:
+        return None
+
+
+def _image_group_continuity(
+    previous: _FlatIndexedFile,
+    current: _FlatIndexedFile,
+    *,
+    dimensions: dict[Path, tuple[int, int] | None],
+    mtimes: dict[Path, float | None],
+) -> tuple[str, ...]:
+    """返回相邻页面连续性证据；至少命中一个组合信号才进入候选组。"""
+    reasons: list[str] = []
+    previous_marker = _explicit_page_marker(previous)
+    current_marker = _explicit_page_marker(current)
+    if (
+        previous_marker is not None
+        and current_marker is not None
+        and current_marker[0] == previous_marker[0] + 1
+        and (
+            previous_marker[1] is None
+            or current_marker[1] is None
+            or previous_marker[1] == current_marker[1]
+        )
+    ):
+        reasons.append("page_number")
+
+    previous_sequence = _filename_page_sequence(previous.source_path)
+    current_sequence = _filename_page_sequence(current.source_path)
+    if (
+        previous_sequence is not None
+        and current_sequence is not None
+        and previous_sequence[0] == current_sequence[0]
+        and current_sequence[1] == previous_sequence[1] + 1
+    ):
+        reasons.append("filename_sequence")
+
+    # 强序号已经与“合同首页 + 明确结束页”共同构成保守门禁，无需再打开
+    # 图片读取尺寸；这使常见扫描批次在老电脑上仅做文件名比较。
+    if reasons:
+        return tuple(reasons)
+
+    def _mtime(item: _FlatIndexedFile) -> float | None:
+        if item.source_path not in mtimes:
+            try:
+                mtimes[item.source_path] = item.source_path.stat().st_mtime
+            except OSError:
+                mtimes[item.source_path] = None
+        return mtimes[item.source_path]
+
+    previous_mtime = _mtime(previous)
+    current_mtime = _mtime(current)
+    if (
+        previous_mtime is not None
+        and current_mtime is not None
+        and abs(current_mtime - previous_mtime)
+        <= _DOCUMENT_GROUP_MAX_TIME_GAP_SECONDS
+    ):
+        reasons.append("scan_time")
+
+    def _dimensions(item: _FlatIndexedFile) -> tuple[int, int] | None:
+        if item.source_path not in dimensions:
+            dimensions[item.source_path] = _read_image_dimensions(item.source_path)
+        return dimensions[item.source_path]
+
+    previous_dimensions = _dimensions(previous)
+    current_dimensions = _dimensions(current)
+    if (
+        previous_dimensions is not None
+        and current_dimensions is not None
+        and previous_dimensions == current_dimensions
+    ):
+        reasons.append("dimensions")
+
+    # 没有页码/连续文件名时，必须同时满足扫描时间和图片尺寸。
+    if "scan_time" in reasons and "dimensions" in reasons:
+        return tuple(reasons)
+    return ()
+
+
+def _enrich_flat_index_with_document_groups(
+    indexed: list[_FlatIndexedFile],
+    warnings: list[str],
+    requested_types: list[str],
+) -> list[_FlatIndexedFile]:
+    """以 O(n log n) 有界窗口合并独立合同图片的组级识别证据。"""
+    canonical_requests = {
+        _canonical_material_for_request_label(material) or material
+        for material in requested_types
+        if material
+    }
+    if not canonical_requests.intersection(_DOCUMENT_GROUPABLE_MATERIALS):
+        return indexed
+    by_directory: dict[Path, list[_FlatIndexedFile]] = {}
+    for item in indexed:
+        if item.source_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        by_directory.setdefault(item.source_path.parent, []).append(item)
+
+    replacement_groups: dict[str, list[_FlatIndexedFile]] = {}
+    path_to_group: dict[Path, str] = {}
+    dimensions: dict[Path, tuple[int, int] | None] = {}
+    mtimes: dict[Path, float | None] = {}
+
+    for directory_items in by_directory.values():
+        if not any(_looks_like_document_start(item) for item in directory_items):
+            continue
+        natural_ordered = sorted(
+            directory_items,
+            key=lambda item: _natural_file_key(item.source_path),
+        )
+        filename_sequences = {
+            item.source_path: _filename_page_sequence(item.source_path)
+            for item in natural_ordered
+        }
+        sequence_edges = sum(
+            1
+            for previous, current in zip(natural_ordered, natural_ordered[1:])
+            if (
+                filename_sequences[previous.source_path] is not None
+                and filename_sequences[current.source_path] is not None
+                and filename_sequences[previous.source_path][0]
+                == filename_sequences[current.source_path][0]
+                and filename_sequences[current.source_path][1]
+                == filename_sequences[previous.source_path][1] + 1
+            )
+        )
+        if sequence_edges >= 2:
+            ordered = natural_ordered
+        else:
+            # 没有可靠连续文件名时按扫描文件时间排列；相同时间再以文件名稳定排序。
+            def _scan_order(item: _FlatIndexedFile) -> tuple[float, tuple[Any, ...]]:
+                if item.source_path not in mtimes:
+                    try:
+                        mtimes[item.source_path] = item.source_path.stat().st_mtime
+                    except OSError:
+                        mtimes[item.source_path] = None
+                timestamp = mtimes[item.source_path]
+                return (
+                    timestamp if timestamp is not None else float("inf"),
+                    _natural_file_key(item.source_path),
+                )
+
+            ordered = sorted(directory_items, key=_scan_order)
+        position = 0
+        while position < len(ordered):
+            start = ordered[position]
+            if start.source_path in path_to_group or not _looks_like_document_start(start):
+                position += 1
+                continue
+
+            group = [start]
+            group_names = _normalized_group_names(start)
+            group_id_hash = start.extracted_id_hash
+            group_phone_hash = start.extracted_phone_hash
+            closed = _has_document_end_evidence(start)
+            conflict_warning = ""
+            cursor = position + 1
+
+            while (
+                not closed
+                and cursor < len(ordered)
+                and len(group) < _DOCUMENT_GROUP_MAX_PAGES
+            ):
+                candidate = ordered[cursor]
+                if candidate.source_path in path_to_group:
+                    break
+                candidate_marker = _explicit_page_marker(candidate)
+                if (
+                    candidate_marker is not None and candidate_marker[0] == 1
+                    or (
+                        _looks_like_document_start(candidate)
+                        and candidate_marker is None
+                    )
+                ):
+                    # 清晰的新首页就是上一份合同的安全结束边界，不吞入下一份。
+                    closed = len(group) > 1
+                    break
+
+                candidate_material = _effective_group_material(candidate)
+                if candidate_material and candidate_material != start.material_type:
+                    break
+                candidate_names = _normalized_group_names(candidate)
+                if group_names and candidate_names and group_names.isdisjoint(candidate_names):
+                    conflict_warning = (
+                        "疑似多页劳动合同未自动合并（姓名冲突）："
+                        f"{group[0].relative_path} 与 {candidate.relative_path}"
+                    )
+                    break
+                if (
+                    group_id_hash
+                    and candidate.extracted_id_hash
+                    and group_id_hash != candidate.extracted_id_hash
+                ):
+                    conflict_warning = (
+                        "疑似多页劳动合同未自动合并（证件号码冲突）："
+                        f"{group[0].relative_path} 与 {candidate.relative_path}"
+                    )
+                    break
+                if (
+                    group_phone_hash
+                    and candidate.extracted_phone_hash
+                    and group_phone_hash != candidate.extracted_phone_hash
+                ):
+                    conflict_warning = (
+                        "疑似多页劳动合同未自动合并（手机号码冲突）："
+                        f"{group[0].relative_path} 与 {candidate.relative_path}"
+                    )
+                    break
+                continuity = _image_group_continuity(
+                    group[-1],
+                    candidate,
+                    dimensions=dimensions,
+                    mtimes=mtimes,
+                )
+                if not continuity:
+                    break
+                if (
+                    "page_number" not in continuity
+                    and "filename_sequence" not in continuity
+                    and not _has_contract_continuation_evidence(candidate)
+                ):
+                    break
+
+                group.append(candidate)
+                group_names.update(candidate_names)
+                group_id_hash = group_id_hash or candidate.extracted_id_hash
+                group_phone_hash = group_phone_hash or candidate.extracted_phone_hash
+                closed = _has_document_end_evidence(candidate)
+                cursor += 1
+
+            if conflict_warning:
+                warnings.append(conflict_warning)
+            if len(group) > 1 and closed and not conflict_warning:
+                group_key = hashlib.sha256(
+                    "\0".join(item.relative_path for item in group).encode("utf-8")
+                ).hexdigest()[:16]
+                combined_text = " ".join(
+                    item.text_snippet for item in group if item.text_snippet
+                )[:_DOCUMENT_GROUP_TEXT_MAX_CHARS]
+                combined_names = tuple(dict.fromkeys(
+                    name
+                    for item in group
+                    for name in item.extracted_names
+                    if str(name or "").strip()
+                ))
+                if not combined_names and not group_id_hash and not group_phone_hash:
+                    warnings.append(
+                        "已确认多页劳动合同边界，但未识别到可核对的姓名、证件号或手机号，"
+                        f"未自动归属员工：{group[0].relative_path}"
+                    )
+                enriched: list[_FlatIndexedFile] = []
+                for page_number, item in enumerate(group, start=1):
+                    method = item.match_method or "unrecognized"
+                    if "document_group" not in method:
+                        method = f"{method}+document_group"
+                    enriched.append(replace(
+                        item,
+                        material_type=start.material_type,
+                        match_method=method,
+                        extracted_names=combined_names,
+                        extracted_id_hash=group_id_hash,
+                        extracted_phone_hash=group_phone_hash,
+                        text_snippet=combined_text,
+                        document_group_id=group_key,
+                        document_page_number=page_number,
+                        document_page_count=len(group),
+                    ))
+                    path_to_group[item.source_path] = group_key
+                replacement_groups[group_key] = enriched
+                position += len(group)
+                continue
+            if len(group) > 1 and not conflict_warning:
+                warnings.append(
+                    "疑似多页劳动合同未自动合并（无法确认结束页）："
+                    f"{group[0].relative_path}；请保留连续页码或签字页标记"
+                )
+            position += 1
+
+    if not replacement_groups:
+        return indexed
+    result: list[_FlatIndexedFile] = []
+    emitted_groups: set[str] = set()
+    for item in indexed:
+        group_key = path_to_group.get(item.source_path)
+        if group_key is None:
+            result.append(item)
+            continue
+        if group_key not in emitted_groups:
+            result.extend(replacement_groups[group_key])
+            emitted_groups.add(group_key)
+    return result
+
+
 def _build_flat_ocr_index(
     lib_path: Path,
     out_path: Path,
@@ -3113,11 +3595,17 @@ def _build_flat_ocr_index(
                 cached_method,
                 cached_text,
             )
+            matched_request = _requested_label_for_detected_material(
+                cached_material, requested_types,
+            )
             has_alternative_request = any(
-                requested != cached_material for requested in requested_types
+                _requested_label_for_detected_material(
+                    cached_material, [requested],
+                ) is None
+                for requested in requested_types
             )
             should_reclassify = (
-                cached_material not in requested_types
+                matched_request is None
                 or (weak_cached_result and has_alternative_request)
             )
             if not should_reclassify:
@@ -3138,7 +3626,9 @@ def _build_flat_ocr_index(
                 method_prefix="cached_text",
                 allow_weak_id_fallback=False,
             )
-            if material in requested_types:
+            if _requested_label_for_detected_material(
+                material or "", requested_types,
+            ) is not None:
                 entry["material_type"] = material
                 entry["match_method"] = method
                 entry["subtype"] = subtype
@@ -3177,7 +3667,9 @@ def _build_flat_ocr_index(
                     if fresh_names:
                         entry["extracted_names"] = list(fresh_names)
                     _record_visual_ocr_query(entry, requested_types)
-                    if fresh_material in requested_types:
+                    if _requested_label_for_detected_material(
+                        fresh_material, requested_types,
+                    ) is not None:
                         entry["material_type"] = fresh_material
                         entry["match_method"] = fresh_method
                         entry["subtype"] = fresh_subtype
@@ -3226,7 +3718,9 @@ def _build_flat_ocr_index(
         _trim_cache_by_age_and_size(cache)
         if not _save_ocr_cache(cache_path, cache):
             checkpoint_ok = False
-    return indexed, checkpoint_ok
+    return _enrich_flat_index_with_document_groups(
+        indexed, warnings, requested_types,
+    ), checkpoint_ok
 
 
 def _flat_file_matches_employee(
@@ -3304,13 +3798,58 @@ def _collect_from_flat_index(
         item for item in indexed_files
         if _flat_file_matches_employee(item, employee, duplicate_target_names)
     ]
+    verified_group_fingerprints: dict[Path, tuple[int, float, str]] = {}
+    relevant_group_ids = {
+        item.document_group_id for item in person_files if item.document_group_id
+    }
+    invalid_group_ids: set[str] = set()
+    if relevant_group_ids:
+        all_group_members: dict[str, list[_FlatIndexedFile]] = {}
+        for item in indexed_files:
+            if item.document_group_id in relevant_group_ids:
+                all_group_members.setdefault(item.document_group_id, []).append(item)
+        for group_id, members in all_group_members.items():
+            for member in members:
+                fingerprint = _compute_full_file_fingerprint(member.source_path)
+                if fingerprint is not None:
+                    verified_group_fingerprints[member.source_path] = fingerprint
+                if (
+                    fingerprint is None
+                    or f"{fingerprint[2]}_{fingerprint[0]}" != member.cache_key
+                ):
+                    invalid_group_ids.add(group_id)
+                    warnings.append(
+                        "多页文档中的文件在索引后发生变化，整组已跳过并请重新运行："
+                        f"{member.relative_path}"
+                    )
+                    break
+        if invalid_group_ids:
+            person_files = [
+                item for item in person_files
+                if item.document_group_id not in invalid_group_ids
+            ]
     person_file_count = len(person_files)
     if requested_materials is not None:
-        person_files = [item for item in person_files if item.material_type in requested_materials]
+        person_files_with_material = [
+            (item, _requested_label_for_detected_material(
+                item.material_type, requested_materials,
+            ))
+            for item in person_files
+        ]
+        person_files_with_material = [
+            (item, material)
+            for item, material in person_files_with_material
+            if material is not None
+        ]
+    else:
+        person_files_with_material = [
+            (item, item.material_type or "其他材料")
+            for item in person_files
+        ]
 
     material_counts: dict[str, int] = {}
-    for item in person_files:
-        material_counts[item.material_type] = material_counts.get(item.material_type, 0) + 1
+    for _item, material in person_files_with_material:
+        material_counts[material] = material_counts.get(material, 0) + 1
     material_sequences: dict[str, int] = {}
     copied_materials: set[str] = set()
     copied_count = 0
@@ -3318,8 +3857,7 @@ def _collect_from_flat_index(
         _flat_employee_result_key(employee, duplicate_target_names)
     )
 
-    for item in person_files:
-        material = item.material_type or "其他材料"
+    for item, material in person_files_with_material:
         clean_material = safe_filename(material)
         material_sequences[material] = material_sequences.get(material, 0) + 1
         sequence = material_sequences[material]
@@ -3345,7 +3883,9 @@ def _collect_from_flat_index(
 
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination = _unique_destination(destination_dir / target_name)
-        current_fingerprint = _compute_full_file_fingerprint(item.source_path)
+        current_fingerprint = verified_group_fingerprints.get(item.source_path)
+        if current_fingerprint is None:
+            current_fingerprint = _compute_full_file_fingerprint(item.source_path)
         if current_fingerprint is None:
             warnings.append(f"资料文件在检索后无法读取，已跳过：{item.relative_path}")
             continue
@@ -3866,6 +4406,11 @@ def _score_file_candidate(
      10分: 文件名明确属于其他【未请求】的材料类型（降级到最后兜底）
     """
     stem = Path(filename).stem.lower()
+    canonical_requests = {
+        _canonical_material_for_request_label(material) or material
+        for material in requested_materials
+        if material
+    }
 
     # 1. 文件名直接命中当前请求材料或其同义词 -> 100分
     for req_type in requested_materials:
@@ -3877,19 +4422,19 @@ def _score_file_candidate(
                 return 100
 
     # 2. 文件名包含线索编号特征 -> 80分
-    if "特种证书" in requested_materials or "资格证书" in requested_materials:
+    if "特种证书" in canonical_requests or "资格证书" in canonical_requests:
         if re.search(r"(?:^|_)t\d{17}[\dxX]|(?:^|_)t\d{15}", stem):
             return 80
-    if "安全员证" in requested_materials:
+    if "安全员证" in canonical_requests:
         if re.search(r"(?:^|_)[abc]\d{17}[\dxX]|(?:^|_)[abc]\d{15}", stem):
             return 80
-    if "身份证" in requested_materials:
+    if "身份证" in canonical_requests:
         if re.search(r"(?:^|[^a-z0-9])\d{17}[\dxX](?:[^a-z0-9]|$)|(?:^|[^a-z0-9])\d{15}(?:[^a-z0-9]|$)", stem):
             return 80
 
     # 3. 检查是否明确包含其他【未请求】材料的同义词 -> 10分
     for other_mat, other_syns in MATERIAL_SYNONYMS.items():
-        if other_mat not in requested_materials:
+        if other_mat not in canonical_requests:
             for s in other_syns:
                 if s.lower() in stem:
                     return 10
@@ -4012,10 +4557,13 @@ def _collect_specific_materials(
             ))
             continue
 
-        if classified_mat_type and classified_mat_type in requested_materials:
-            if not any(existing[0] == f_path for existing in found[classified_mat_type]):
+        requested_label = _requested_label_for_detected_material(
+            classified_mat_type or "", requested_materials,
+        )
+        if requested_label is not None:
+            if not any(existing[0] == f_path for existing in found[requested_label]):
                 seen_hashes.add(sig)
-                found[classified_mat_type].append(
+                found[requested_label].append(
                     (f_path, rel_p, match_method or folder_reason, subtype, ocr_name, ocr_id, cache_hit)
                 )
 
