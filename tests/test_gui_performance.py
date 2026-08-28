@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import tkinter as tk
 import unittest
@@ -14,7 +15,9 @@ from unittest.mock import Mock, patch
 from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
 from hr_toolkit.gui.app import (
     HRToolkitApp,
+    UPLOAD_LIST_VISIBLE_ROWS,
     WINDOW_RESIZE_SETTLE_MS,
+    _CoalescedCanvasScroller,
 )
 from hr_toolkit.gui.widgets import CodexButton, RoundedCard, SidebarItem
 
@@ -141,6 +144,67 @@ class GuiPerformanceTests(unittest.TestCase):
         self.assertEqual(len(app._pending_log_entries), 800)
         self.assertEqual(app.log_text.see.call_count, 1)
         app.root.after.assert_called_once_with(1, app._flush_pending_log_entries)
+
+    def test_log_paint_is_deferred_while_content_is_scrolling(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app._is_alive = True
+        app._scroll_active = True
+        app._pending_log_entries = deque()
+        app._log_flush_job = None
+        app.root = Mock()
+        app.log_text = Mock()
+        app.log_text.winfo_exists.return_value = True
+
+        app._write_log("正在处理第 1 条")
+
+        self.assertEqual(len(app._pending_log_entries), 1)
+        app.root.after_idle.assert_not_called()
+        app.log_text.insert.assert_not_called()
+
+        app._scroll_active = False
+        app._flush_pending_log_entries()
+        self.assertEqual(len(app._pending_log_entries), 0)
+        self.assertGreater(app.log_text.insert.call_count, 0)
+
+    def test_smooth_wheel_scroller_animates_then_reaches_exact_target(self) -> None:
+        root = Mock()
+        root.after.return_value = "scroll-job"
+        canvas = Mock()
+        canvas.winfo_exists.return_value = True
+        controller = _CoalescedCanvasScroller(
+            root,
+            canvas,
+            smooth_units=True,
+        )
+        controller.update_geometry(2000, 500)
+        controller.update_view(0.25, 0.5)
+
+        controller.queue_units(1)
+        controller._flush()
+
+        first_frame = canvas.yview_moveto.call_args.args[0]
+        self.assertGreater(first_frame, 0.25)
+        self.assertLess(first_frame, 0.275)
+        self.assertTrue(controller.scheduled)
+
+        controller.flush_pending()
+        self.assertFalse(controller.scheduled)
+        self.assertAlmostEqual(canvas.yview_moveto.call_args.args[0], 0.275, places=6)
+
+    def test_tool_thread_fairness_is_restored_after_processing(self) -> None:
+        original = sys.getswitchinterval()
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app._original_thread_switch_interval = None
+        app._active_tool_worker_tokens = set()
+        app._tool_running = True
+        try:
+            app._enable_ui_thread_fairness()
+            self.assertLessEqual(sys.getswitchinterval(), original)
+            app._tool_running = False
+            app._restore_thread_switch_interval()
+            self.assertAlmostEqual(sys.getswitchinterval(), original, places=7)
+        finally:
+            sys.setswitchinterval(original)
 
     def test_workspace_batch_locations_are_cached_until_tree_refresh(self) -> None:
         app = HRToolkitApp.__new__(HRToolkitApp)
@@ -754,6 +818,75 @@ class GuiPerformanceTests(unittest.TestCase):
             if app is not None:
                 app.destroy()
 
+    def test_large_upload_list_has_bounded_height_and_visible_item_count(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._select_tool("personnel_change_merge")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                paths = []
+                for index in range(200):
+                    path = Path(temp_dir) / f"异动表_{index + 1:03d}.xlsx"
+                    path.write_bytes(b"test")
+                    paths.append(path)
+                app.change_input_paths = paths
+                app._sync_input_path_text()
+                app._refresh_upload_card()
+                self.root.update()
+
+                upload_canvas = app.upload_body.winfo_children()[0]
+                expected_height = (
+                    UPLOAD_LIST_VISIBLE_ROWS * app._px(44)
+                    + (UPLOAD_LIST_VISIBLE_ROWS - 1) * app._px(8)
+                )
+                self.assertEqual(app._upload_body_height, expected_height)
+                self.assertEqual(int(float(upload_canvas.cget("height"))), expected_height)
+                self.assertLess(len(upload_canvas.find_all()), 160)
+
+                controller = app._upload_items_scroll_controller
+                controller.queue_units(40)
+                controller.flush_pending()
+                self.root.update()
+
+                rendered_start, rendered_end = app._upload_items_rendered_range
+                self.assertGreater(rendered_start, 0)
+                self.assertLess(rendered_end - rendered_start, 30)
+                self.assertTrue(upload_canvas.find_withtag("chip_close_40"))
+                self.assertLess(len(upload_canvas.find_all()), 160)
+
+                thumb = upload_canvas.find_withtag("upload_scrollbar")
+                self.assertEqual(len(thumb), 1)
+                thumb_box = upload_canvas.bbox(thumb[0])
+                self.assertIsNotNone(thumb_box)
+                assert thumb_box is not None
+                thumb_x = (thumb_box[0] + thumb_box[2]) // 2
+                thumb_y = int(
+                    (thumb_box[1] + thumb_box[3]) / 2
+                    - upload_canvas.canvasy(0)
+                )
+                before_drag = upload_canvas.yview()[0]
+                upload_canvas.event_generate(
+                    "<ButtonPress-1>",
+                    x=thumb_x,
+                    y=thumb_y,
+                )
+                upload_canvas.event_generate(
+                    "<B1-Motion>",
+                    x=thumb_x,
+                    y=thumb_y + app._px(80),
+                )
+                upload_canvas.event_generate(
+                    "<ButtonRelease-1>",
+                    x=thumb_x,
+                    y=thumb_y + app._px(80),
+                )
+                self.root.update()
+                self.assertGreater(upload_canvas.yview()[0], before_drag)
+        finally:
+            if app is not None:
+                app.destroy()
+
     def test_upload_canvases_reuse_items_during_width_changes(self) -> None:
         app = None
         try:
@@ -773,7 +906,12 @@ class GuiPerformanceTests(unittest.TestCase):
 
                 upload_canvas = app.upload_body.winfo_children()[0]
                 initial_items = upload_canvas.find_all()
-                app._refresh_upload_card()
+                with patch.object(
+                    app,
+                    "_upload_item_meta",
+                    side_effect=AssertionError("unchanged upload metadata was re-read"),
+                ):
+                    app._refresh_upload_card()
                 self.root.update()
                 self.assertIs(app.upload_body.winfo_children()[0], upload_canvas)
                 self.root.minsize(1, 1)

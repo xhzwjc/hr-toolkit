@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import threading
@@ -220,6 +221,12 @@ EXCEL_ARCHIVE_FORMAT_TEXT = f".xlsx、.xls 以及 {ARCHIVE_FORMAT_DESCRIPTION} �
 WORKSPACE_UI_SETTINGS_VERSION = 2
 UPLOAD_DIRECTORY_COUNT_LIMIT = 200
 LOG_FLUSH_BATCH_SIZE = 200
+UPLOAD_LIST_VIRTUALIZE_AFTER = 12
+UPLOAD_LIST_VISIBLE_ROWS = 8
+UPLOAD_LIST_OVERSCAN_ROWS = 2
+UI_THREAD_SWITCH_INTERVAL_SECONDS = 0.0005
+UI_SCROLL_SWITCH_INTERVAL_SECONDS = 0.0001
+SCROLL_SETTLE_MS = 140
 WINDOW_RESIZE_FRAME_MS = 16
 WINDOW_RESIZE_SETTLE_MS = 100
 WINDOW_RESIZE_SNAPSHOT_DELAY_MS = 800
@@ -240,16 +247,28 @@ class _CoalescedCanvasScroller:
     scroll distance while preventing an unbounded GDI repaint queue.
     """
 
-    def __init__(self, root, canvas, *, frame_interval_ms: int = 16) -> None:
+    def __init__(
+        self,
+        root,
+        canvas,
+        *,
+        frame_interval_ms: int = 16,
+        smooth_units: bool = False,
+    ) -> None:
         self._root = root
         self._canvas = canvas
         self._frame_interval_ms = max(1, int(frame_interval_ms))
+        self._smooth_units = bool(smooth_units)
         self._pending_units = 0
         self._pending_pixels = 0.0
         self._job = None
         self._total_height = 1.0
         self._viewport_height = 1.0
         self._top = 0.0
+        self._target_top = 0.0
+        self._animating = False
+        self._applying_view = False
+        self._last_frame_at = 0.0
 
     @property
     def scheduled(self) -> bool:
@@ -262,6 +281,13 @@ class _CoalescedCanvasScroller:
     def update_view(self, first, _last) -> None:
         try:
             self._top = max(0.0, min(float(first), 1.0))
+            if (
+                not self._applying_view
+                and not self._animating
+                and not self._pending_units
+                and not self._pending_pixels
+            ):
+                self._target_top = self._top
         except (TypeError, ValueError):
             pass
 
@@ -293,20 +319,65 @@ class _CoalescedCanvasScroller:
                 self._root.after_cancel(job)
             except Exception:
                 pass
-        self._flush()
+        self._flush(force=True)
 
-    def _flush(self) -> None:
+    def _flush(self, *, force: bool = False) -> None:
         self._job = None
         units = self._pending_units
         pixels = self._pending_pixels
         self._pending_units = 0
         self._pending_pixels = 0.0
-        if not units and not pixels:
+        if not units and not pixels and not self._animating:
             return
         try:
             if not self._canvas.winfo_exists():
                 return
         except Exception:
+            return
+
+        if self._smooth_units and (units or self._animating):
+            max_top = max(0.0, 1.0 - self._viewport_height / self._total_height)
+            if not self._animating:
+                self._target_top = self._top
+            unit_pixels = max(40.0, min(96.0, self._viewport_height * 0.10))
+            self._target_top = max(
+                0.0,
+                min(
+                    max_top,
+                    self._target_top
+                    + (units * unit_pixels - pixels) / self._total_height,
+                ),
+            )
+            self._animating = True
+            now = time.perf_counter()
+            elapsed = (
+                now - self._last_frame_at
+                if self._last_frame_at > 0.0
+                else self._frame_interval_ms / 1000.0
+            )
+            self._last_frame_at = now
+            distance = self._target_top - self._top
+            distance_pixels = distance * self._total_height
+            if force or abs(distance_pixels) <= 0.75:
+                new_top = self._target_top
+                self._animating = False
+            else:
+                # Catch up in one frame after a delayed callback, while using
+                # several small transforms at normal frame cadence.  This
+                # avoids building an animation backlog on low-spec machines.
+                progress = max(0.48, min(1.0, elapsed / 0.04))
+                new_top = self._top + distance * progress
+            self._top = new_top
+            self._applying_view = True
+            try:
+                self._canvas.yview_moveto(new_top)
+            except Exception:
+                self._animating = False
+                return
+            finally:
+                self._applying_view = False
+            if self._animating and not force:
+                self._schedule()
             return
 
         if units:
@@ -338,6 +409,9 @@ class _CoalescedCanvasScroller:
         self._job = None
         self._pending_units = 0
         self._pending_pixels = 0.0
+        self._animating = False
+        self._target_top = self._top
+        self._last_frame_at = 0.0
         if job is not None:
             try:
                 self._root.after_cancel(job)
@@ -589,6 +663,8 @@ class HRToolkitApp:
         self.history_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self._pending_log_entries: deque[tuple[str, str | None, str, str]] = deque()
         self._log_flush_job: str | None = None
+        self._scroll_active = False
+        self._scroll_activity_job: str | None = None
         self.last_output_dir: Path | None = None
         self.pending_update: UpdateInfo | None = None
         self.update_window: Toplevel | None = None
@@ -605,6 +681,8 @@ class HRToolkitApp:
         self._update_download_cancel_event: threading.Event | None = None
         self._tool_run_token = 0
         self._tool_running = False
+        self._active_tool_worker_tokens: set[int] = set()
+        self._original_thread_switch_interval: float | None = None
         self._idle_run_button_text = ""
         self._history_page = 0
         self._history_total = 0
@@ -2472,14 +2550,19 @@ class HRToolkitApp:
         self._right_scroll_controller = _CoalescedCanvasScroller(
             self.root,
             self._right_canvas,
+            smooth_units=sys.platform.startswith("win"),
         )
 
         def _update_right_scrollbar(first, last) -> None:
             self._right_scroll_controller.update_view(first, last)
             right_vscroll.set(first, last)
 
+        def _move_right_scrollbar(*args) -> None:
+            self._right_scroll_controller.cancel()
+            self._right_canvas.yview(*args)
+
         self._right_canvas.configure(yscrollcommand=_update_right_scrollbar)
-        right_vscroll.config(command=self._right_canvas.yview)
+        right_vscroll.config(command=_move_right_scrollbar)
 
         right_frame = ttk.Frame(self._right_canvas, padding=self._responsive_content_padding(), style="Content.TFrame")
         self._right_canvas_window = self._right_canvas.create_window(
@@ -2627,10 +2710,56 @@ class HRToolkitApp:
 
         SCROLL_TAG = "RightPanelScroll"
 
+        def _finish_scroll_activity() -> None:
+            self._scroll_activity_job = None
+            self._scroll_active = False
+            self._restore_processing_thread_fairness()
+            if (
+                getattr(self, "_pending_log_entries", None)
+                and getattr(self, "_log_flush_job", None) is None
+                and getattr(self, "_is_alive", True)
+            ):
+                try:
+                    self._log_flush_job = self.root.after_idle(
+                        self._flush_pending_log_entries
+                    )
+                except Exception:
+                    self._log_flush_job = None
+
+        def _note_scroll_activity() -> None:
+            if not getattr(self, "_is_alive", True):
+                return
+            self._scroll_active = True
+            self._prioritize_ui_thread_for_scroll()
+            activity_job = getattr(self, "_scroll_activity_job", None)
+            if activity_job is not None:
+                try:
+                    self.root.after_cancel(activity_job)
+                except Exception:
+                    pass
+            log_flush_job = getattr(self, "_log_flush_job", None)
+            if log_flush_job is not None:
+                try:
+                    self.root.after_cancel(log_flush_job)
+                except Exception:
+                    pass
+                self._log_flush_job = None
+            try:
+                self._scroll_activity_job = self.root.after(
+                    SCROLL_SETTLE_MS,
+                    _finish_scroll_activity,
+                )
+            except Exception:
+                self._scroll_activity_job = None
+
         def _scroll_page(delta_units: int) -> None:
+            if delta_units:
+                _note_scroll_activity()
             self._right_scroll_controller.queue_units(delta_units)
 
         def _scroll_page_pixels(delta_y: int) -> None:
+            if delta_y:
+                _note_scroll_activity()
             self._right_scroll_controller.queue_pixels(delta_y)
 
         def _touchpad_deltas(event) -> tuple[int, int]:
@@ -2659,6 +2788,12 @@ class HRToolkitApp:
             if getattr(event, "num", None) == 5:
                 return 1
             return 0
+
+        self._queue_content_scroll_units = _scroll_page
+        self._queue_content_scroll_pixels = _scroll_page_pixels
+        self._content_mousewheel_units = _mousewheel_units
+        self._content_touchpad_deltas = _touchpad_deltas
+        self._note_content_scroll_activity = _note_scroll_activity
 
         def _safe_bind_class(sequence: str, handler) -> None:
             try:
@@ -2704,7 +2839,10 @@ class HRToolkitApp:
             try:
                 current = list(widget.bindtags())
                 if SCROLL_TAG not in current:
-                    widget.bindtags([SCROLL_TAG] + current)
+                    if getattr(widget, "_hr_scroll_priority", False) and current:
+                        widget.bindtags([current[0], SCROLL_TAG] + current[1:])
+                    else:
+                        widget.bindtags([SCROLL_TAG] + current)
             except Exception:
                 pass
             for child in widget.winfo_children():
@@ -8817,20 +8955,25 @@ class HRToolkitApp:
             menu.grab_release()
 
     @staticmethod
-    def _format_file_size(path: Path) -> str:
-        try:
-            size = path.stat().st_size
-        except Exception:
-            return ""
+    def _format_file_size(path: Path, *, known_size: int | None = None) -> str:
+        if known_size is None:
+            try:
+                size = path.stat().st_size
+            except Exception:
+                return ""
+        else:
+            size = known_size
         if size >= 1024 * 1024:
             return f"{size / (1024 * 1024):.1f} MB"
         return f"{max(1, size // 1024)} KB"
 
     def _upload_item_meta(self, path: Path) -> tuple[str, str, str, str]:
         """返回 (徽标文字, 徽标底色, 徽标前景, 说明文字)。"""
-        if not path.exists():
+        try:
+            path_stat = path.stat()
+        except Exception:
             return "！", COLOR_BADGE_ZIP_BG, COLOR_BADGE_ZIP_FG, "文件不存在"
-        if path.is_dir():
+        if stat_module.S_ISDIR(path_stat.st_mode):
             try:
                 child_count = 0
                 with os.scandir(path) as entries:
@@ -8848,7 +8991,7 @@ class HRToolkitApp:
                 detail = "文件夹"
             return "", COLOR_BADGE_DIR_BG, COLOR_BADGE_DIR_FG, detail
         suffix = path.suffix.lower()
-        size_text = self._format_file_size(path)
+        size_text = self._format_file_size(path, known_size=path_stat.st_size)
         archive_type = archive_suffix(path)
         if archive_type:
             archive_badges = {
@@ -8878,14 +9021,13 @@ class HRToolkitApp:
             self.upload_add_button.pack_forget()
         rows = None
         upload_render_key = None
+        upload_selection_key = tuple(items)
         if items:
-            rows = [(path, *self._upload_item_meta(path)) for path in items]
-            upload_render_key = tuple(rows)
             upload_canvas = getattr(self, "_upload_items_canvas", None)
             try:
                 reusable_upload_canvas = (
-                    upload_render_key
-                    == getattr(self, "_upload_items_render_key", None)
+                    upload_selection_key
+                    == getattr(self, "_upload_items_selection_key", None)
                     and upload_canvas is not None
                     and upload_canvas.winfo_exists()
                     and upload_canvas.master is self.upload_body
@@ -8899,6 +9041,13 @@ class HRToolkitApp:
                 if hasattr(self, "_sync_right_canvas_window"):
                     self.root.after_idle(self._sync_right_canvas_window)
                 return
+            if upload_selection_key == getattr(self, "_upload_metadata_cache_key", None):
+                rows = list(getattr(self, "_upload_metadata_cache_rows", ()))
+            else:
+                rows = [(path, *self._upload_item_meta(path)) for path in items]
+                self._upload_metadata_cache_key = upload_selection_key
+                self._upload_metadata_cache_rows = tuple(rows)
+            upload_render_key = tuple(rows)
         drop_zone = getattr(self, "_upload_drop_zone", None)
         if not items and drop_zone is not None:
             try:
@@ -8916,13 +9065,20 @@ class HRToolkitApp:
                 if hasattr(self, "_sync_right_canvas_window"):
                     self.root.after_idle(self._sync_right_canvas_window)
                 return
+        upload_scroll_controller = getattr(self, "_upload_items_scroll_controller", None)
+        if upload_scroll_controller is not None:
+            upload_scroll_controller.cancel()
+        self._upload_items_scroll_controller = None
         for child in self.upload_body.winfo_children():
             child.destroy()
         self._upload_drop_zone = None
         self._refresh_upload_drop_zone_content = None
         self._upload_items_canvas = None
+        self._upload_items_selection_key = None
         self._upload_items_render_key = None
+        self._upload_items_rendered_range = None
         if items:
+            self._upload_items_selection_key = upload_selection_key
             self._upload_items_render_key = upload_render_key
             self._render_upload_items(items, rows=rows)
         else:
@@ -8938,39 +9094,88 @@ class HRToolkitApp:
         *,
         rows: list[tuple[Path, str, str, str, str]] | None = None,
     ) -> None:
-        """Render all selected files on one canvas to minimize GDI surfaces."""
+        """Render uploads in one bounded, windowed canvas.
+
+        Small selections keep the original full-height layout.  Larger ones use
+        a fixed-height viewport and only retain rows around the visible range.
+        This mirrors the windowing used by modern desktop lists and prevents a
+        large upload from turning the entire tool page into a multi-thousand-
+        pixel native Canvas that Windows has to repaint on every outer scroll.
+        """
 
         row_height = self._px(44)
         row_gap = self._px(8)
         row_step = row_height + row_gap
         total_height = len(items) * row_height + max(0, len(items) - 1) * row_gap
+        virtualized = len(items) > UPLOAD_LIST_VIRTUALIZE_AFTER
+        visible_rows = min(len(items), UPLOAD_LIST_VISIBLE_ROWS) if virtualized else len(items)
+        body_height = visible_rows * row_height + max(0, visible_rows - 1) * row_gap
         if rows is None:
             rows = [(path, *self._upload_item_meta(path)) for path in items]
-        if total_height != self._upload_body_height:
-            self._upload_body_height = total_height
-            self.upload_body.configure(height=total_height)
+        if body_height != self._upload_body_height:
+            self._upload_body_height = body_height
+            self.upload_body.configure(height=body_height)
+
         initial_width = max(self.upload_body.winfo_width(), 1)
         chip = Canvas(
             self.upload_body,
             width=initial_width,
-            height=total_height,
+            height=body_height,
             bg=COLOR_SURFACE,
             highlightthickness=0,
             bd=0,
+            yscrollincrement=row_step if virtualized else 0,
+            scrollregion=(0, 0, initial_width, total_height),
         )
-        chip.place(x=0, y=0, relwidth=1, height=total_height)
+        chip.place(x=0, y=0, relwidth=1, height=body_height)
+        # Give the upload viewport first refusal on wheel events; at either
+        # boundary its handler bubbles the movement to the outer tool page.
+        chip._hr_scroll_priority = True
+
         name_font = (self.base_font[0], _font_size(10), "bold")
         last_width = 0
+        rendered_range = (-1, -1)
         hovered_index = -1
-        row_items: list[dict[str, object]] = []
+        row_items: dict[int, dict[str, object]] = {}
+        scroll_thumb: int | None = None
+        scroll_drag_anchor: tuple[int, float] | None = None
+        close_item_to_index: dict[int, int] = {}
+        display_name_cache: dict[tuple[int, int], str] = {}
+
+        upload_scroll_controller = _CoalescedCanvasScroller(self.root, chip)
+        upload_scroll_controller.update_geometry(total_height, body_height)
+        self._upload_items_scroll_controller = upload_scroll_controller
+
+        def _visible_range() -> tuple[int, int]:
+            if not virtualized:
+                return 0, len(rows)
+            try:
+                top = max(0.0, float(chip.canvasy(0)))
+            except Exception:
+                top = 0.0
+            first_visible = int(top // row_step)
+            visible_count = max(
+                1,
+                int((body_height + row_step - 1) // row_step) + 1,
+            )
+            start = max(0, first_visible - UPLOAD_LIST_OVERSCAN_ROWS)
+            end = min(
+                len(rows),
+                first_visible + visible_count + UPLOAD_LIST_OVERSCAN_ROWS,
+            )
+            return start, max(start, end)
 
         def _row_index_at(y: int) -> int:
             if y < 0:
                 return -1
-            index = int(y // row_step)
+            try:
+                content_y = int(chip.canvasy(y))
+            except Exception:
+                content_y = y
+            index = int(content_y // row_step)
             if index < 0 or index >= len(rows):
                 return -1
-            if y - index * row_step >= row_height:
+            if content_y - index * row_step >= row_height:
                 return -1
             return index
 
@@ -8978,67 +9183,66 @@ class HRToolkitApp:
             self._hide_path_tooltip()
             self._remove_upload_item(index)
 
-        def redraw(_event=None) -> None:
-            nonlocal last_width
-            width = (
-                int(getattr(_event, "width", 0))
-                if _event is not None
-                else chip.winfo_width()
-            )
-            if width <= 1 or width == last_width:
-                return
-            last_width = width
-            if not row_items:
-                _create_row_items(width)
-                return
-            for index, (path, _badge_text, _badge_bg, _badge_fg, _detail) in enumerate(rows):
-                items = row_items[index]
+        def _right_edge(width: int) -> float:
+            return width - self._pxf(26 if virtualized else 20)
+
+        def _layout_rendered_rows(width: int) -> None:
+            close_x = _right_edge(width)
+            for index, item_map in row_items.items():
+                path = rows[index][0]
                 row_top = index * row_step
                 row_middle = row_top + row_height / 2
                 chip.coords(
-                    items["background"],
+                    item_map["background"],
                     *_tessellate_round_rect(
                         self._pxf(0.5),
                         row_top + self._pxf(0.5),
-                        width - self._pxf(0.5),
+                        width - self._pxf(10 if virtualized else 0.5),
                         row_top + row_height - self._pxf(0.5),
                         self._pxf(10),
                     ),
                 )
-                close_x = width - self._pxf(20)
-                chip.coords(items["close"], close_x, row_middle)
+                chip.coords(item_map["close"], close_x, row_middle)
                 right_edge = close_x - self._pxf(16)
-                meta_item = items["meta"]
+                meta_item = item_map["meta"]
                 if meta_item is not None:
                     chip.coords(meta_item, right_edge, row_middle)
                     meta_bbox = chip.bbox(meta_item)
                     if meta_bbox:
                         right_edge = meta_bbox[0] - self._pxf(12)
-                display_name = self._ellipsize(
-                    path.name or str(path),
-                    name_font,
-                    right_edge - float(items["name_x"]),
-                )
-                if display_name != items["display_name"]:
-                    items["display_name"] = display_name
-                    chip.itemconfigure(items["name"], text=display_name)
+                cache_key = (index, width)
+                display_name = display_name_cache.get(cache_key)
+                if display_name is None:
+                    display_name = self._ellipsize(
+                        path.name or str(path),
+                        name_font,
+                        right_edge - float(item_map["name_x"]),
+                    )
+                    display_name_cache[cache_key] = display_name
+                if display_name != item_map["display_name"]:
+                    item_map["display_name"] = display_name
+                    chip.itemconfigure(item_map["name"], text=display_name)
 
-        def _create_row_items(width: int) -> None:
-            for index, (path, badge_text, badge_bg, badge_fg, detail) in enumerate(rows):
+        def _create_row_items(width: int, start: int, end: int) -> None:
+            close_x = _right_edge(width)
+            for index in range(start, end):
+                path, badge_text, badge_bg, badge_fg, detail = rows[index]
                 row_top = index * row_step
                 row_middle = row_top + row_height / 2
                 close_tag = f"chip_close_{index}"
+                row_tag = f"upload_row_{index}"
                 background = chip.create_polygon(
                     *_tessellate_round_rect(
                         self._pxf(0.5),
                         row_top + self._pxf(0.5),
-                        width - self._pxf(0.5),
+                        width - self._pxf(10 if virtualized else 0.5),
                         row_top + row_height - self._pxf(0.5),
                         self._pxf(10),
                     ),
                     fill=COLOR_SURFACE_ALT,
                     outline=COLOR_BORDER_FAINT,
                     width=max(1.0, self._pxf(1)),
+                    tags=("upload_row", row_tag),
                 )
                 badge_x = self._pxf(13)
                 badge_size = self._pxf(26)
@@ -9053,6 +9257,7 @@ class HRToolkitApp:
                     ),
                     fill=badge_bg,
                     outline="",
+                    tags=("upload_row", row_tag),
                 )
                 if badge_text:
                     chip.create_text(
@@ -9061,9 +9266,10 @@ class HRToolkitApp:
                         text=badge_text,
                         fill=badge_fg,
                         font=(self.base_font[0], _font_size(7), "bold"),
+                        tags=("upload_row", row_tag),
                     )
                 else:
-                    _paint_tool_icon(
+                    icon_items = _paint_tool_icon(
                         chip,
                         "folder_rename",
                         badge_fg,
@@ -9072,14 +9278,16 @@ class HRToolkitApp:
                         badge_size * 0.5,
                         max(1.0, self._pxf(1.3)),
                     )
-                close_x = width - self._pxf(20)
+                    for icon_item in icon_items:
+                        chip.addtag_withtag("upload_row", icon_item)
+                        chip.addtag_withtag(row_tag, icon_item)
                 close_item = chip.create_text(
                     close_x,
                     row_middle,
                     text="✕",
                     fill="#C4C1B7",
                     font=self.base_font,
-                    tags=(close_tag, "chip_close"),
+                    tags=("upload_row", row_tag, close_tag, "chip_close"),
                 )
                 right_edge = close_x - self._pxf(16)
                 meta_item = None
@@ -9091,16 +9299,21 @@ class HRToolkitApp:
                         fill=COLOR_FAINT,
                         font=self.small_font,
                         anchor="e",
+                        tags=("upload_row", row_tag),
                     )
                     meta_bbox = chip.bbox(meta_item)
                     if meta_bbox:
                         right_edge = meta_bbox[0] - self._pxf(12)
                 name_x = badge_x + badge_size + self._pxf(11)
-                display_name = self._ellipsize(
-                    path.name or str(path),
-                    name_font,
-                    right_edge - name_x,
-                )
+                cache_key = (index, width)
+                display_name = display_name_cache.get(cache_key)
+                if display_name is None:
+                    display_name = self._ellipsize(
+                        path.name or str(path),
+                        name_font,
+                        right_edge - name_x,
+                    )
+                    display_name_cache[cache_key] = display_name
                 name_item = chip.create_text(
                     name_x,
                     row_middle,
@@ -9108,53 +9321,202 @@ class HRToolkitApp:
                     fill=COLOR_TEXT,
                     font=name_font,
                     anchor="w",
+                    tags=("upload_row", row_tag),
                 )
-                row_items.append(
-                    {
-                        "background": background,
-                        "close": close_item,
-                        "meta": meta_item,
-                        "name": name_item,
-                        "name_x": name_x,
-                        "display_name": display_name,
-                    }
+                row_items[index] = {
+                    "background": background,
+                    "close": close_item,
+                    "meta": meta_item,
+                    "name": name_item,
+                    "name_x": name_x,
+                    "display_name": display_name,
+                }
+                close_item_to_index[close_item] = index
+
+        def _update_scroll_indicator(width: int | None = None) -> None:
+            nonlocal scroll_thumb
+            if not virtualized:
+                return
+            if width is None:
+                width = max(chip.winfo_width(), 1)
+            try:
+                first, last = chip.yview()
+                viewport_height = max(chip.winfo_height(), 1)
+                world_top = float(chip.canvasy(0))
+            except Exception:
+                return
+            visible_fraction = max(0.0, min(1.0, last - first))
+            thumb_height = max(self._pxf(24), viewport_height * visible_fraction)
+            travel = max(0.0, viewport_height - thumb_height)
+            max_first = max(0.0, 1.0 - visible_fraction)
+            relative_top = 0.0 if max_first <= 0 else travel * first / max_first
+            x2 = width - self._pxf(2)
+            x1 = x2 - self._pxf(3)
+            y1 = world_top + relative_top
+            y2 = y1 + thumb_height
+            if scroll_thumb is None or not chip.find_withtag(scroll_thumb):
+                scroll_thumb = chip.create_rectangle(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    fill=COLOR_BORDER,
+                    outline="",
+                    tags=("upload_scrollbar",),
                 )
-                chip.tag_bind(
-                    close_tag,
-                    "<Button-1>",
-                    lambda _event, item_index=index: _remove_row(item_index),
-                )
-                chip.tag_bind(
-                    close_tag,
-                    "<Enter>",
-                    lambda _event, tag=close_tag: (
-                        chip.itemconfigure(tag, fill=COLOR_DANGER),
-                        chip.configure(cursor="hand2"),
-                    ),
-                )
-                chip.tag_bind(
-                    close_tag,
-                    "<Leave>",
-                    lambda _event, tag=close_tag: (
-                        chip.itemconfigure(tag, fill="#C4C1B7"),
-                        chip.configure(cursor=""),
-                    ),
-                )
+                chip.tag_bind("upload_scrollbar", "<Enter>", lambda _event: chip.configure(cursor="sb_v_double_arrow"))
+                chip.tag_bind("upload_scrollbar", "<Leave>", lambda _event: chip.configure(cursor=""))
+            else:
+                chip.coords(scroll_thumb, x1, y1, x2, y2)
+            chip.tag_raise("upload_scrollbar")
+
+        def _render_visible_rows(*, width: int | None = None, force: bool = False) -> None:
+            nonlocal last_width, rendered_range
+            if width is None:
+                width = max(chip.winfo_width(), 1)
+            if width <= 1:
+                return
+            visible_range = _visible_range()
+            range_changed = visible_range != rendered_range
+            width_changed = width != last_width
+            if not force and not range_changed and not width_changed:
+                _update_scroll_indicator(width)
+                return
+            if width_changed and last_width > 0:
+                display_name_cache.clear()
+            if range_changed:
+                start, end = visible_range
+                desired_indices = set(range(start, end))
+                for stale_index in tuple(row_items):
+                    if stale_index not in desired_indices:
+                        close_item_to_index.pop(int(row_items[stale_index]["close"]), None)
+                        chip.delete(f"upload_row_{stale_index}")
+                        row_items.pop(stale_index, None)
+                rendered_range = visible_range
+                missing_indices = [index for index in range(start, end) if index not in row_items]
+                for missing_index in missing_indices:
+                    _create_row_items(width, missing_index, missing_index + 1)
+            if width_changed:
+                _layout_rendered_rows(width)
+            last_width = width
+            self._upload_items_rendered_range = rendered_range
+            _update_scroll_indicator(width)
+
+        def _on_canvas_configure(event=None) -> None:
+            width = max(int(getattr(event, "width", 0) or chip.winfo_width()), 1)
+            height = max(int(getattr(event, "height", 0) or chip.winfo_height()), 1)
+            chip.configure(scrollregion=(0, 0, width, total_height))
+            upload_scroll_controller.update_geometry(total_height, height)
+            _render_visible_rows(width=width)
+
+        def _on_upload_yview(first, last) -> None:
+            upload_scroll_controller.update_view(first, last)
+            _render_visible_rows()
+
+        def _can_scroll_units(units: int) -> bool:
+            if not virtualized or not units:
+                return False
+            first, last = chip.yview()
+            return (units < 0 and first > 0.0) or (units > 0 and last < 1.0)
+
+        def _can_scroll_pixels(delta_y: int) -> bool:
+            if not virtualized or not delta_y:
+                return False
+            first, last = chip.yview()
+            return (delta_y > 0 and first > 0.0) or (delta_y < 0 and last < 1.0)
+
+        def _on_upload_mousewheel(event):
+            units = self._content_mousewheel_units(event)
+            if _can_scroll_units(units):
+                self._note_content_scroll_activity()
+                upload_scroll_controller.queue_units(units)
+            else:
+                self._queue_content_scroll_units(units)
+            return "break"
+
+        def _on_upload_touchpad(event):
+            _delta_x, delta_y = self._content_touchpad_deltas(event)
+            if _can_scroll_pixels(delta_y):
+                self._note_content_scroll_activity()
+                upload_scroll_controller.queue_pixels(delta_y)
+            else:
+                self._queue_content_scroll_pixels(delta_y)
+            return "break"
+
+        def _start_scroll_drag(event) -> str:
+            nonlocal scroll_drag_anchor
+            upload_scroll_controller.cancel()
+            scroll_drag_anchor = (int(getattr(event, "y", 0)), float(chip.yview()[0]))
+            return "break"
+
+        def _drag_scrollbar(event) -> str | None:
+            if scroll_drag_anchor is None:
+                return None
+            anchor_y, anchor_first = scroll_drag_anchor
+            first, last = chip.yview()
+            visible_fraction = max(0.0, min(1.0, last - first))
+            viewport_height = max(chip.winfo_height(), 1)
+            thumb_height = max(self._pxf(24), viewport_height * visible_fraction)
+            travel = max(1.0, viewport_height - thumb_height)
+            max_first = max(0.0, 1.0 - visible_fraction)
+            delta_y = int(getattr(event, "y", 0)) - anchor_y
+            chip.yview_moveto(max(0.0, min(max_first, anchor_first + delta_y * max_first / travel)))
+            return "break"
+
+        def _stop_scroll_drag(_event=None) -> str:
+            nonlocal scroll_drag_anchor
+            scroll_drag_anchor = None
+            return "break"
+
+        def _current_close_item() -> int | None:
+            try:
+                current = chip.find_withtag("current")
+                if current and int(current[0]) in close_item_to_index:
+                    return int(current[0])
+            except Exception:
+                pass
+            return None
+
+        def _activate_close(_event=None) -> str | None:
+            close_item = _current_close_item()
+            if close_item is None:
+                return None
+            _remove_row(close_item_to_index[close_item])
+            return "break"
+
+        def _enter_close(_event=None) -> None:
+            close_item = _current_close_item()
+            if close_item is not None:
+                chip.itemconfigure(close_item, fill=COLOR_DANGER)
+                chip.configure(cursor="hand2")
+
+        def _leave_close(_event=None) -> None:
+            close_item = _current_close_item()
+            if close_item is not None:
+                chip.itemconfigure(close_item, fill="#C4C1B7")
+            chip.configure(cursor="")
 
         def _show_hovered_path(expected_index: int) -> None:
             if hovered_index != expected_index or expected_index < 0:
                 return
             path = rows[expected_index][0]
+            try:
+                local_y = int(expected_index * row_step - chip.canvasy(0))
+            except Exception:
+                local_y = expected_index * row_step
             self._show_path_tooltip(
                 chip,
                 str(path),
-                local_y=expected_index * row_step,
+                local_y=local_y,
                 local_height=row_height,
             )
 
         def _update_hover(event) -> None:
             nonlocal hovered_index
-            index = _row_index_at(int(getattr(event, "y", -1)))
+            if virtualized and int(getattr(event, "x", 0)) >= chip.winfo_width() - self._px(10):
+                index = -1
+            else:
+                index = _row_index_at(int(getattr(event, "y", -1)))
             if index == hovered_index:
                 return
             hovered_index = index
@@ -9168,15 +9530,31 @@ class HRToolkitApp:
         def _leave_upload_list(_event=None) -> None:
             nonlocal hovered_index
             hovered_index = -1
-            chip.configure(cursor="")
+            if scroll_drag_anchor is None:
+                chip.configure(cursor="")
             self._hide_path_tooltip()
 
-        chip.bind("<Configure>", redraw)
+        chip.configure(yscrollcommand=_on_upload_yview)
+        chip.bind("<Configure>", _on_canvas_configure)
+        chip.bind("<MouseWheel>", _on_upload_mousewheel)
+        try:
+            chip.bind("<TouchpadScroll>", _on_upload_touchpad)
+        except Exception:
+            pass
+        chip.bind("<Button-4>", _on_upload_mousewheel)
+        chip.bind("<Button-5>", _on_upload_mousewheel)
         chip.bind("<Enter>", _update_hover, add="+")
         chip.bind("<Motion>", _update_hover, add="+")
         chip.bind("<Leave>", _leave_upload_list, add="+")
+        chip.tag_bind("chip_close", "<Button-1>", _activate_close)
+        chip.tag_bind("chip_close", "<Enter>", _enter_close)
+        chip.tag_bind("chip_close", "<Leave>", _leave_close)
+        chip.tag_bind("upload_scrollbar", "<ButtonPress-1>", _start_scroll_drag)
+        chip.bind("<B1-Motion>", _drag_scrollbar, add="+")
+        chip.bind("<ButtonRelease-1>", _stop_scroll_drag, add="+")
         self._upload_items_canvas = chip
-        self.root.after_idle(redraw)
+        self._upload_items_virtualized = virtualized
+        self.root.after_idle(_render_visible_rows)
 
     def _render_upload_drop_zone(self) -> None:
         zone_height = self._px(118)
@@ -11365,14 +11743,67 @@ class HRToolkitApp:
         """进入运行状态：主按钮变为“停止”，并为本次运行分配编号。"""
         self._tool_run_token += 1
         self._tool_running = True
+        self._enable_ui_thread_fairness()
         self._run_cancel_events[self._tool_run_token] = threading.Event()
         self._idle_run_button_text = self.run_button_text.get()
         self.run_button_text.set("停止")
+
+    def _enable_ui_thread_fairness(self) -> None:
+        """Shorten GIL turns while a CPU-heavy tool runs.
+
+        Several Excel/OCR paths still contain unavoidable pure-Python work.
+        A shorter interpreter switch interval prevents that worker from
+        monopolising the UI thread for repeated 5 ms slices.  It changes only
+        scheduling, never computation or output, and is restored as soon as
+        the last tool worker exits.
+        """
+
+        if self._original_thread_switch_interval is not None:
+            return
+        try:
+            original = float(sys.getswitchinterval())
+            self._original_thread_switch_interval = original
+            if original > UI_THREAD_SWITCH_INTERVAL_SECONDS:
+                sys.setswitchinterval(UI_THREAD_SWITCH_INTERVAL_SECONDS)
+        except Exception:
+            self._original_thread_switch_interval = None
+
+    def _prioritize_ui_thread_for_scroll(self) -> None:
+        if getattr(self, "_original_thread_switch_interval", None) is None:
+            return
+        try:
+            if sys.getswitchinterval() > UI_SCROLL_SWITCH_INTERVAL_SECONDS:
+                sys.setswitchinterval(UI_SCROLL_SWITCH_INTERVAL_SECONDS)
+        except Exception:
+            pass
+
+    def _restore_processing_thread_fairness(self) -> None:
+        if getattr(self, "_original_thread_switch_interval", None) is None:
+            return
+        try:
+            sys.setswitchinterval(UI_THREAD_SWITCH_INTERVAL_SECONDS)
+        except Exception:
+            pass
+
+    def _restore_thread_switch_interval(self, *, force: bool = False) -> None:
+        original = getattr(self, "_original_thread_switch_interval", None)
+        if original is None:
+            return
+        if not force and (
+            self._tool_running or bool(getattr(self, "_active_tool_worker_tokens", ()))
+        ):
+            return
+        self._original_thread_switch_interval = None
+        try:
+            sys.setswitchinterval(original)
+        except Exception:
+            pass
 
     def _finish_tool_run(self) -> None:
         self._tool_running = False
         if self._idle_run_button_text:
             self.run_button_text.set(self._idle_run_button_text)
+        self._restore_thread_switch_interval()
 
     def _stop_tool_run(self) -> None:
         token = self._tool_run_token
@@ -11923,12 +12354,33 @@ class HRToolkitApp:
             runlog.log_line(f"完成 {label}，耗时 {time.monotonic() - start:.1f} 秒{warn_text}")
             self.status_queue.put(("success", token, result))
 
-        threading.Thread(target=worker, daemon=True).start()
+        active_worker_tokens = getattr(self, "_active_tool_worker_tokens", None)
+        if active_worker_tokens is None:
+            active_worker_tokens = set()
+            self._active_tool_worker_tokens = active_worker_tokens
+        active_worker_tokens.add(token)
+
+        def worker_entry() -> None:
+            try:
+                worker()
+            finally:
+                self.status_queue.put(("worker_finished", token, None))
+
+        try:
+            threading.Thread(target=worker_entry, daemon=True).start()
+        except Exception:
+            self._active_tool_worker_tokens.discard(token)
+            self._restore_thread_switch_interval()
+            raise
 
     def _poll_status_queue(self) -> None:
         try:
             while True:
                 status, token, payload = self.status_queue.get_nowait()
+                if status == "worker_finished":
+                    self._active_tool_worker_tokens.discard(token)
+                    self._restore_thread_switch_interval()
+                    continue
                 if status == "progress":
                     if token == self._tool_run_token and payload:
                         self._write_log(str(payload))
@@ -12295,6 +12747,8 @@ class HRToolkitApp:
             pending = deque()
             self._pending_log_entries = pending
         pending.append((text, tag, dot_tag, timestamp))
+        if getattr(self, "_scroll_active", False):
+            return
         if getattr(self, "_log_flush_job", None) is None:
             try:
                 self._log_flush_job = self.root.after_idle(
@@ -12303,10 +12757,12 @@ class HRToolkitApp:
             except Exception:
                 self._log_flush_job = None
 
-    def _flush_pending_log_entries(self) -> None:
+    def _flush_pending_log_entries(self, *, force: bool = False) -> None:
         self._log_flush_job = None
         if not getattr(self, "_is_alive", True):
             getattr(self, "_pending_log_entries", []).clear()
+            return
+        if getattr(self, "_scroll_active", False) and not force:
             return
         pending = getattr(self, "_pending_log_entries", [])
         if not pending:
@@ -12355,7 +12811,7 @@ class HRToolkitApp:
                 self._log_flush_job = None
             # Flush one bounded chunk so completion dialogs never wait behind
             # thousands of synchronous Text insert/repaint operations.
-            self._flush_pending_log_entries()
+            self._flush_pending_log_entries(force=True)
             if hasattr(self, "log_text") and self.log_text.winfo_exists():
                 self.log_text.see(END)
                 self.log_text.update_idletasks()
@@ -12383,6 +12839,9 @@ class HRToolkitApp:
 
     def destroy(self) -> None:
         self._is_alive = False
+        self._tool_running = False
+        self._active_tool_worker_tokens.clear()
+        self._restore_thread_switch_interval(force=True)
         self._shutdown_window_resize_compositor()
         for job_name in (
             "_title_wrap_job",
@@ -12404,10 +12863,22 @@ class HRToolkitApp:
             except Exception:
                 pass
             self._log_flush_job = None
+        scroll_activity_job = getattr(self, "_scroll_activity_job", None)
+        if scroll_activity_job is not None:
+            try:
+                self.root.after_cancel(scroll_activity_job)
+            except Exception:
+                pass
+        self._scroll_activity_job = None
+        self._scroll_active = False
         getattr(self, "_pending_log_entries", []).clear()
         scroll_controller = getattr(self, "_right_scroll_controller", None)
         if scroll_controller is not None:
             scroll_controller.cancel()
+        upload_scroll_controller = getattr(self, "_upload_items_scroll_controller", None)
+        if upload_scroll_controller is not None:
+            upload_scroll_controller.cancel()
+        self._upload_items_scroll_controller = None
         canvas_sync_job = getattr(self, "_right_canvas_sync_job", None)
         if canvas_sync_job is not None:
             try:
