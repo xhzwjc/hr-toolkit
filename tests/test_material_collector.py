@@ -584,6 +584,92 @@ class TestSafetyAndRobustness(unittest.TestCase):
             mc._OCR_ENGINE = real_engine
             mc._OCR_ATTEMPTED = real_attempted
 
+    def test_ocr_stream_keeps_text_but_releases_page_geometry(self) -> None:
+        import gc
+        import weakref
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        references: list[weakref.ReferenceType] = []
+        try:
+            class Geometry:
+                pass
+
+            class PageEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    box = Geometry()
+                    references.append(weakref.ref(box))
+                    text = f"第{type(self).call_count + 1}页"
+                    type(self).call_count += 1
+                    return ([[box, text, 0.99]], None)
+
+            mc._OCR_ENGINE = PageEngine()
+            mc._OCR_ATTEMPTED = True
+            with mock.patch.object(
+                mc,
+                "_iter_ocr_targets",
+                return_value=iter((b"page-1", b"page-2", b"page-3")),
+            ):
+                texts, complete = mc._collect_ocr_texts(Path("contract.pdf"))
+
+            gc.collect()
+            self.assertTrue(complete)
+            self.assertEqual(texts, ["第1页", "第2页", "第3页"])
+            self.assertTrue(all(reference() is None for reference in references))
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
+    def test_five_page_contract_combines_first_page_type_and_last_page_name(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        real_engine = mc._OCR_ENGINE
+        real_attempted = mc._OCR_ATTEMPTED
+        try:
+            pages = (
+                "劳动合同",
+                "第一章 工作内容",
+                "第二章 劳动报酬",
+                "第三章 合同期限",
+                "姓名：张三",
+            )
+
+            class PageEngine:
+                call_count = 0
+
+                def __call__(self, _payload):
+                    text = pages[type(self).call_count]
+                    type(self).call_count += 1
+                    return ([[None, text]], None)
+
+            mc._OCR_ENGINE = PageEngine()
+            mc._OCR_ATTEMPTED = True
+            with mock.patch.object(
+                mc,
+                "_iter_ocr_targets",
+                return_value=iter(b"page" for _ in pages),
+            ):
+                result = mc._analyze_ocr_file(
+                    Path("contract.pdf"),
+                    requested_types=["劳动合同"],
+                    allow_weak_id_fallback=False,
+                )
+
+            material, _method, _subtype, name, _eid, text, names, complete = result
+            self.assertTrue(complete)
+            self.assertEqual(PageEngine.call_count, 5)
+            self.assertEqual(material, "劳动合同")
+            self.assertEqual(name, "张三")
+            self.assertEqual(names, ["张三"])
+            self.assertIn("劳动合同", text)
+            self.assertIn("姓名：张三", text)
+        finally:
+            mc._OCR_ENGINE = real_engine
+            mc._OCR_ATTEMPTED = real_attempted
+
     def test_pdf_cancel_stops_between_pages(self) -> None:
         from hr_toolkit.tools import material_collector as mc
 
@@ -856,6 +942,19 @@ class TestOCRCacheHelpers(unittest.TestCase):
         sig = _get_engine_signature()
         self.assertTrue(sig)
         self.assertIn("rapidocr_onnxruntime", sig)
+
+    def test_visual_ocr_query_cache_is_bounded_and_does_not_store_names(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        entry: dict = {}
+        for index in range(40):
+            mc._record_visual_ocr_query(entry, [f"自定义材料{index}"])
+
+        self.assertLessEqual(len(entry["visual_ocr_queries"]), 32)
+        self.assertTrue(
+            mc._visual_ocr_query_was_attempted(entry, ["自定义材料39"])
+        )
+        self.assertNotIn("自定义材料", json.dumps(entry, ensure_ascii=False))
 
     def test_oversized_cache_is_ignored_before_reading(self) -> None:
         import hr_toolkit.tools.material_collector as material_collector
@@ -2210,6 +2309,12 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
                 "我天天谴的证书", ["天谴证书"], method_prefix="t",
             )[0]
         )
+        # 任意字符洗牌不是“两个连续词块前后互换”，不能误命中。
+        self.assertIsNone(
+            mc._classify_requested_material_text(
+                "天证谴书", ["天谴证书"], method_prefix="t",
+            )[0]
+        )
         # 名称过短（<3）不走乱序窗口，且无精确子串：不命中
         self.assertIsNone(
             mc._classify_requested_material_text(
@@ -2217,7 +2322,7 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             )[0]
         )
 
-    def test_custom_priority_and_weak_id_gate(self) -> None:
+    def test_standard_then_custom_then_weak_id_priority(self) -> None:
         mc = self.mc
         text = "我的证书天谴 证号500237200308190399"
         result = mc._classify_text_content(
@@ -2227,6 +2332,15 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             allow_weak_id_fallback=False,
         )
         self.assertEqual(result[0], "天谴证书")
+        # 明确身份证字段属于标准强证据，不应被同页偶然出现的自定义词覆盖。
+        self.assertEqual(
+            mc._classify_text_content(
+                "居民身份证 我的证书天谴",
+                requested_types=["天谴证书"],
+                allow_weak_id_fallback=False,
+            )[0],
+            "身份证",
+        )
         # 弱兜底门禁：仅 18 位证号时，禁用→无结论，启用→身份证
         self.assertIsNone(
             mc._classify_text_content(
@@ -2239,10 +2353,17 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             )[0],
             "身份证",
         )
-        # 应急管理局关键词优先于证号兜底
+        # 发证机关名称本身不能定类；与证书专属字段组合后才是强证据。
+        self.assertIsNone(
+            mc._classify_text_content(
+                "北京市应急管理局关于召开年度工作会议的通知",
+                allow_weak_id_fallback=False,
+            )[0]
+        )
         self.assertEqual(
             mc._classify_text_content(
-                "北京市应急管理局 500237200308190399",
+                "姓名：张三 证号：T500237200308190399 "
+                "作业类别：低压电工作业 北京市应急管理局 备注",
                 allow_weak_id_fallback=False,
             )[0],
             "特种证书",
@@ -2250,6 +2371,9 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
 
     def test_flat_pdf_graphic_title_render_fallback(self) -> None:
         from tests.test_pdf_backend_compat import _write_minimal_pdf
+
+        if self.mc.pdfium is None:
+            self.skipTest("现代轻量安装包不捆绑 PDFium；Win7 通道覆盖整页渲染")
 
         self._set_engine([("title", "中华人民共和国特种作业操作证")])
         with tempfile.TemporaryDirectory() as td:
@@ -2261,6 +2385,28 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(material, "特种证书")
         self.assertIn("特种作业操作证", text)
+
+    def test_modern_lightweight_path_uses_text_layer_signal_combination(self) -> None:
+        mc = self.mc
+        text_layer = (
+            "姓名：张三 证号：T500237200308190399 "
+            "作业类别：低压电工作业 北京市应急管理局 备注"
+        )
+        with mock.patch.object(mc, "pdfium", None):
+            with mock.patch.object(
+                mc,
+                "_extract_flat_document_text",
+                return_value=text_layer,
+            ):
+                with mock.patch.object(mc, "_analyze_ocr_file") as analyze_ocr:
+                    result = mc._analyze_flat_source(
+                        Path("certificate.pdf"),
+                        ["特种证书"],
+                    )
+
+        self.assertEqual(result[0], "特种证书")
+        self.assertEqual(result[3], ["张三"])
+        analyze_ocr.assert_not_called()
 
     def test_flat_cache_reclassifies_cached_standard_type_against_new_request(self) -> None:
         mc = self.mc
@@ -2284,6 +2430,130 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             )
             self.assertEqual(second[0].material_type, "天谴证书")
             self.assertTrue(second[0].cache_hit)
+
+    def test_folder_cache_reclassifies_weak_id_as_custom_without_reocr(self) -> None:
+        mc = self.mc
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            employee_dir = root / "资料库" / "张三"
+            employee_dir.mkdir(parents=True)
+            source = employee_dir / "a.jpg"
+            source.write_bytes(b"custom-cert-number")
+
+            self._set_engine([("n", "我的证书天谴 500237200308190399")])
+            first = collect_employee_materials(
+                root / "资料库",
+                root / "输出1",
+                roster_source="张三",
+                material_types=["身份证"],
+            )
+            self.assertEqual(first.matched_file_count, 1)
+
+            class FailingEngine:
+                def __call__(self, _source):
+                    raise AssertionError("缓存重分类不应重复 OCR")
+
+            mc._OCR_ENGINE = FailingEngine()
+            second = collect_employee_materials(
+                root / "资料库",
+                root / "输出2",
+                roster_source="张三",
+                material_types=["天谴证书"],
+            )
+            self.assertEqual(second.matched_file_count, 1)
+            self.assertEqual(second.matches[0].material_type, "天谴证书")
+            self.assertTrue(second.matches[0].cache_hit)
+
+    def test_folder_pdf_does_not_repeat_failed_visual_query(self) -> None:
+        from tests.test_pdf_backend_compat import _write_minimal_pdf
+
+        mc = self.mc
+        with tempfile.TemporaryDirectory() as td:
+            pdf = Path(td) / "a5d6e67c.pdf"
+            _write_minimal_pdf(
+                pdf,
+                ["text"],
+                text_content="T500237200308190399",
+            )
+            cache = {"entries": {}}
+            requested = ["天谴证书"]
+            mc._store_ocr_cache(
+                cache,
+                pdf,
+                "身份证",
+                "ocr_id_number_fallback",
+                "正面",
+                "",
+                "500237200308190399",
+                extracted_text="T500237200308190399",
+                analysis_complete=True,
+                visual_ocr_query_signature=mc._visual_ocr_query_signature(requested),
+            )
+
+            class FailingEngine:
+                def __call__(self, _source):
+                    raise AssertionError("相同失败查询不应重复整页 OCR")
+
+            mc._OCR_ENGINE = FailingEngine()
+            mc._OCR_ATTEMPTED = True
+            result = mc._classify_material_type(
+                pdf,
+                pdf.name,
+                requested,
+                cache=cache,
+            )
+
+        self.assertEqual(result[0], "身份证")
+        self.assertTrue(result[-1])
+
+    def test_flat_pdf_records_failed_visual_query_after_one_retry(self) -> None:
+        from tests.test_pdf_backend_compat import _write_minimal_pdf
+
+        mc = self.mc
+        if mc.pdfium is None:
+            self.skipTest("该缓存路径只在具备 PDFium 整页渲染能力时启用")
+
+        class CountingEngine:
+            call_count = 0
+
+            def __call__(self, _source):
+                type(self).call_count += 1
+                return ([[None, "无关内容"]], None)
+
+        mc._OCR_ENGINE = CountingEngine()
+        mc._OCR_ATTEMPTED = True
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            library = root / "资料库"
+            library.mkdir()
+            source = library / "a5d6e67c.pdf"
+            _write_minimal_pdf(
+                source,
+                ["text"],
+                text_content="T500237200308190399",
+            )
+            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            cache = {"version": mc._OCR_CACHE_VERSION}
+            cache_path = library / mc._OCR_CACHE_FILE_NAME
+            requested = ["天谴证书"]
+
+            mc._build_flat_ocr_index(
+                library, root / "输出1", requested, cache, cache_path, {}, [], None,
+            )
+            first_calls = CountingEngine.call_count
+            mc._build_flat_ocr_index(
+                library, root / "输出2", requested, cache, cache_path, {}, [], None,
+            )
+            second_calls = CountingEngine.call_count
+            mc._build_flat_ocr_index(
+                library, root / "输出3", requested, cache, cache_path, {}, [], None,
+            )
+            final_source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+
+        self.assertEqual(first_calls, 1)
+        self.assertEqual(second_calls, 2)
+        self.assertEqual(CountingEngine.call_count, second_calls)
+        self.assertEqual(final_source_hash, source_hash)
 
 
 if __name__ == "__main__":

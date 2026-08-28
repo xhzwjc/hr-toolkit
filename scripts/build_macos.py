@@ -118,16 +118,13 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 _ocr_datas, _ocr_binaries, _ocr_hidden = collect_all("rapidocr_onnxruntime")
 _sevenzip_datas, _sevenzip_binaries, _sevenzip_hidden = collect_all("py7zr")
 _rar_datas, _rar_binaries, _rar_hidden = collect_all("unrar")
-_pdfium_datas, _pdfium_binaries, _pdfium_hidden = collect_all("pypdfium2")
 _pypdf_metadata = copy_metadata("pypdf")
-_pdfium_metadata = copy_metadata("pypdfium2")
 a = Analysis(
     [{str(entrypoint)!r}],
     pathex=[{str(REPO_ROOT)!r}],
-    binaries=_ocr_binaries + _sevenzip_binaries + _rar_binaries + _pdfium_binaries,
-    datas={datas!r} + _ocr_datas + _sevenzip_datas + _rar_datas + _pdfium_datas
-    + _pypdf_metadata + _pdfium_metadata,
-    hiddenimports=["xlrd", "pypdf", "pypdfium2"] + _ocr_hidden + _sevenzip_hidden + _rar_hidden + _pdfium_hidden,
+    binaries=_ocr_binaries + _sevenzip_binaries + _rar_binaries,
+    datas={datas!r} + _ocr_datas + _sevenzip_datas + _rar_datas + _pypdf_metadata,
+    hiddenimports=["xlrd", "pypdf"] + _ocr_hidden + _sevenzip_hidden + _rar_hidden,
     hookspath=[],
     hooksconfig={{}},
     excludes=[

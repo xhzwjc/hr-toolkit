@@ -96,10 +96,7 @@ class WindowsPackagingTests(unittest.TestCase):
             ["--copy-metadata", "pypdf"],
             [main[index : index + 2] for index in range(len(main) - 1)],
         )
-        self.assertIn(
-            ["--copy-metadata", "pypdfium2"],
-            [main[index : index + 2] for index in range(len(main) - 1)],
-        )
+        self.assertNotIn("pypdfium2", main)
 
         data_values = [main[index + 1] for index, value in enumerate(main[:-1]) if value == "--add-data"]
         self.assertEqual(len(data_values), 1 + len(build_windows.release_template_files()))
@@ -253,8 +250,8 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('collect_all("py7zr")', spec)
         self.assertIn('collect_all("unrar")', spec)
         self.assertIn('copy_metadata("pypdf")', spec)
-        self.assertIn('copy_metadata("pypdfium2")', spec)
-        self.assertIn('collect_all("pypdfium2")', spec)
+        self.assertNotIn('copy_metadata("pypdfium2")', spec)
+        self.assertNotIn('collect_all("pypdfium2")', spec)
         self.assertIn('"pypdf"', spec)
         self.assertIn("_sevenzip_binaries + _rar_binaries", spec)
         self.assertIn("_sevenzip_hidden + _rar_hidden", spec)
