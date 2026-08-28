@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, Y, Canvas, Menu, StringVar, BooleanVar, Text, Tk, TkVersion
@@ -216,6 +217,8 @@ EXCEL_ARCHIVE_FILETYPES = (
 )
 EXCEL_ARCHIVE_FORMAT_TEXT = f".xlsx、.xls 以及 {ARCHIVE_FORMAT_DESCRIPTION} 压缩包"
 WORKSPACE_UI_SETTINGS_VERSION = 2
+UPLOAD_DIRECTORY_COUNT_LIMIT = 200
+LOG_FLUSH_BATCH_SIZE = 200
 
 
 def _is_excel_or_archive_file(path: Path) -> bool:
@@ -436,6 +439,8 @@ class HRToolkitApp:
         self._workspace_search_job: str | None = None
         self._workspace_search_generation = 0
         self._workspace_project_generation = 0
+        self._workspace_batch_location_store = None
+        self._workspace_batch_location_cache: tuple[tuple[object, dict[str, Path]], ...] = ()
         self._workspace_queue: queue.Queue[tuple[str, int, object]] = queue.Queue()
         self._workspace_write_token = 0
         self._workspace_write_tasks: dict[int, tuple[threading.Event, object]] = {}
@@ -577,6 +582,8 @@ class HRToolkitApp:
         self.status_queue: queue.Queue[tuple[str, int, object | None]] = queue.Queue()
         self.update_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.history_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
+        self._pending_log_entries: deque[tuple[str, str | None, str, str]] = deque()
+        self._log_flush_job: str | None = None
         self.last_output_dir: Path | None = None
         self.pending_update: UpdateInfo | None = None
         self.update_window: Toplevel | None = None
@@ -1071,9 +1078,16 @@ class HRToolkitApp:
         radius = (high - low + 1) / 2 - 0.1
         radius_squared = radius * radius
         for y in range(size):
-            for x in range(size):
-                if (x - center) ** 2 + (y - center) ** 2 <= radius_squared:
-                    image.put(color, (x, y))
+            colored = [
+                x
+                for x in range(size)
+                if (x - center) ** 2 + (y - center) ** 2 <= radius_squared
+            ]
+            if colored:
+                image.put(
+                    color,
+                    to=(colored[0], y, colored[-1] + 1, y + 1),
+                )
         return image
 
     def _configure_scrollbar_style(self, style: ttk.Style) -> None:
@@ -1248,25 +1262,6 @@ class HRToolkitApp:
         try:
             self._img_checkbox_unchecked = PhotoImage(master=self.root, width=16, height=16)
             self._img_checkbox_checked = PhotoImage(master=self.root, width=16, height=16)
-            # 未勾选：浅灰圆角边框、纯白背景
-            for x in range(16):
-                for y in range(16):
-                    if (x in (0, 15) and y in (0, 15)):
-                        self._img_checkbox_unchecked.put(COLOR_SURFACE, (x, y))
-                    elif x in (0, 15) or y in (0, 15):
-                        self._img_checkbox_unchecked.put("#CBD5E1", (x, y))
-                    else:
-                        self._img_checkbox_unchecked.put("#FFFFFF", (x, y))
-
-            # 已勾选：品牌主色实心底色 + 加粗清晰白色对勾 ✓
-            for x in range(16):
-                for y in range(16):
-                    if (x in (0, 15) and y in (0, 15)):
-                        self._img_checkbox_checked.put(COLOR_SURFACE, (x, y))
-                    else:
-                        self._img_checkbox_checked.put(COLOR_PRIMARY, (x, y))
-
-            # 绘制加粗清晰白色对勾 ✓（左短右长）
             check_pixels: set[tuple[int, int]] = set()
             for t in range(3):
                 check_pixels.add((3 + t, 8 + t))
@@ -1274,10 +1269,36 @@ class HRToolkitApp:
             for t in range(7):
                 check_pixels.add((6 + t, 9 - t))
                 check_pixels.add((6 + t, 10 - t))
-
-            for px, py in check_pixels:
-                if 0 <= px < 16 and 0 <= py < 16:
-                    self._img_checkbox_checked.put("#FFFFFF", (px, py))
+            # Build complete rows in Python, then cross the Tcl/Tk bridge once
+            # per row instead of once per pixel.  Pixel colors are unchanged.
+            for y in range(16):
+                unchecked_row: list[str] = []
+                checked_row: list[str] = []
+                for x in range(16):
+                    corner = x in (0, 15) and y in (0, 15)
+                    if corner:
+                        unchecked_color = COLOR_SURFACE
+                    elif x in (0, 15) or y in (0, 15):
+                        unchecked_color = "#CBD5E1"
+                    else:
+                        unchecked_color = "#FFFFFF"
+                    checked_color = (
+                        COLOR_SURFACE
+                        if corner
+                        else "#FFFFFF"
+                        if (x, y) in check_pixels
+                        else COLOR_PRIMARY
+                    )
+                    unchecked_row.append(unchecked_color)
+                    checked_row.append(checked_color)
+                self._img_checkbox_unchecked.put(
+                    "{" + " ".join(unchecked_row) + "}",
+                    to=(0, y),
+                )
+                self._img_checkbox_checked.put(
+                    "{" + " ".join(checked_row) + "}",
+                    to=(0, y),
+                )
 
             style.element_create(
                 "App.Checkbutton.indicator",
@@ -3974,6 +3995,7 @@ class HRToolkitApp:
         self.project_store = store
         self.current_project_path = new_path
         self._workspace_project_generation += 1
+        self._invalidate_workspace_batch_location_cache()
         if project_changed:
             self.input_path.set("")
             self.summary_path.set("")
@@ -4006,11 +4028,42 @@ class HRToolkitApp:
             *((item_name, item_path) for item_name, item_path in self._workspace_recent_projects if item_path != self.current_project_path),
         ][:8]
         self._workspace_last_project_path = self.current_project_path
-        self._update_sidebar_project_summary()
         self._save_workspace_preferences()
         self._refresh_workspace_tree()
         self._update_workspace_action_states()
+        self._update_sidebar_project_summary()
         self._update_project_output_controls()
+
+    def _invalidate_workspace_batch_location_cache(self) -> None:
+        self._workspace_batch_location_store = None
+        self._workspace_batch_location_cache = ()
+
+    def _workspace_batch_locations(self):
+        store = self.project_store
+        if store is None:
+            return ()
+        if getattr(self, "_workspace_batch_location_store", None) is store:
+            return getattr(self, "_workspace_batch_location_cache", ())
+
+        loader = getattr(store, "list_batch_locations", None)
+        has_declared_loader = any(
+            "list_batch_locations" in cls.__dict__
+            for cls in type(store).__mro__
+        )
+        if callable(loader) and has_declared_loader:
+            locations = tuple(loader())
+        else:
+            # Compatibility path for older/fake stores used by integration
+            # callers.  The real ProjectStore provides the one-pass loader.
+            collected = []
+            for summary in store.list_batches():
+                detail = store.get_batch(summary.id)
+                if detail is not None:
+                    collected.append((summary, dict(detail.directories)))
+            locations = tuple(collected)
+        self._workspace_batch_location_store = store
+        self._workspace_batch_location_cache = locations
+        return locations
 
     def _update_sidebar_project_summary(self) -> None:
         store = self.project_store
@@ -4018,7 +4071,7 @@ class HRToolkitApp:
             self.sidebar_project_summary.set("新建或打开项目后开始处理")
             return
         try:
-            batch_count = len(store.list_batches())
+            batch_count = len(self._workspace_batch_locations())
         except Exception:
             self.sidebar_project_summary.set("当前项目 · 资料可在右侧查看")
             return
@@ -4080,19 +4133,15 @@ class HRToolkitApp:
         if store is not None:
             try:
                 project_tool_id, _tool_name = self._project_tool_identity()
-                summaries = store.list_batches(tool_id=project_tool_id)
+                locations = self._workspace_batch_locations()
             except Exception as exc:
                 runlog.log_exception("读取当前功能项目目录失败", exc)
             else:
-                for summary in summaries:
-                    try:
-                        detail = store.get_batch(summary.id)
-                    except Exception:
-                        continue
-                    if detail is None:
+                for summary, directories in locations:
+                    if summary.tool_id != project_tool_id:
                         continue
                     for category in ("uploads", "supplements", "results"):
-                        directory = detail.directories.get(category)
+                        directory = directories.get(category)
                         if directory is None:
                             continue
                         tool_root = directory.parent.parent
@@ -4137,6 +4186,7 @@ class HRToolkitApp:
         return sorted(children, key=lambda child: (not child.is_dir(), child.name.casefold()))
 
     def _refresh_workspace_tree(self) -> None:
+        self._invalidate_workspace_batch_location_cache()
         if not hasattr(self, "workspace_tree"):
             return
         if not self._workspace_panel_is_expanded():
@@ -4201,7 +4251,7 @@ class HRToolkitApp:
             tags = ("result",)
         item = self.workspace_tree.insert(parent, "end", text=text, open=False, tags=tags)
         self._workspace_tree_paths[item] = path
-        if path.is_dir() and not search_result:
+        if not search_result and path.is_dir():
             self.workspace_tree.insert(item, "end", text="", tags=(WORKSPACE_DUMMY_TAG,))
         return item
 
@@ -4233,19 +4283,18 @@ class HRToolkitApp:
         if path is None or store is None:
             return None
         try:
-            summaries = tuple(store.list_batches())
+            locations = self._workspace_batch_locations()
         except Exception:
             return None
-        for summary in summaries:
+        for summary, directories in locations:
+            upload_dir = directories.get("uploads")
+            if upload_dir is None or Path(path) != Path(upload_dir).parent:
+                continue
             try:
                 detail = store.get_batch(summary.id)
             except Exception:
-                continue
-            if detail is None:
-                continue
-            upload_dir = detail.directories.get("uploads")
-            if upload_dir is not None and Path(path) == Path(upload_dir).parent:
-                return summary, detail
+                return None
+            return (summary, detail) if detail is not None else None
         return None
 
     def _set_workspace_detail(self, path: Path | None) -> None:
@@ -4363,6 +4412,10 @@ class HRToolkitApp:
                     break
         except OSError as exc:
             error = str(exc)
+        if not error:
+            # File type checks stay on the search worker.  Repeating up to 500
+            # stats while painting results causes visible pauses on old HDDs.
+            results.sort(key=lambda item: (not item.is_dir(), item.name.casefold()))
         self._workspace_queue.put(("search", generation, (results, truncated, error)))
 
     def _render_workspace_search_results(self, results: list[Path], truncated: bool, error: str | None) -> None:
@@ -4373,7 +4426,7 @@ class HRToolkitApp:
             self.workspace_empty_text.set(f"项目文件暂时无法读取\n\n{error}")
             self._show_workspace_empty(True)
             return
-        for path in sorted(results, key=lambda item: (not item.is_dir(), item.name.casefold())):
+        for path in results:
             self._insert_workspace_tree_path("", path, search_result=True)
         if results:
             self._show_workspace_empty(False)
@@ -5303,19 +5356,13 @@ class HRToolkitApp:
         if store is None:
             return None
         try:
-            batches = store.list_batches()
+            locations = self._workspace_batch_locations()
         except Exception as exc:
             runlog.log_exception("读取项目批次失败", exc)
             return None
-        for summary in batches:
-            try:
-                detail = store.get_batch(summary.id)
-            except Exception:
-                continue
-            if detail is None:
-                continue
+        for summary, directories in locations:
             for category in ("uploads", "supplements"):
-                directory = detail.directories.get(category)
+                directory = directories.get(category)
                 if directory is None:
                     continue
                 try:
@@ -7775,8 +7822,18 @@ class HRToolkitApp:
             return "！", COLOR_BADGE_ZIP_BG, COLOR_BADGE_ZIP_FG, "文件不存在"
         if path.is_dir():
             try:
-                child_count = sum(1 for _ in path.iterdir())
-                detail = f"文件夹 · {child_count} 个项目"
+                child_count = 0
+                with os.scandir(path) as entries:
+                    for _entry in entries:
+                        child_count += 1
+                        if child_count > UPLOAD_DIRECTORY_COUNT_LIMIT:
+                            break
+                count_text = (
+                    f"{UPLOAD_DIRECTORY_COUNT_LIMIT}+"
+                    if child_count > UPLOAD_DIRECTORY_COUNT_LIMIT
+                    else str(child_count)
+                )
+                detail = f"文件夹 · {count_text} 个项目"
             except Exception:
                 detail = "文件夹"
             return "", COLOR_BADGE_DIR_BG, COLOR_BADGE_DIR_FG, detail
@@ -9845,12 +9902,19 @@ class HRToolkitApp:
         run_token = self._tool_run_token
         cancel_event = self._run_cancel_events.get(run_token)
         last_progress_message: str | None = None
+        last_progress_marker: tuple[int, int] | None = None
 
-        def archive_progress(_current: int, _total: int, message: str) -> None:
-            nonlocal last_progress_message
-            if message == last_progress_message:
+        def archive_progress(current: int, total: int, message: str) -> None:
+            nonlocal last_progress_message, last_progress_marker
+            interval = max(1, total // 60)
+            marker = (current, total)
+            should_report = current in {0, 1, total} or current % interval == 0
+            if not should_report or (
+                message == last_progress_message and marker == last_progress_marker
+            ):
                 return
             last_progress_message = message
+            last_progress_marker = marker
             self.status_queue.put(("progress", run_token, message))
 
         self._start_tool_worker(
@@ -10340,7 +10404,15 @@ class HRToolkitApp:
             raise RuntimeError(f"文件夹快照不完整：{source.path.name}")
         return upload_root / next(iter(top_names))
 
-    def _import_project_run_sources(self, store, batch_id: str, sources: list[SourceSpec], cancel_event) -> dict[str, list[Path]]:
+    def _import_project_run_sources(
+        self,
+        store,
+        batch_id: str,
+        sources: list[SourceSpec],
+        cancel_event,
+        *,
+        on_progress=None,
+    ) -> dict[str, list[Path]]:
         replacements: dict[str, list[Path]] = {}
         project_root = Path(store.root).absolute()
         for source in sources:
@@ -10370,6 +10442,7 @@ class HRToolkitApp:
                     category="uploads",
                     role=source.role,
                     cancelled=cancel_event.is_set,
+                    on_progress=on_progress,
                 )
             else:
                 if is_project_source:
@@ -10386,6 +10459,7 @@ class HRToolkitApp:
                     category="uploads",
                     role=source.role,
                     cancelled=cancel_event.is_set,
+                    on_progress=on_progress,
                 )
                 replacement = self._project_source_replacement(
                     store,
@@ -10509,8 +10583,61 @@ class HRToolkitApp:
             start = time.monotonic()
             result = None
             started = False
+            last_import_progress_at = 0.0
+            last_import_phase = ""
+
+            def import_progress(event) -> None:
+                nonlocal last_import_progress_at, last_import_phase
+                now = time.monotonic()
+                phase = str(getattr(event, "phase", "") or "")
+                files_scanned = int(getattr(event, "files_scanned", 0) or 0)
+                files_completed = int(getattr(event, "files_completed", 0) or 0)
+                files_total = getattr(event, "files_total", None)
+                bytes_copied = int(getattr(event, "bytes_copied", 0) or 0)
+                bytes_total = getattr(event, "bytes_total", None)
+                large_import = (
+                    files_scanned >= 200
+                    or (files_total is not None and int(files_total) >= 200)
+                    or (bytes_total is not None and int(bytes_total) >= 16 * 1024 * 1024)
+                )
+                # Tiny snapshots normally finish before a progress line can
+                # help.  Suppressing them also keeps terminal status at the
+                # front of the queue.  Large/slow snapshots begin reporting
+                # after 250 ms and continue through final verification.
+                if last_import_progress_at == 0.0 and (
+                    not large_import or now - start < 0.25
+                ):
+                    return
+                force = (
+                    phase != last_import_phase
+                    or phase == "finalizing"
+                    or files_scanned == 1
+                    or (files_total is not None and files_completed >= int(files_total))
+                )
+                if not force and now - last_import_progress_at < 0.25:
+                    return
+                last_import_progress_at = now
+                last_import_phase = phase
+                if phase == "copying":
+                    if bytes_total:
+                        percent = min(100, int(bytes_copied * 100 / int(bytes_total)))
+                        message = f"正在安全保存项目资料：{percent}%"
+                    else:
+                        message = f"正在安全保存项目资料：已完成 {files_completed} 个文件"
+                elif phase == "finalizing":
+                    message = "项目资料已复制完成，正在核对并登记..."
+                else:
+                    message = f"正在检查项目资料：已发现 {files_scanned} 个文件"
+                self.status_queue.put(("progress", token, message))
+
             try:
-                replacements = self._import_project_run_sources(store, batch_id, sources, cancel_event)
+                replacements = self._import_project_run_sources(
+                    store,
+                    batch_id,
+                    sources,
+                    cancel_event,
+                    on_progress=import_progress,
+                )
                 if cancel_event.is_set():
                     raise RuntimeError("本次处理已停止。")
                 old_upload_root = draft.directories["uploads"]
@@ -10531,6 +10658,11 @@ class HRToolkitApp:
                     store,
                     batch_id,
                 )
+                if (
+                    "cancelled" in inspect.signature(tool_func).parameters
+                    and call_kwargs.get("cancelled") is None
+                ):
+                    call_kwargs["cancelled"] = cancel_event.is_set
                 result = tool_func(*call_args, **call_kwargs)
                 if cancel_event.is_set():
                     raise RuntimeError("本次处理已停止。")
@@ -10645,7 +10777,11 @@ class HRToolkitApp:
         self.root.after(150, self._poll_status_queue)
 
     def _handle_success(self, result, *, history_warning: str | None = None) -> None:
-        payload = result.to_dict()
+        payload = (
+            result.to_dict(include_matches=False)
+            if self.current_tool == "material_collector"
+            else result.to_dict()
+        )
         if self.current_tool == "folder_rename":
             self.last_output_dir = Path(payload["root_dir"])
             self._write_log("改名完成。")
@@ -10807,9 +10943,9 @@ class HRToolkitApp:
                     for emp, missing in payload["missing_records"].items():
                         self._write_log(f"- {emp} 缺少：{', '.join(missing)}")
                 mismatches = [
-                    f"- {m['employee_name']}（{m['material_type']}）：{m['mismatch_warning']}"
-                    for m in payload.get("matches", [])
-                    if m.get("mismatch_warning")
+                    f"- {match.employee_name}（{match.material_type}）：{match.mismatch_warning}"
+                    for match in result.matches
+                    if match.mismatch_warning
                 ]
                 if mismatches:
                     self._write_log("⚠️【信息核对预警】以下提取的资料与目标人员信息不一致：")
@@ -10944,24 +11080,72 @@ class HRToolkitApp:
             "muted": "dot_muted",
         }.get(tag or "", "dot_success")
         timestamp = datetime.now().strftime("%H:%M:%S")
+        pending = getattr(self, "_pending_log_entries", None)
+        if pending is None:
+            pending = deque()
+            self._pending_log_entries = pending
+        pending.append((text, tag, dot_tag, timestamp))
+        if getattr(self, "_log_flush_job", None) is None:
+            try:
+                self._log_flush_job = self.root.after_idle(
+                    self._flush_pending_log_entries
+                )
+            except Exception:
+                self._log_flush_job = None
+
+    def _flush_pending_log_entries(self) -> None:
+        self._log_flush_job = None
+        if not getattr(self, "_is_alive", True):
+            getattr(self, "_pending_log_entries", []).clear()
+            return
+        pending = getattr(self, "_pending_log_entries", [])
+        if not pending:
+            return
+        batch = [pending.popleft() for _ in range(min(LOG_FLUSH_BATCH_SIZE, len(pending)))]
         try:
-            if tag == "muted":
-                self.log_text.insert(END, "   ", "muted")
-            else:
-                self.log_text.insert(END, "● ", dot_tag)
-                self.log_text.insert(END, f"{timestamp}  ", "timestamp")
-            if tag:
-                self.log_text.insert(END, text + "\n", tag)
-            else:
-                self.log_text.insert(END, text + "\n")
+            if not self.log_text.winfo_exists():
+                pending.clear()
+                return
+            for text, tag, dot_tag, timestamp in batch:
+                if tag == "muted":
+                    self.log_text.insert(END, "   ", "muted")
+                else:
+                    self.log_text.insert(END, "● ", dot_tag)
+                    self.log_text.insert(END, f"{timestamp}  ", "timestamp")
+                if tag:
+                    self.log_text.insert(END, text + "\n", tag)
+                else:
+                    self.log_text.insert(END, text + "\n")
             self.log_text.see(END)
         except Exception:
-            pass
+            pending.clear()
+            return
+        if pending and getattr(self, "_is_alive", True):
+            try:
+                # A short timer yields to input and repaint events between
+                # batches; chaining idle callbacks can make ``update_idletasks``
+                # drain an entire large log synchronously.
+                self._log_flush_job = self.root.after(
+                    1,
+                    self._flush_pending_log_entries
+                )
+            except Exception:
+                self._log_flush_job = None
 
     def _flush_log_view(self) -> None:
         if not getattr(self, "_is_alive", True):
             return
         try:
+            log_flush_job = getattr(self, "_log_flush_job", None)
+            if log_flush_job is not None:
+                try:
+                    self.root.after_cancel(log_flush_job)
+                except Exception:
+                    pass
+                self._log_flush_job = None
+            # Flush one bounded chunk so completion dialogs never wait behind
+            # thousands of synchronous Text insert/repaint operations.
+            self._flush_pending_log_entries()
             if hasattr(self, "log_text") and self.log_text.winfo_exists():
                 self.log_text.see(END)
                 self.log_text.update_idletasks()
@@ -10974,6 +11158,14 @@ class HRToolkitApp:
         if not getattr(self, "_is_alive", True):
             return
         try:
+            log_flush_job = getattr(self, "_log_flush_job", None)
+            if log_flush_job is not None:
+                try:
+                    self.root.after_cancel(log_flush_job)
+                except Exception:
+                    pass
+                self._log_flush_job = None
+            getattr(self, "_pending_log_entries", []).clear()
             if hasattr(self, "log_text") and self.log_text.winfo_exists():
                 self.log_text.delete("1.0", END)
         except Exception:
@@ -10981,6 +11173,14 @@ class HRToolkitApp:
 
     def destroy(self) -> None:
         self._is_alive = False
+        log_flush_job = getattr(self, "_log_flush_job", None)
+        if log_flush_job is not None:
+            try:
+                self.root.after_cancel(log_flush_job)
+            except Exception:
+                pass
+            self._log_flush_job = None
+        getattr(self, "_pending_log_entries", []).clear()
         scroll_controller = getattr(self, "_right_scroll_controller", None)
         if scroll_controller is not None:
             scroll_controller.cancel()

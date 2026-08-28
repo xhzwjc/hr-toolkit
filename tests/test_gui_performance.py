@@ -6,7 +6,9 @@ import os
 import tempfile
 import tkinter as tk
 import unittest
+from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
@@ -106,6 +108,91 @@ class GuiPerformanceTests(unittest.TestCase):
         scheduled = [call.args[0] for call in app.root.after_idle.call_args_list]
         self.assertNotIn(app._refresh_workspace_tree, scheduled)
 
+    def test_large_upload_folder_metadata_uses_bounded_directory_scan(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            for index in range(230):
+                (folder / f"item-{index:03d}.txt").touch()
+
+            _badge, _background, _foreground, detail = app._upload_item_meta(folder)
+
+        self.assertEqual(detail, "文件夹 · 200+ 个项目")
+
+    def test_log_writes_are_coalesced_and_flushed_in_bounded_batches(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app._is_alive = True
+        app._pending_log_entries = deque()
+        app._log_flush_job = None
+        app.root = Mock()
+        app.root.after_idle.return_value = "log-job"
+        app.log_text = Mock()
+        app.log_text.winfo_exists.return_value = True
+
+        for index in range(1000):
+            app._write_log(f"提醒：第 {index} 条")
+
+        self.assertEqual(app.root.after_idle.call_count, 1)
+        self.assertEqual(app.log_text.insert.call_count, 0)
+        app._flush_pending_log_entries()
+        self.assertEqual(len(app._pending_log_entries), 800)
+        self.assertEqual(app.log_text.see.call_count, 1)
+        app.root.after.assert_called_once_with(1, app._flush_pending_log_entries)
+
+    def test_workspace_batch_locations_are_cached_until_tree_refresh(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        root = Path("/project")
+        directories = {
+            "uploads": root / "业务" / "工具" / "批次" / "上传资料",
+            "supplements": root / "业务" / "工具" / "批次" / "补充资料",
+            "results": root / "业务" / "工具" / "批次" / "处理结果",
+        }
+        summary = SimpleNamespace(id="a" * 32, tool_id="salary_split")
+        detail = SimpleNamespace(summary=summary, directories=directories)
+
+        class Store:
+            list_batch_locations = Mock(return_value=((summary, directories),))
+            get_batch = Mock(return_value=detail)
+
+        store = Store()
+        app.project_store = store
+        app.current_project_path = root
+        app._workspace_batch_location_store = None
+        app._workspace_batch_location_cache = ()
+
+        self.assertEqual(
+            app._workspace_batch_for_target(directories["uploads"] / "名单.xlsx"),
+            (summary.id, "uploads"),
+        )
+        self.assertEqual(
+            app._workspace_batch_root_for_path(directories["uploads"].parent),
+            (summary, detail),
+        )
+        app._workspace_batch_for_target(directories["supplements"])
+        store.list_batch_locations.assert_called_once_with()
+
+        app._invalidate_workspace_batch_location_cache()
+        app._workspace_batch_for_target(directories["supplements"])
+        self.assertEqual(store.list_batch_locations.call_count, 2)
+
+    def test_search_result_rendering_does_not_stat_paths_on_ui_thread(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.workspace_tree = Mock()
+        app.workspace_tree.get_children.return_value = ()
+        app.workspace_tree.insert.side_effect = ("item-1", "item-2")
+        app._workspace_tree_paths = {}
+        app.current_project_path = Path("/project")
+        app.workspace_empty_text = Mock()
+        app.workspace_detail_title = Mock()
+        app.workspace_detail_text = Mock()
+        app._show_workspace_empty = Mock()
+        results = [Path("/project/folder"), Path("/project/file.xlsx")]
+
+        with patch.object(Path, "is_dir", side_effect=AssertionError("UI stat")):
+            app._render_workspace_search_results(results, False, None)
+
+        self.assertEqual(app.workspace_tree.insert.call_count, 2)
+
     def test_codex_button_idempotent_redraw_and_item_reuse(self) -> None:
         btn = CodexButton(self.root, text="测试按钮", variant="primary")
         self.root.update_idletasks()
@@ -150,8 +237,16 @@ class GuiPerformanceTests(unittest.TestCase):
         item._redraw()
         self.assertEqual(set(item.find_all()), initial_items)
 
+        initial_icon_items = tuple(item._icon_items)
+        item._on_enter()
+        item._on_leave()
+        item.set_selected(True)
+        item.set_selected(False)
+        self.assertEqual(tuple(item._icon_items), initial_icon_items)
+
+        state_items = set(item.find_all())
         item._on_configure()
-        self.assertEqual(set(item.find_all()), initial_items)
+        self.assertEqual(set(item.find_all()), state_items)
         item.destroy()
 
     def test_rounded_card_in_place_polygon_update_without_delete(self) -> None:

@@ -10,10 +10,10 @@ _PERIOD_FROM_TEXT_YEAR_ONLY = re.compile(r"(20\d{2})年")
 _PERIOD_FROM_CELL_PATTERN = re.compile(r"(20\d{2})年?([01]?\d)月")
 _HEADER_WHITESPACE = re.compile(r"\s+")
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -234,18 +234,22 @@ def merge_personnel_changes(
     template_path: str | Path | None = None,
     analysis_template_path: str | Path | None = None,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> PersonnelChangeMergeResult:
+    _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(input_dir)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     output_dir = Path(output_dir).expanduser().resolve()
     warnings: list[str] = []
     for path in input_paths:
+        _check_cancelled(cancelled)
         if not path.exists():
             raise FileNotFoundError(f"异动表文件、压缩包或文件夹不存在：{path}")
 
     with tempfile.TemporaryDirectory(prefix="hr_change_merge_") as temp_root:
         temp_dir = Path(temp_root)
         source_files = _find_change_files(input_paths, temp_dir, warnings)
+        _check_cancelled(cancelled)
         if not source_files:
             raise ValueError("未找到 .xlsx 或 .xls 异动表")
 
@@ -255,6 +259,7 @@ def merge_personnel_changes(
         used_files: list[str] = []
 
         for file_path in source_files:
+            _check_cancelled(cancelled)
             file_rows, file_warnings = _read_change_file(file_path)
             warnings.extend(file_warnings)
             if any(file_rows.values()):
@@ -291,6 +296,7 @@ def merge_personnel_changes(
         skipped_count = 0
         output_files: list[Path] = []
         for period, rows_by_sheet in rows_by_period.items():
+            _check_cancelled(cancelled)
             summary_path = summary_sources.get(period)
             output_file = output_dir / _output_filename(period)
             summary_result = _write_summary_workbook(summary_path, output_file, rows_by_sheet, period=period)
@@ -307,7 +313,13 @@ def merge_personnel_changes(
         if analysis_template is not None:
             all_rows = _merge_period_rows(rows_by_period)
             roster_output_file = output_dir / _analysis_output_filename(result.period)
-            roster_result = _write_updated_roster(analysis_template, roster_output_file, all_rows, warnings)
+            roster_result = _write_updated_roster(
+                analysis_template,
+                roster_output_file,
+                all_rows,
+                warnings,
+                cancelled=cancelled,
+            )
             result.roster_output_file = roster_output_file
             result.roster_added_count = roster_result["added_count"]
             result.roster_marked_count = roster_result["marked_count"]
@@ -320,7 +332,9 @@ def update_roster_from_change_summaries(
     output_dir: str | Path,
     *,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RosterUpdateResult:
+    _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(summary_input)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     analysis_template = Path(analysis_template_path).expanduser().resolve()
@@ -328,6 +342,7 @@ def update_roster_from_change_summaries(
     warnings: list[str] = []
 
     for path in input_paths:
+        _check_cancelled(cancelled)
         if not path.exists():
             raise FileNotFoundError(f"异动汇总表文件或文件夹不存在：{path}")
     if not analysis_template.exists() or not analysis_template.is_file():
@@ -346,6 +361,7 @@ def update_roster_from_change_summaries(
         used_files: list[str] = []
         periods: set[str] = set()
         for file_path in summary_files:
+            _check_cancelled(cancelled)
             file_rows, file_warnings = _read_summary_change_file(file_path)
             warnings.extend(file_warnings)
             if any(file_rows.values()):
@@ -373,7 +389,13 @@ def update_roster_from_change_summaries(
 
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / _analysis_output_filename(period)
-        roster_result = _write_updated_roster(working_analysis_template, output_file, rows_by_sheet, warnings)
+        roster_result = _write_updated_roster(
+            working_analysis_template,
+            output_file,
+            rows_by_sheet,
+            warnings,
+            cancelled=cancelled,
+        )
         result.output_file = output_file
         result.roster_added_count = roster_result["added_count"]
         result.roster_marked_count = roster_result["marked_count"]
@@ -382,6 +404,11 @@ def update_roster_from_change_summaries(
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
     return normalize_input_paths(input_path, "请选择异动表文件、压缩包或文件夹。")
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
 
 
 def _empty_sheet_map() -> dict[str, list[ChangeRow]]:
@@ -546,8 +573,9 @@ def _detect_sheet_layout(ws: Worksheet) -> ChangeSheetLayout:
 
 
 def _find_header_row(ws: Worksheet) -> int:
+    max_column = ws.max_column
     for row_index in range(1, min(ws.max_row, 20) + 1):
-        for col_index in range(1, ws.max_column + 1):
+        for col_index in range(1, max_column + 1):
             value = ws.cell(row_index, col_index).value
             if str(value or "").strip() == HEADER_SERIAL:
                 return row_index
@@ -606,8 +634,12 @@ def _read_data_rows(
 
 
 def _find_summary_footer_start(ws: Worksheet, start_row: int) -> int:
+    scan_column_count = min(ws.max_column, 12)
     for row_index in range(start_row, ws.max_row + 1):
-        row_text = " ".join(_cell_text(ws.cell(row_index, col_index).value) for col_index in range(1, min(ws.max_column, 12) + 1))
+        row_text = " ".join(
+            _cell_text(ws.cell(row_index, col_index).value)
+            for col_index in range(1, scan_column_count + 1)
+        )
         if any(keyword in row_text for keyword in SUMMARY_FOOTER_KEYWORDS):
             return row_index
     return ws.max_row + 1
@@ -1129,7 +1161,10 @@ def _write_updated_roster(
     output_file: Path,
     rows_by_sheet: dict[str, list[ChangeRow]],
     warnings: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
+    _check_cancelled(cancelled)
     workbook = load_workbook(analysis_template)
     added_count = 0
     marked_count = 0
@@ -1138,22 +1173,33 @@ def _write_updated_roster(
             raise ValueError("人力资源分析表缺少“花名册”工作表。")
         ws = workbook["花名册"]
         layout = _detect_roster_layout(ws)
-        existing = _roster_existing_records(ws, layout)
+        placement_index = _RosterPlacementIndex(ws, layout)
+        existing_ids = set(_roster_existing_records(ws, layout))
         for row in rows_by_sheet.get("增员", []):
+            _check_cancelled(cancelled)
             id_card = _normalize_id_card(_mapped_change_value(row.values, HEADER_ID_CARD, "增员"))
             if not id_card:
                 warnings.append(f"{row.source_file} 第 {row.source_row} 行增员缺少身份证号码，未写入花名册。")
                 continue
-            if id_card in existing:
+            if id_card in existing_ids:
                 warnings.append(f"花名册已存在增员身份证 {id_card}，未重复写入。")
                 continue
-            _insert_roster_addition(ws, layout, row)
-            layout = _detect_roster_layout(ws)
-            existing = _roster_existing_records(ws, layout)
+            _insert_roster_addition(
+                ws,
+                layout,
+                row,
+                placement_index=placement_index,
+            )
+            # One row is inserted before the footer.  Header positions and
+            # columns are unchanged, so rescanning the whole workbook after
+            # every addition is redundant and quadratic on large rosters.
+            layout = replace(layout, footer_start_row=layout.footer_start_row + 1)
+            existing_ids.add(id_card)
             added_count += 1
         layout = _detect_roster_layout(ws)
         existing = _roster_existing_records(ws, layout)
         for row in rows_by_sheet.get("减员", []):
+            _check_cancelled(cancelled)
             id_card = _normalize_id_card(_mapped_change_value(row.values, HEADER_ID_CARD, "减员"))
             if not id_card:
                 continue
@@ -1163,7 +1209,8 @@ def _write_updated_roster(
                 continue
             _mark_roster_leave(ws, layout, row_index)
             marked_count += 1
-        _renumber_roster(ws, _detect_roster_layout(ws))
+        _renumber_roster(ws, layout)
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
@@ -1177,6 +1224,77 @@ class RosterLayout:
     footer_start_row: int
     max_column: int
     headers: dict[str, int]
+
+
+class _RosterPlacementIndex:
+    """Track roster insertion anchors without rescanning every populated row."""
+
+    def __init__(self, ws: Worksheet, layout: RosterLayout) -> None:
+        self.footer_start_row = layout.footer_start_row
+        self.department_col = layout.headers.get("部门")
+        self.project_col = layout.headers.get("部门/项目")
+        self.last_department: dict[str, int] = {}
+        self.last_project: dict[str, int] = {}
+        self.last_department_project: dict[tuple[str, str], int] = {}
+        for row_index in range(layout.data_start_row, layout.footer_start_row):
+            department = (
+                _cell_text(ws.cell(row_index, self.department_col).value)
+                if self.department_col is not None
+                else ""
+            )
+            project = (
+                _cell_text(ws.cell(row_index, self.project_col).value)
+                if self.project_col is not None
+                else ""
+            )
+            if department:
+                self.last_department[department] = row_index
+            if project:
+                self.last_project[project] = row_index
+            if department and project:
+                self.last_department_project[(department, project)] = row_index
+
+    def insertion_row(self, department: str, project: str) -> int:
+        if department and project and self.department_col is not None and self.project_col is not None:
+            pair_row = self.last_department_project.get((department, project))
+            if pair_row is not None:
+                return pair_row + 1
+            department_row = self.last_department.get(department)
+            if department_row is not None:
+                return department_row + 1
+        if department and self.department_col is not None:
+            department_row = self.last_department.get(department)
+            if department_row is not None:
+                return department_row + 1
+        if project and self.project_col is not None:
+            project_row = self.last_project.get(project)
+            if project_row is not None:
+                return project_row + 1
+        return self.footer_start_row
+
+    @staticmethod
+    def _shift_positions(positions: dict[Any, int], insert_at: int) -> None:
+        for key, row_index in positions.items():
+            if row_index >= insert_at:
+                positions[key] = row_index + 1
+
+    def record_insertion(self, insert_at: int, department: str, project: str) -> None:
+        self._shift_positions(self.last_department, insert_at)
+        self._shift_positions(self.last_project, insert_at)
+        self._shift_positions(self.last_department_project, insert_at)
+        self.footer_start_row += 1
+        if department:
+            self.last_department[department] = max(
+                insert_at,
+                self.last_department.get(department, insert_at),
+            )
+        if project:
+            self.last_project[project] = max(
+                insert_at,
+                self.last_project.get(project, insert_at),
+            )
+        if department and project:
+            self.last_department_project[(department, project)] = insert_at
 
 
 def _detect_roster_layout(ws: Worksheet) -> RosterLayout:
@@ -1212,10 +1330,20 @@ def _roster_existing_records(ws: Worksheet, layout: RosterLayout) -> dict[str, i
     return records
 
 
-def _insert_roster_addition(ws: Worksheet, layout: RosterLayout, row: ChangeRow) -> int:
+def _insert_roster_addition(
+    ws: Worksheet,
+    layout: RosterLayout,
+    row: ChangeRow,
+    *,
+    placement_index: _RosterPlacementIndex | None = None,
+) -> int:
     project = _cell_text(_mapped_change_value(row.values, "地市", "增员"))
     department = _resolve_addition_department(ws, layout, row, project)
-    insert_at = _roster_insert_row(ws, layout, department, project)
+    insert_at = (
+        placement_index.insertion_row(department, project)
+        if placement_index is not None
+        else _roster_insert_row(ws, layout, department, project)
+    )
     template_row = max(layout.data_start_row, insert_at - 1)
     if template_row >= layout.footer_start_row:
         template_row = layout.data_start_row
@@ -1230,6 +1358,22 @@ def _insert_roster_addition(ws: Worksheet, layout: RosterLayout, row: ChangeRow)
             _apply_date_number_format(ws.cell(insert_at, col_index), header)
     _write_roster_formulas(ws, layout, insert_at)
     _format_roster_data_row(ws, layout, insert_at)
+    if placement_index is not None:
+        actual_department = (
+            _cell_text(ws.cell(insert_at, placement_index.department_col).value)
+            if placement_index.department_col is not None
+            else ""
+        )
+        actual_project = (
+            _cell_text(ws.cell(insert_at, placement_index.project_col).value)
+            if placement_index.project_col is not None
+            else ""
+        )
+        placement_index.record_insertion(
+            insert_at,
+            actual_department,
+            actual_project,
+        )
     return insert_at
 
 
@@ -1351,24 +1495,21 @@ def _mark_roster_leave(ws: Worksheet, layout: RosterLayout, row_index: int) -> N
 
 
 def _format_roster_data_row(ws: Worksheet, layout: RosterLayout, row_index: int) -> None:
+    border_id = cached_style_id(ws, "border", "thin_black", lambda: THIN_BLACK_BORDER)
+    alignments = ws.parent._alignments
     for col_index in range(1, layout.max_column + 1):
         cell = ws.cell(row_index, col_index)
         header = _header_by_column(layout.headers, col_index)
         if header:
             _apply_date_number_format(cell, header)
-        cell.border = THIN_BLACK_BORDER
-        current = cell.alignment
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            textRotation=current.textRotation,
-            wrapText=current.wrapText,
-            shrinkToFit=current.shrinkToFit,
-            indent=current.indent,
-            relativeIndent=current.relativeIndent,
-            justifyLastLine=current.justifyLastLine,
-            readingOrder=current.readingOrder,
+        source_id = style_source_id(cell, "alignment")
+        alignment_id = cached_style_id(
+            ws,
+            "alignment",
+            ("centered", source_id),
+            lambda source_id=source_id: _centered_alignment(alignments[source_id]),
         )
+        set_style_ids(cell, border_id=border_id, alignment_id=alignment_id)
 
 
 def _renumber_roster(ws: Worksheet, layout: RosterLayout) -> None:

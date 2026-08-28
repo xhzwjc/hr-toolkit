@@ -5,13 +5,54 @@ import unittest
 import zipfile
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
-from hr_toolkit.tools.social_security import generate_social_security_reports
+from hr_toolkit.tools.social_security import (
+    DetailRecord,
+    _write_detail_workbook,
+    generate_social_security_reports,
+)
 
 
 class SocialSecurityTest(unittest.TestCase):
+    def test_large_detail_output_does_not_rescan_sheet_width_per_record(self) -> None:
+        records = [
+            DetailRecord(
+                id_card=f"3601111990{index:08d}"[:18],
+                name=f"员工{index}",
+                period="202601",
+                billing_period="202601",
+                period_split_input=False,
+                account="测试账户",
+                account_display="测试账户",
+                company="测试公司",
+                insured_place="测试地",
+                project="测试项目",
+                project_display="测试项目",
+                cost_center="测试成本中心",
+                start_period="202601",
+                management_fee=0,
+            )
+            for index in range(100)
+        ]
+        original_getter = Worksheet.max_column.fget
+        access_count = 0
+
+        def counted_max_column(worksheet):
+            nonlocal access_count
+            access_count += 1
+            return original_getter(worksheet)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(Worksheet, "max_column", new=property(counted_max_column)):
+                _write_detail_workbook(records, root / "明细.xlsx", root)
+
+        self.assertLessEqual(access_count, 3)
+
     def test_generate_social_security_reports_from_mixed_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

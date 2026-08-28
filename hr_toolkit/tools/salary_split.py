@@ -6,7 +6,7 @@ import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -189,8 +189,10 @@ def split_salary_by_company(
     *,
     dry_run: bool = False,
     write_manifest: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> SalarySplitResult:
     """Split one salary workbook into one workbook per hiring company."""
+    _check_cancelled(cancelled)
     input_path = Path(input_path).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
     if not input_path.exists():
@@ -205,13 +207,19 @@ def split_salary_by_company(
             layout = _detect_layout(workbook)
             detail_ws = workbook[layout.detail_sheet_name]
             hierarchy = _detect_detail_hierarchy(detail_ws, layout)
-            employees = _collect_employees(detail_ws, layout, hierarchy)
+            employees = _collect_employees(
+                detail_ws,
+                layout,
+                hierarchy,
+                cancelled=cancelled,
+            )
             groups = _group_by_company(employees)
         finally:
             workbook.close()
 
         result = SalarySplitResult(input_path=input_path, output_dir=output_dir, dry_run=dry_run)
         for company, rows in groups.items():
+            _check_cancelled(cancelled)
             result.outputs.append(
                 CompanyOutput(
                     company=company,
@@ -225,9 +233,17 @@ def split_salary_by_company(
 
         output_dir.mkdir(parents=True, exist_ok=True)
         for company_output in result.outputs:
+            _check_cancelled(cancelled)
             rows = groups[company_output.company]
             output_path = output_dir / f"{safe_filename(company_output.company)}-工资表.xlsx"
-            _write_company_workbook(working_input_path, layout, hierarchy, rows, output_path)
+            _write_company_workbook(
+                working_input_path,
+                layout,
+                hierarchy,
+                rows,
+                output_path,
+                cancelled=cancelled,
+            )
             company_output.file_path = str(output_path)
 
         if write_manifest:
@@ -236,13 +252,19 @@ def split_salary_by_company(
                 json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        return result
+    return result
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
 
 
 def _find_detail_max_col(ws: Worksheet, header_row: int) -> int:
     max_col = 1
+    worksheet_max_column = ws.max_column
     for r in range(max(1, header_row - 2), min(ws.max_row, header_row + 3) + 1):
-        for c in range(1, ws.max_column + 1):
+        for c in range(1, worksheet_max_column + 1):
             if ws.cell(r, c).value is not None:
                 max_col = max(max_col, c)
     return max_col
@@ -295,8 +317,12 @@ def _find_sheet_name(sheetnames: list[str], keyword: str) -> str:
 
 
 def _find_header_row(ws: Worksheet, required_headers: tuple[str, ...]) -> int:
+    max_column = ws.max_column
     for row_index in range(1, min(ws.max_row, 20) + 1):
-        values = [str(ws.cell(row_index, col).value or "").strip() for col in range(1, ws.max_column + 1)]
+        values = [
+            str(ws.cell(row_index, col).value or "").strip()
+            for col in range(1, max_column + 1)
+        ]
         if any(header in values for header in required_headers):
             return row_index
     raise ValueError(f"未在明细表前 20 行找到字段：{required_headers[0]}")
@@ -469,6 +495,8 @@ def _collect_employees(
     ws: Worksheet,
     layout: SalarySheetLayout,
     hierarchy: DetailHierarchy,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[EmployeeRow]:
     employees: list[EmployeeRow] = []
     leaf_to_cat: dict[str, str] = {}
@@ -477,6 +505,8 @@ def _collect_employees(
             leaf_to_cat[leaf_label] = cat.label
 
     for row_index in range(layout.data_start_row, ws.max_row + 1):
+        if row_index % 500 == 0:
+            _check_cancelled(cancelled)
         company = _cell_text(ws, row_index, layout.company_col)
         name = _cell_text(ws, row_index, layout.name_col)
         id_card = _cell_text(ws, row_index, layout.id_card_col)
@@ -552,7 +582,10 @@ def _write_company_workbook(
     hierarchy: DetailHierarchy,
     rows: list[EmployeeRow],
     output_path: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
+    _check_cancelled(cancelled)
     workbook = load_workbook(input_path, data_only=False)
     try:
         workbook.calculation.fullCalcOnLoad = True
@@ -561,8 +594,16 @@ def _write_company_workbook(
         detail_ws = workbook[layout.detail_sheet_name]
         summary_ws = workbook[layout.summary_sheet_name]
 
-        rebuilt = _rebuild_detail_sheet(detail_ws, layout, hierarchy, rows)
+        rebuilt = _rebuild_detail_sheet(
+            detail_ws,
+            layout,
+            hierarchy,
+            rows,
+            cancelled=cancelled,
+        )
+        _check_cancelled(cancelled)
         _rebuild_summary_sheet(summary_ws, layout, hierarchy, rebuilt)
+        _check_cancelled(cancelled)
         workbook.save(output_path)
     finally:
         workbook.close()
@@ -573,6 +614,8 @@ def _rebuild_detail_sheet(
     layout: SalarySheetLayout,
     hierarchy: DetailHierarchy,
     rows: list[EmployeeRow],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RebuiltDetailResult:
     unmerge_ranges_from_row(ws, layout.data_start_row)
     ws.delete_rows(layout.data_start_row, ws.max_row - layout.data_start_row + 1)
@@ -601,6 +644,8 @@ def _rebuild_detail_sheet(
                     continue
                 data_start_row = current_row
                 for emp in section_rows:
+                    if employee_seq % 500 == 0:
+                        _check_cancelled(cancelled)
                     apply_row_snapshot(ws, current_row, emp.snapshot, translate_formulas=True)
                     ws.cell(current_row, layout.seq_col).value = employee_seq
                     current_row += 1
@@ -654,6 +699,8 @@ def _rebuild_detail_sheet(
                 continue
             data_start_row = current_row
             for emp in section_rows:
+                if employee_seq % 500 == 0:
+                    _check_cancelled(cancelled)
                 apply_row_snapshot(ws, current_row, emp.snapshot, translate_formulas=True)
                 ws.cell(current_row, layout.seq_col).value = employee_seq
                 current_row += 1
@@ -686,6 +733,8 @@ def _rebuild_detail_sheet(
                 continue
             data_start_row = current_row
             for emp in section_rows:
+                if employee_seq % 500 == 0:
+                    _check_cancelled(cancelled)
                 apply_row_snapshot(ws, current_row, emp.snapshot, translate_formulas=True)
                 ws.cell(current_row, layout.seq_col).value = employee_seq
                 current_row += 1
@@ -791,12 +840,13 @@ def _write_detail_group_total_formulas(
 
 def _find_summary_max_col(ws: Worksheet, start_row: int, total_template_row: int) -> int:
     max_col = 1
+    worksheet_max_column = ws.max_column
     for r in range(1, start_row):
-        for c in range(1, ws.max_column + 1):
+        for c in range(1, worksheet_max_column + 1):
             if ws.cell(r, c).value is not None:
                 max_col = max(max_col, c)
     for r in range(start_row, min(ws.max_row, total_template_row + 1) + 1):
-        for c in range(1, ws.max_column + 1):
+        for c in range(1, worksheet_max_column + 1):
             if ws.cell(r, c).value is not None:
                 max_col = max(max_col, c)
     for merged_range in ws.merged_cells.ranges:

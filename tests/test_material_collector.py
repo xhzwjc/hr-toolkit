@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 import zipfile
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from openpyxl import load_workbook
@@ -27,6 +29,8 @@ from hr_toolkit.tools.material_collector import (
     MODE_BY_EMPLOYEE,
     MODE_BY_MATERIAL,
     MODE_FLAT,
+    MaterialCollectResult,
+    MaterialFileMatch,
     TargetEmployee,
     collect_employee_materials,
     parse_employee_roster,
@@ -1007,6 +1011,36 @@ class TestOCRCacheHelpers(unittest.TestCase):
 
             self.assertEqual(loaded["entries"], {})
             self.assertEqual(loaded["paths"], {})
+
+    def test_large_parsed_cache_is_reused_and_invalidated_by_file_change(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = Path(td) / _OCR_CACHE_FILE_NAME
+            cache_path.write_text(
+                json.dumps({"version": 6, "entries": {"first": {}}, "paths": {}}),
+                encoding="utf-8",
+            )
+            mc._clear_ocr_memory_cache()
+            try:
+                with mock.patch.object(mc, "_OCR_MEMORY_CACHE_MIN_BYTES", 0):
+                    first = mc._load_ocr_cache(cache_path)
+                    second = mc._load_ocr_cache(cache_path)
+                    self.assertIs(first, second)
+
+                    cache_path.write_text(
+                        json.dumps({
+                            "version": 6,
+                            "entries": {"replacement-longer-key": {}},
+                            "paths": {},
+                        }),
+                        encoding="utf-8",
+                    )
+                    replacement = mc._load_ocr_cache(cache_path)
+                    self.assertIsNot(replacement, first)
+                    self.assertEqual(set(replacement["entries"]), {"replacement-longer-key"})
+            finally:
+                mc._clear_ocr_memory_cache()
 
     def test_pdf_cache_upgrade_invalidates_only_pdf_entries(self) -> None:
         from hr_toolkit.tools import material_collector as mc
@@ -3142,6 +3176,205 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
         self.assertEqual(second_calls, 2)
         self.assertEqual(CountingEngine.call_count, second_calls)
         self.assertEqual(final_source_hash, source_hash)
+
+
+class TestLargeBatchCandidateIndexes(unittest.TestCase):
+    """Candidate indexes must be a lossless accelerator, never a new match rule."""
+
+    def test_flat_library_scandir_preserves_filters_and_relative_order(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        with tempfile.TemporaryDirectory() as td:
+            library = Path(td) / "资料库"
+            library.mkdir()
+            (library / "b").mkdir()
+            (library / "b" / "2.png").write_bytes(b"2")
+            (library / "a").mkdir()
+            (library / "a" / "1.jpg").write_bytes(b"1")
+            (library / ".hidden").mkdir()
+            (library / ".hidden" / "hidden.png").write_bytes(b"hidden")
+            (library / "~$temp.xlsx").write_bytes(b"temp")
+            output = library / "输出"
+            output.mkdir()
+            (output / "result.png").write_bytes(b"result")
+            try:
+                (library / "linked.png").symlink_to(library / "a" / "1.jpg")
+            except (OSError, NotImplementedError):
+                pass
+
+            result = mc._scan_flat_library_files(library, skip_dir=output)
+
+        self.assertEqual(
+            [path.relative_to(library).as_posix() for path in result],
+            ["a/1.jpg", "b/2.png"],
+        )
+
+    def test_flat_library_scan_honors_prestart_cancellation(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        with self.assertRaises(mc.MaterialCollectionCancelled):
+            mc._scan_flat_library_files(Path("/not-read"), cancelled=lambda: True)
+
+    def test_result_summary_can_skip_duplicate_match_serialization(self) -> None:
+        match = MaterialFileMatch(
+            employee_name="张三",
+            material_type="身份证",
+            source_path=Path("/tmp/source.png"),
+            relative_source_path="source.png",
+            matched_by="ocr",
+        )
+        result = MaterialCollectResult(
+            library_dir=Path("/tmp/library"),
+            output_dir=Path("/tmp/output"),
+            target_employees=[TargetEmployee("张三")],
+            matches=[match],
+        )
+
+        self.assertEqual(result.to_dict()["matches"][0]["employee_name"], "张三")
+        self.assertNotIn("matches", result.to_dict(include_matches=False))
+
+    def test_folder_candidate_index_matches_exhaustive_business_predicate(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        employees = [
+            mc.TargetEmployee(
+                name="张三",
+                id_card="440111199001011234",
+                phone="13800000001",
+            ),
+            mc.TargetEmployee(name="张三丰"),
+            mc.TargetEmployee(name="李四"),
+            mc.TargetEmployee(name="王五", phone="13900000002"),
+        ]
+        folder_index = {
+            "张三": [Path("/library/01")],
+            "A-张三-资料": [Path("/library/02")],
+            "张三丰": [Path("/library/03")],
+            "440111199001011234_档案": [Path("/library/04")],
+            "13900000002_证件": [Path("/library/05")],
+            "无关文件夹": [Path("/library/06")],
+        }
+
+        candidate_index = mc._FolderEmployeeCandidateIndex(folder_index, employees)
+        for employee_index, employee in enumerate(employees):
+            expected = []
+            for folder_name, paths in folder_index.items():
+                reason = mc._match_folder_to_employee(folder_name, employee)
+                if reason:
+                    expected.extend((path, reason) for path in paths)
+            self.assertEqual(candidate_index.matches_for(employee_index), expected)
+
+    def test_flat_candidate_index_matches_exhaustive_business_predicate(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        employees = [
+            mc.TargetEmployee(name="张三", id_card="440111199001011234"),
+            mc.TargetEmployee(name="李四"),
+            mc.TargetEmployee(name="王五", phone="13900000002"),
+            mc.TargetEmployee(name="张三丰"),
+        ]
+        indexed_files = [
+            mc._FlatIndexedFile(
+                Path("/library/id.png"), "id.png", "k0", "身份证", "ocr", "",
+                (), mc._hash_id_card("440111199001011234"),
+            ),
+            mc._FlatIndexedFile(
+                Path("/library/mismatch.png"), "mismatch.png", "k1", "身份证", "ocr", "",
+                ("张三",), mc._hash_id_card("440111199001019999"),
+            ),
+            mc._FlatIndexedFile(
+                Path("/library/name.png"), "name.png", "k2", "劳动合同", "ocr", "",
+                ("李·四",), "",
+            ),
+            mc._FlatIndexedFile(
+                Path("/library/text.png"), "text.png", "k3", "学历证明", "ocr", "",
+                (), "", text_snippet="持证人：张三丰；有效",
+            ),
+            mc._FlatIndexedFile(
+                Path("/library/phone.png"), "phone.png", "k4", "银行卡", "ocr", "",
+                (), "", extracted_phone_hash=mc._hash_phone("13900000002"),
+            ),
+            mc._FlatIndexedFile(
+                Path("/library/raw-name.png"), "raw-name.png", "k5", "资格证书", "ocr", "",
+                (), "", text_snippet="申请人（李四）审核通过",
+            ),
+        ]
+        duplicate_names: set[str] = set()
+        candidate_index = mc._FlatEmployeeCandidateIndex(
+            indexed_files,
+            employees,
+            duplicate_names,
+        )
+
+        for employee_index, employee in enumerate(employees):
+            expected = [
+                item for item in indexed_files
+                if mc._flat_file_matches_employee(item, employee, duplicate_names)
+            ]
+            self.assertEqual(
+                candidate_index.files_for(employee_index, employee, duplicate_names),
+                expected,
+            )
+
+    def test_flat_duplicate_names_still_require_identity_evidence(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        employees = [
+            mc.TargetEmployee(name="张三", id_card="440111199001011234"),
+            mc.TargetEmployee(name="张 三", id_card="440111199001011235"),
+        ]
+        duplicate_names = {"张三"}
+        indexed_files = [
+            mc._FlatIndexedFile(
+                Path("/library/name-only.png"), "name-only.png", "k0", "身份证", "ocr", "",
+                ("张三",), "", text_snippet="姓名：张三",
+            ),
+            mc._FlatIndexedFile(
+                Path("/library/id.png"), "id.png", "k1", "身份证", "ocr", "",
+                ("张三",), mc._hash_id_card("440111199001011235"),
+            ),
+        ]
+        candidate_index = mc._FlatEmployeeCandidateIndex(
+            indexed_files,
+            employees,
+            duplicate_names,
+        )
+
+        self.assertEqual(candidate_index.files_for(0, employees[0], duplicate_names), [])
+        self.assertEqual(
+            candidate_index.files_for(1, employees[1], duplicate_names),
+            [indexed_files[1]],
+        )
+
+    def test_low_core_ocr_reserves_one_cpu_for_the_ui_thread(self) -> None:
+        from hr_toolkit.tools import material_collector as mc
+
+        calls: list[dict[str, int]] = []
+
+        class FakeRapidOCR:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+        original_engine = mc._OCR_ENGINE
+        original_attempted = mc._OCR_ATTEMPTED
+        try:
+            mc._OCR_ENGINE = None
+            mc._OCR_ATTEMPTED = False
+            fake_module = SimpleNamespace(RapidOCR=FakeRapidOCR)
+            with mock.patch.object(mc.os, "cpu_count", return_value=2), mock.patch.dict(
+                sys.modules,
+                {"rapidocr_onnxruntime": fake_module},
+            ):
+                engine = mc._get_ocr_engine()
+        finally:
+            mc._OCR_ENGINE = original_engine
+            mc._OCR_ATTEMPTED = original_attempted
+
+        self.assertIsInstance(engine, FakeRapidOCR)
+        self.assertEqual(calls, [{
+            "intra_op_num_threads": 1,
+            "inter_op_num_threads": 1,
+        }])
 
 
 if __name__ == "__main__":

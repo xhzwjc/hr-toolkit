@@ -10,6 +10,8 @@ import threading
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+from array import array
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -31,6 +33,7 @@ try:
 except ImportError:  # pragma: no cover - 现代构建使用纯 Python pypdf
     pdfium = None  # type: ignore[assignment]
 
+from ..common.excel import SheetGrid
 from ..common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from ..common.filenames import safe_filename
 
@@ -53,6 +56,19 @@ _OCR_LOCK = threading.Lock()
 _PDF_LOCK = threading.RLock()
 
 
+def _ocr_runtime_options() -> dict[str, int]:
+    """Reserve one CPU for Tk on low-core machines supported by Win7 builds."""
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    if cpu_count > 4:
+        # Keep the OCR package's tuned defaults on modern hardware.
+        return {}
+    return {
+        "intra_op_num_threads": max(1, cpu_count - 1),
+        "inter_op_num_threads": 1,
+    }
+
+
 def _get_ocr_engine():
     global _OCR_ENGINE, _OCR_ATTEMPTED
     with _OCR_LOCK:
@@ -60,7 +76,13 @@ def _get_ocr_engine():
             _OCR_ATTEMPTED = True
             try:
                 from rapidocr_onnxruntime import RapidOCR
-                _OCR_ENGINE = RapidOCR()
+                options = _ocr_runtime_options()
+                try:
+                    _OCR_ENGINE = RapidOCR(**options)
+                except TypeError:
+                    # Forward-compatible fallback if a future RapidOCR removes
+                    # the thread-control keyword arguments.
+                    _OCR_ENGINE = RapidOCR()
             except Exception:
                 _OCR_ENGINE = None
         return _OCR_ENGINE
@@ -76,6 +98,11 @@ _OCR_CACHE_FILE_LOAD_MAX_BYTES = 256 * 1024 * 1024
 _OCR_CACHE_ENTRY_MAX_AGE_DAYS = 90
 _OCR_CACHE_HASH_WINDOW = 1 * 1024 * 1024
 _OCR_CACHE_HASH_TRIGGER_SIZE = 10 * 1024 * 1024
+_OCR_MEMORY_CACHE_MIN_BYTES = 1 * 1024 * 1024
+_OCR_MEMORY_CACHE_LOCK = threading.RLock()
+_OCR_MEMORY_CACHE_PATH: str | None = None
+_OCR_MEMORY_CACHE_SIGNATURE: tuple[int, int, int, int, int] | None = None
+_OCR_MEMORY_CACHE_DATA: dict[str, Any] | None = None
 _OFFICE_ARCHIVE_MAX_MEMBERS = 20_000
 _OFFICE_XML_MEMBER_MAX_BYTES = 16 * 1024 * 1024
 _OFFICE_XML_TOTAL_MAX_BYTES = 64 * 1024 * 1024
@@ -354,24 +381,86 @@ def _new_ocr_cache() -> dict[str, Any]:
     }
 
 
+def _ocr_cache_path_key(cache_path: Path) -> str:
+    return os.path.abspath(os.fspath(cache_path))
+
+
+def _ocr_cache_file_signature(stat_result: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(getattr(stat_result, "st_dev", 0) or 0),
+        int(getattr(stat_result, "st_ino", 0) or 0),
+        int(stat_result.st_size),
+        int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+        int(getattr(stat_result, "st_ctime_ns", int(stat_result.st_ctime * 1_000_000_000))),
+    )
+
+
+def _clear_ocr_memory_cache(cache_path: Path | None = None) -> None:
+    global _OCR_MEMORY_CACHE_PATH, _OCR_MEMORY_CACHE_SIGNATURE, _OCR_MEMORY_CACHE_DATA
+    path_key = _ocr_cache_path_key(cache_path) if cache_path is not None else None
+    with _OCR_MEMORY_CACHE_LOCK:
+        if path_key is not None and _OCR_MEMORY_CACHE_PATH != path_key:
+            return
+        _OCR_MEMORY_CACHE_PATH = None
+        _OCR_MEMORY_CACHE_SIGNATURE = None
+        _OCR_MEMORY_CACHE_DATA = None
+
+
+def _remember_ocr_memory_cache(cache_path: Path, data: dict[str, Any]) -> None:
+    global _OCR_MEMORY_CACHE_PATH, _OCR_MEMORY_CACHE_SIGNATURE, _OCR_MEMORY_CACHE_DATA
+    try:
+        stat_result = cache_path.stat()
+    except OSError:
+        _clear_ocr_memory_cache(cache_path)
+        return
+    if stat_result.st_size < _OCR_MEMORY_CACHE_MIN_BYTES:
+        _clear_ocr_memory_cache(cache_path)
+        return
+    with _OCR_MEMORY_CACHE_LOCK:
+        _OCR_MEMORY_CACHE_PATH = _ocr_cache_path_key(cache_path)
+        _OCR_MEMORY_CACHE_SIGNATURE = _ocr_cache_file_signature(stat_result)
+        _OCR_MEMORY_CACHE_DATA = data
+
+
 def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
     """读取缓存 JSON；损坏时返回空结构并由上层决定是否重建。"""
+    path_key = _ocr_cache_path_key(cache_path)
+    with _OCR_MEMORY_CACHE_LOCK:
+        if _OCR_MEMORY_CACHE_PATH is not None and _OCR_MEMORY_CACHE_PATH != path_key:
+            _clear_ocr_memory_cache()
     if cache_path.is_symlink() or not cache_path.is_file():
+        _clear_ocr_memory_cache(cache_path)
         return _new_ocr_cache()
 
     try:
-        if cache_path.stat().st_size > _OCR_CACHE_FILE_LOAD_MAX_BYTES:
+        stat_result = cache_path.stat()
+        if stat_result.st_size > _OCR_CACHE_FILE_LOAD_MAX_BYTES:
+            _clear_ocr_memory_cache(cache_path)
             return _new_ocr_cache()
-        raw = cache_path.read_text(encoding="utf-8")
-    except OSError:
-        return _new_ocr_cache()
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+        signature = _ocr_cache_file_signature(stat_result)
+        with _OCR_MEMORY_CACHE_LOCK:
+            if _OCR_MEMORY_CACHE_PATH is not None and _OCR_MEMORY_CACHE_PATH != path_key:
+                _clear_ocr_memory_cache()
+            if stat_result.st_size >= _OCR_MEMORY_CACHE_MIN_BYTES:
+                if (
+                    _OCR_MEMORY_CACHE_PATH == path_key
+                    and _OCR_MEMORY_CACHE_SIGNATURE == signature
+                    and _OCR_MEMORY_CACHE_DATA is not None
+                ):
+                    return _OCR_MEMORY_CACHE_DATA
+                # Only one parsed large cache is retained.  Drop the previous
+                # one before decoding another so their peaks do not overlap.
+                _clear_ocr_memory_cache()
+        # Avoid retaining a second full-size text copy after decoding a large
+        # cache.  The parsed dictionary remains exactly the same.
+        with cache_path.open("r", encoding="utf-8") as cache_file:
+            data = json.load(cache_file)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _clear_ocr_memory_cache(cache_path)
         return _new_ocr_cache()
 
     if not isinstance(data, dict):
+        _clear_ocr_memory_cache(cache_path)
         return _new_ocr_cache()
 
     # 缺失版本号的旧缓存必须按最早版本迁移，不能误当成当前版本继续复用。
@@ -380,6 +469,7 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         data["entries"] = {}
     if not isinstance(data.get("paths"), dict):
         data["paths"] = {}
+    _remember_ocr_memory_cache(cache_path, data)
     return data
 
 
@@ -450,6 +540,7 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     data.setdefault("paths", {})
 
     if cache_path.is_symlink():
+        _clear_ocr_memory_cache(cache_path)
         return False
     tmp_path = cache_path.with_name(
         f".{cache_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
@@ -457,15 +548,20 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         if cache_path.parent.is_symlink():
+            _clear_ocr_memory_cache(cache_path)
             return False
         with tmp_path.open("x", encoding="utf-8") as temp_file:
-            json.dump(data, temp_file, ensure_ascii=False, indent=2)
+            # This is an internal machine cache rather than a user document.
+            # Compact separators reduce repeated checkpoint I/O without
+            # changing keys, values, migration, or atomic replacement.
+            json.dump(data, temp_file, ensure_ascii=False, separators=(",", ":"))
             temp_file.write("\n")
         try:
             tmp_path.chmod(0o600)
         except OSError:
             pass
     except (FileExistsError, OSError):
+        _clear_ocr_memory_cache(cache_path)
         return False
 
     try:
@@ -476,7 +572,9 @@ def _save_ocr_cache(cache_path: Path, data: dict[str, Any]) -> bool:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
+        _clear_ocr_memory_cache(cache_path)
         return False
+    _remember_ocr_memory_cache(cache_path, data)
     return True
 
 
@@ -810,8 +908,8 @@ class MaterialCollectResult:
         )
         return sum(1 for key in keys if not self.missing_records.get(key))
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, *, include_matches: bool = True) -> dict[str, Any]:
+        payload = {
             "tool_name": TOOL_NAME,
             "library_dir": str(self.library_dir),
             "output_dir": str(self.output_dir),
@@ -823,7 +921,6 @@ class MaterialCollectResult:
             "matched_file_count": self.matched_file_count,
             "complete_employee_count": self.complete_employee_count,
             "requested_materials": self.requested_materials,
-            "matches": [m.to_dict() for m in self.matches],
             "missing_records": self.missing_records,
             "warnings": self.warnings,
             # 缓存层指标
@@ -837,6 +934,9 @@ class MaterialCollectResult:
             "zip_password": self.zip_password,
             "mask_sensitive": self.mask_sensitive,
         }
+        if include_matches:
+            payload["matches"] = [match.to_dict() for match in self.matches]
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -977,8 +1077,14 @@ def parse_employee_roster(
         import tempfile
         with tempfile.TemporaryDirectory() as temp_dir_str:
             working_path = ensure_xlsx_workbook(source_path, Path(temp_dir_str))
-            wb = load_workbook(working_path, data_only=True)
-            ws = wb.active
+            wb = load_workbook(working_path, data_only=True, read_only=True)
+            try:
+                # Read-only worksheets are cheap to open but random ``cell`` access
+                # reparses XML from the beginning.  A single compact value pass keeps
+                # the existing parser contract while bounding memory on large rosters.
+                ws = SheetGrid(wb.active)
+            finally:
+                wb.close()
 
             name_col: int | None = None
             id_card_col: int | None = None
@@ -1065,7 +1171,6 @@ def parse_employee_roster(
                     department=dept_val,
                     per_person_materials=per_mats,
                 ))
-            wb.close()
         return employees
 
     raw_text = str(source)
@@ -1094,6 +1199,134 @@ def _is_direct_employee_input(
 # ---------------------------------------------------------------------------
 # 文件夹匹配核心算法
 # ---------------------------------------------------------------------------
+
+
+class _AhoCandidateMatcher:
+    """Compact multi-pattern matcher used only to find possible employees.
+
+    The established business predicates remain the final authority.  This
+    matcher merely avoids testing every employee against every folder or OCR
+    record, which otherwise becomes quadratic for large batches.
+    """
+
+    __slots__ = ("_transitions", "_failures", "_outputs", "_patterns", "_payloads")
+
+    def __init__(self, pattern_payloads: dict[str, set[int]]) -> None:
+        self._transitions: list[dict[str, int]] = [{}]
+        self._failures: list[int] = [0]
+        self._outputs: list[list[int]] = [[]]
+        self._patterns: list[str] = []
+        self._payloads: list[tuple[int, ...]] = []
+
+        for pattern, payloads in pattern_payloads.items():
+            if not pattern or not payloads:
+                continue
+            pattern_index = len(self._patterns)
+            self._patterns.append(pattern)
+            self._payloads.append(tuple(sorted(payloads)))
+            state = 0
+            for character in pattern:
+                next_state = self._transitions[state].get(character)
+                if next_state is None:
+                    next_state = len(self._transitions)
+                    self._transitions[state][character] = next_state
+                    self._transitions.append({})
+                    self._failures.append(0)
+                    self._outputs.append([])
+                state = next_state
+            self._outputs[state].append(pattern_index)
+
+        pending: deque[int] = deque()
+        for child in self._transitions[0].values():
+            pending.append(child)
+        while pending:
+            state = pending.popleft()
+            for character, child in self._transitions[state].items():
+                pending.append(child)
+                fallback = self._failures[state]
+                while fallback and character not in self._transitions[fallback]:
+                    fallback = self._failures[fallback]
+                self._failures[child] = self._transitions[fallback].get(character, 0)
+                inherited = self._outputs[self._failures[child]]
+                if inherited:
+                    self._outputs[child].extend(inherited)
+
+    @staticmethod
+    def _is_cjk(character: str) -> bool:
+        return "\u3400" <= character <= "\u9fff"
+
+    def match_payloads(self, text: str, *, cjk_boundaries: bool = False) -> set[int]:
+        if not text or len(self._transitions) == 1:
+            return set()
+        matched: set[int] = set()
+        state = 0
+        for position, character in enumerate(text):
+            while state and character not in self._transitions[state]:
+                state = self._failures[state]
+            state = self._transitions[state].get(character, 0)
+            for pattern_index in self._outputs[state]:
+                if cjk_boundaries:
+                    pattern = self._patterns[pattern_index]
+                    start = position - len(pattern) + 1
+                    if start > 0 and self._is_cjk(text[start - 1]):
+                        continue
+                    next_position = position + 1
+                    if next_position < len(text) and self._is_cjk(text[next_position]):
+                        continue
+                matched.update(self._payloads[pattern_index])
+        return matched
+
+
+class _FolderEmployeeCandidateIndex:
+    """Map each employee to candidate folder positions in original scan order."""
+
+    __slots__ = ("_employees", "_folder_entries", "_candidate_positions")
+
+    def __init__(
+        self,
+        folder_index: dict[str, list[Path]],
+        employees: list[TargetEmployee],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        pattern_payloads: dict[str, set[int]] = {}
+        for employee_index, employee in enumerate(employees):
+            patterns: set[str] = set()
+            employee_id = employee.id_card.strip()
+            if employee_id and len(employee_id) >= 15:
+                patterns.add(employee_id)
+            employee_phone = employee.phone.strip()
+            if employee_phone and len(employee_phone) == 11:
+                patterns.add(employee_phone)
+            employee_name = employee.name.strip()
+            if employee_name and (
+                _is_valid_person_name(employee_name)
+                or _ID_CARD_RE.match(employee_name)
+            ):
+                patterns.add(employee_name)
+            for pattern in patterns:
+                pattern_payloads.setdefault(pattern, set()).add(employee_index)
+
+        matcher = _AhoCandidateMatcher(pattern_payloads)
+        self._employees = employees
+        self._folder_entries = list(folder_index.items())
+        # ``array('I')`` keeps a 10k x 10k sparse match set compact on low-memory PCs.
+        self._candidate_positions = [array("I") for _ in employees]
+        for folder_position, (folder_name, _paths) in enumerate(self._folder_entries):
+            if folder_position % 512 == 0:
+                _raise_if_cancelled(cancelled)
+            for employee_index in matcher.match_payloads(folder_name.strip()):
+                self._candidate_positions[employee_index].append(folder_position)
+
+    def matches_for(self, employee_index: int) -> list[tuple[Path, str]]:
+        employee = self._employees[employee_index]
+        matched_folders: list[tuple[Path, str]] = []
+        for folder_position in self._candidate_positions[employee_index]:
+            folder_name, paths = self._folder_entries[folder_position]
+            reason = _match_folder_to_employee(folder_name, employee)
+            if reason:
+                matched_folders.extend((path, reason) for path in paths)
+        return matched_folders
 
 def _match_folder_to_employee(folder_name: str, emp: TargetEmployee) -> str | None:
     """判断一个文件夹名是否属于某员工，返回匹配依据或 None。"""
@@ -2685,29 +2918,64 @@ class _FlatIndexedFile:
     document_page_count: int = 0
 
 
-def _scan_flat_library_files(lib_path: Path, skip_dir: Path | None = None) -> list[Path]:
+def _scan_flat_library_files(
+    lib_path: Path,
+    skip_dir: Path | None = None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[Path]:
     """递归扫描无序资料库中的可识别文件，跳过隐藏项、链接目录和输出目录。"""
-    result: list[Path] = []
-    for root, dirs, files in os.walk(lib_path, followlinks=False):
-        root_path = Path(root)
-        dirs[:] = [
-            name
-            for name in dirs
-            if not name.startswith(".")
-            and name.lower() not in _IGNORED_FILENAMES
-            and not (root_path / name).is_symlink()
-            and not (skip_dir and _is_path_nested(root_path / name, skip_dir))
-        ]
-        for filename in files:
-            if _is_junk_or_temp_file(filename):
+    _raise_if_cancelled(cancelled)
+    keyed_paths: list[tuple[str, Path]] = []
+    pending: list[tuple[Path, str]] = [(lib_path, "")]
+    scanned_entries = 0
+
+    while pending:
+        parent, relative_parent = pending.pop()
+        try:
+            entries = list(os.scandir(parent))
+        except OSError:
+            continue
+
+        child_directories: list[tuple[Path, str]] = []
+        for entry in entries:
+            scanned_entries += 1
+            if scanned_entries % 512 == 0:
+                _raise_if_cancelled(cancelled)
+            try:
+                is_directory = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError:
                 continue
-            source_path = root_path / filename
-            if source_path.is_symlink() or not source_path.is_file():
+
+            source_path = Path(entry.path)
+            relative_path = (
+                f"{relative_parent}/{entry.name}"
+                if relative_parent
+                else entry.name
+            )
+            if is_directory:
+                if (
+                    entry.name.startswith(".")
+                    or entry.name.lower() in _IGNORED_FILENAMES
+                    or (skip_dir and _is_path_nested(source_path, skip_dir))
+                ):
+                    continue
+                child_directories.append((source_path, relative_path))
+                continue
+            if not is_file or _is_junk_or_temp_file(entry.name):
                 continue
             if source_path.suffix.lower() not in SUPPORTED_FILE_EXTENSIONS:
                 continue
-            result.append(source_path)
-    return sorted(result, key=lambda path: path.relative_to(lib_path).as_posix().casefold())
+            keyed_paths.append((relative_path.casefold(), source_path))
+
+        # os.walk visits child directories in scandir order.  The stack is
+        # reversed so equal case-folded paths retain the same stable ordering.
+        pending.extend(reversed(child_directories))
+
+    keyed_paths.sort(key=lambda item: item[0])
+    _raise_if_cancelled(cancelled)
+    return [path for _sort_key, path in keyed_paths]
 
 
 def _extract_flat_document_text(
@@ -3517,9 +3785,15 @@ def _build_flat_ocr_index(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[_FlatIndexedFile], bool]:
     """建立/复用全局 OCR 索引；小批次密集、超大批次分段持久化。"""
+    resolved_cache_path = cache_path.resolve()
     source_files = [
-        path for path in _scan_flat_library_files(lib_path, skip_dir=out_path)
-        if path.resolve() != cache_path.resolve()
+        path
+        for path in _scan_flat_library_files(
+            lib_path,
+            skip_dir=out_path,
+            cancelled=cancelled,
+        )
+        if path != resolved_cache_path
     ]
     indexed: list[_FlatIndexedFile] = []
     active_paths: set[str] = set()
@@ -3758,6 +4032,96 @@ def _flat_file_matches_employee(
     return False
 
 
+class _FlatEmployeeCandidateIndex:
+    """Inverted OCR-person index with the original predicate as final filter."""
+
+    __slots__ = ("_indexed_files", "_candidate_positions")
+
+    def __init__(
+        self,
+        indexed_files: list[_FlatIndexedFile],
+        employees: list[TargetEmployee],
+        duplicate_target_names: set[str],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        id_targets: dict[str, set[int]] = {}
+        phone_targets: dict[str, set[int]] = {}
+        name_targets: dict[str, set[int]] = {}
+        text_targets: dict[str, set[int]] = {}
+
+        for employee_index, employee in enumerate(employees):
+            target_id_hash = _hash_id_card(employee.id_card)
+            if not target_id_hash and _ID_CARD_RE.fullmatch(employee.name.strip()):
+                target_id_hash = _hash_id_card(employee.name.strip())
+            if target_id_hash:
+                id_targets.setdefault(target_id_hash, set()).add(employee_index)
+
+            target_phone_hash = _hash_phone(employee.phone)
+            if target_phone_hash:
+                phone_targets.setdefault(target_phone_hash, set()).add(employee_index)
+
+            target_name = _normalize_person_name(employee.name)
+            if target_name and target_name not in duplicate_target_names:
+                name_targets.setdefault(target_name, set()).add(employee_index)
+                raw_target = str(employee.name or "").strip()
+                if raw_target:
+                    text_targets.setdefault(raw_target, set()).add(employee_index)
+
+        text_matcher = _AhoCandidateMatcher(text_targets)
+        self._indexed_files = indexed_files
+        self._candidate_positions = [array("I") for _ in employees]
+        for file_position, indexed_file in enumerate(indexed_files):
+            if file_position % 256 == 0:
+                _raise_if_cancelled(cancelled)
+            candidate_employees: set[int] = set()
+            if indexed_file.extracted_id_hash:
+                candidate_employees.update(
+                    id_targets.get(indexed_file.extracted_id_hash, ())
+                )
+            if indexed_file.extracted_phone_hash:
+                candidate_employees.update(
+                    phone_targets.get(indexed_file.extracted_phone_hash, ())
+                )
+            for extracted_name in indexed_file.extracted_names:
+                normalized_name = _normalize_person_name(extracted_name)
+                if normalized_name:
+                    candidate_employees.update(name_targets.get(normalized_name, ()))
+            if indexed_file.text_snippet:
+                candidate_employees.update(text_matcher.match_payloads(
+                    indexed_file.text_snippet,
+                    cjk_boundaries=True,
+                ))
+            for employee_index in candidate_employees:
+                self._candidate_positions[employee_index].append(file_position)
+
+    def files_for(
+        self,
+        employee_index: int,
+        employee: TargetEmployee,
+        duplicate_target_names: set[str],
+    ) -> list[_FlatIndexedFile]:
+        return [
+            indexed_file
+            for file_position in self._candidate_positions[employee_index]
+            if _flat_file_matches_employee(
+                indexed_file := self._indexed_files[file_position],
+                employee,
+                duplicate_target_names,
+            )
+        ]
+
+
+def _flat_document_groups(
+    indexed_files: list[_FlatIndexedFile],
+) -> dict[str, list[_FlatIndexedFile]]:
+    groups: dict[str, list[_FlatIndexedFile]] = {}
+    for indexed_file in indexed_files:
+        if indexed_file.document_group_id:
+            groups.setdefault(indexed_file.document_group_id, []).append(indexed_file)
+    return groups
+
+
 def _flat_employee_result_key(
     employee: TargetEmployee,
     duplicate_target_names: set[str],
@@ -3796,8 +4160,11 @@ def _collect_from_flat_index(
     matches: list[MaterialFileMatch],
     warnings: list[str],
     duplicate_target_names: set[str],
+    *,
+    candidate_files: list[_FlatIndexedFile] | None = None,
+    document_groups: dict[str, list[_FlatIndexedFile]] | None = None,
 ) -> tuple[list[str], int]:
-    person_files = [
+    person_files = candidate_files if candidate_files is not None else [
         item for item in indexed_files
         if _flat_file_matches_employee(item, employee, duplicate_target_names)
     ]
@@ -3807,11 +4174,10 @@ def _collect_from_flat_index(
     }
     invalid_group_ids: set[str] = set()
     if relevant_group_ids:
-        all_group_members: dict[str, list[_FlatIndexedFile]] = {}
-        for item in indexed_files:
-            if item.document_group_id in relevant_group_ids:
-                all_group_members.setdefault(item.document_group_id, []).append(item)
+        all_group_members = document_groups or _flat_document_groups(indexed_files)
         for group_id, members in all_group_members.items():
+            if group_id not in relevant_group_ids:
+                continue
             for member in members:
                 fingerprint = _compute_full_file_fingerprint(member.source_path)
                 if fingerprint is not None:
@@ -4062,12 +4428,20 @@ def collect_employee_materials(
 
     folder_index: dict[str, list[Path]] = {}
     flat_index: list[_FlatIndexedFile] = []
+    folder_candidate_index: _FolderEmployeeCandidateIndex | None = None
+    flat_candidate_index: _FlatEmployeeCandidateIndex | None = None
+    flat_document_groups: dict[str, list[_FlatIndexedFile]] = {}
     duplicate_target_names: set[str] = set()
     if library_mode == LIBRARY_MODE_PERSON_FOLDER:
         _raise_if_cancelled(cancelled)
         if progress_callback:
             progress_callback(0, len(employees), "正在扫描资料库文件夹索引...")
         folder_index = _scan_folder_index(lib_path, max_depth=scan_depth, skip_dir=out_path)
+        folder_candidate_index = _FolderEmployeeCandidateIndex(
+            folder_index,
+            employees,
+            cancelled=cancelled,
+        )
     else:
         assert ocr_cache is not None and cache_path is not None
         normalized_name_counts: dict[str, int] = {}
@@ -4100,6 +4474,13 @@ def collect_employee_materials(
             warnings.append(
                 f"OCR 索引缓存写入失败：{cache_path}；本次仍使用内存索引完成检索，下次会重新建立。"
             )
+        flat_candidate_index = _FlatEmployeeCandidateIndex(
+            flat_index,
+            employees,
+            duplicate_target_names,
+            cancelled=cancelled,
+        )
+        flat_document_groups = _flat_document_groups(flat_index)
 
     for idx, emp in enumerate(employees):
         _raise_if_cancelled(cancelled)
@@ -4125,6 +4506,7 @@ def collect_employee_materials(
             emp_materials = global_materials
 
         if library_mode == LIBRARY_MODE_FLAT_OCR:
+            assert flat_candidate_index is not None
             emp_missing, matched_count = _collect_from_flat_index(
                 emp,
                 flat_index,
@@ -4134,18 +4516,20 @@ def collect_employee_materials(
                 matches,
                 warnings,
                 duplicate_target_names,
+                candidate_files=flat_candidate_index.files_for(
+                    idx,
+                    emp,
+                    duplicate_target_names,
+                ),
+                document_groups=flat_document_groups,
             )
             folder_match_counts[emp_key] = 1 if matched_count else 0
             if emp_missing:
                 missing_records[emp_key] = emp_missing
             continue
 
-        matched_folders: list[tuple[Path, str]] = []
-        for folder_name, paths in folder_index.items():
-            reason = _match_folder_to_employee(folder_name, emp)
-            if reason:
-                for p in paths:
-                    matched_folders.append((p, reason))
+        assert folder_candidate_index is not None
+        matched_folders = folder_candidate_index.matches_for(idx)
 
         folder_match_counts[emp_key] = len(matched_folders)
 

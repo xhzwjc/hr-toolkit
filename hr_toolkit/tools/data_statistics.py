@@ -7,7 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -225,7 +225,9 @@ def generate_data_statistics_reports(
     include_business_trip: bool = False,
     include_workday_business_trip: bool = False,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> DataStatisticsResult:
+    _check_cancelled(cancelled)
     if remark_unit not in _VALID_REMARK_UNITS:
         raise ValueError("备注单位只支持 day（按天）或 hour（按小时）。")
     input_paths = _normalize_input_paths(input_path)
@@ -237,6 +239,7 @@ def generate_data_statistics_reports(
     warnings: list[str] = []
 
     for path in input_paths:
+        _check_cancelled(cancelled)
         if not path.exists():
             raise FileNotFoundError(f"考勤、周报、月报文件、压缩包或文件夹不存在：{path}")
     if staff_path is not None:
@@ -248,6 +251,7 @@ def generate_data_statistics_reports(
     with tempfile.TemporaryDirectory(prefix="hr_data_statistics_") as temp_root:
         temp_dir = Path(temp_root)
         files = _find_source_files(input_paths, temp_dir, warnings)
+        _check_cancelled(cancelled)
         if not files:
             raise ValueError("未找到 .xlsx 或 .xls 数据文件。")
         expected_reporters = _read_expected_reporters(staff_path, temp_dir, warnings) if staff_path else []
@@ -257,6 +261,7 @@ def generate_data_statistics_reports(
         monthly_records: list[ReportRecord] = []
         used_files: list[str] = []
         for file_path in files:
+            _check_cancelled(cancelled)
             file_attendance, file_weekly, file_monthly = _read_statistics_file(file_path, warnings)
             if file_attendance or file_weekly or file_monthly:
                 used_files.append(str(file_path))
@@ -270,6 +275,7 @@ def generate_data_statistics_reports(
                 message += "\n诊断信息：\n- " + "\n- ".join(warnings[-5:])
             raise ValueError(message)
 
+        _check_cancelled(cancelled)
         attendance_summaries, attendance_exceptions = _summarize_attendance(
             attendance_rows,
             remark_unit,
@@ -309,6 +315,7 @@ def generate_data_statistics_reports(
         if dry_run:
             return result
 
+        _check_cancelled(cancelled)
         output.mkdir(parents=True, exist_ok=True)
         output_file = output / OUTPUT_FILENAME
         _write_output_workbook(
@@ -324,9 +331,15 @@ def generate_data_statistics_reports(
             month_range=month_range,
             include_business_trip=include_business_trip,
             include_workday_business_trip=include_workday_business_trip,
+            cancelled=cancelled,
         )
         result.output_file = output_file
         return result
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
@@ -1601,6 +1614,7 @@ def _write_output_workbook(
     month_range: tuple[date, date] | None = None,
     include_business_trip: bool = False,
     include_workday_business_trip: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     template_path = _copy_template(temp_dir)
     workbook = load_workbook(template_path)
@@ -1614,10 +1628,28 @@ def _write_output_workbook(
             attendance_summaries,
             include_business_trip=include_business_trip,
             include_workday_business_trip=include_workday_business_trip,
+            cancelled=cancelled,
         )
-        _write_report_sheet(report_ws, report_summaries, weekly_records, monthly_records, week_range, month_range)
-        _write_attendance_detail_sheet(workbook, attendance_exceptions)
-        _write_report_detail_sheet(workbook, report_exceptions)
+        _write_report_sheet(
+            report_ws,
+            report_summaries,
+            weekly_records,
+            monthly_records,
+            week_range,
+            month_range,
+            cancelled=cancelled,
+        )
+        _write_attendance_detail_sheet(
+            workbook,
+            attendance_exceptions,
+            cancelled=cancelled,
+        )
+        _write_report_detail_sheet(
+            workbook,
+            report_exceptions,
+            cancelled=cancelled,
+        )
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
@@ -1635,6 +1667,8 @@ def _write_attendance_sheet(
     summaries: list[AttendancePersonSummary],
     include_business_trip: bool = False,
     include_workday_business_trip: bool = False,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     max_month = max([4] + [month for summary in summaries for month in summary.month_overtime_days])
     if max_month > 4:
@@ -1664,10 +1698,13 @@ def _write_attendance_sheet(
         ws.cell(2, workday_business_trip_col_index).value = "出差"
         stat_start_col += 1
     first_overtime_col = 9 + int(out_col_index is not None) + int(workday_business_trip_col_index is not None)
+    worksheet_max_column = ws.max_column
     for offset, summary in enumerate(summaries):
+        if offset % 500 == 0:
+            _check_cancelled(cancelled)
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
-        for col_index in range(1, ws.max_column + 1):
+        for col_index in range(1, worksheet_max_column + 1):
             ws.cell(row_index, col_index).value = None
         ws.cell(row_index, 1).value = offset + 1
         ws.cell(row_index, 2).value = summary.company
@@ -1698,11 +1735,11 @@ def _write_attendance_sheet(
         rest_ref = f"{get_column_letter(8)}{row_index}"
         ws.cell(row_index, stat_start_col + 3).value = f"=SUM({start_ref}:{end_ref})-{rest_ref}"
         ws.cell(row_index, stat_start_col + 4).value = "；".join(summary.remarks) + ("；" if summary.remarks else "")
-        _format_row(ws, row_index, ws.max_column)
+        _format_row(ws, row_index, worksheet_max_column)
     if not summaries:
-        for col_index in range(1, ws.max_column + 1):
+        for col_index in range(1, worksheet_max_column + 1):
             ws.cell(3, col_index).value = None
-    _format_table(ws, 2, max(3, 2 + len(summaries)), ws.max_column)
+    _format_table(ws, 2, max(3, 2 + len(summaries)), worksheet_max_column)
     ws.freeze_panes = "A3"
 
 
@@ -1713,6 +1750,8 @@ def _write_report_sheet(
     monthly_records: list[ReportRecord],
     week_range: tuple[date, date] | None = None,
     month_range: tuple[date, date] | None = None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     period_title = _report_title(weekly_records, monthly_records)
     ws["A1"].value = period_title
@@ -1720,6 +1759,8 @@ def _write_report_sheet(
     if len(summaries) > 2:
         insert_rows(ws, 5, len(summaries) - 2)
     for offset, summary in enumerate(summaries):
+        if offset % 500 == 0:
+            _check_cancelled(cancelled)
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
         for col_index in range(1, 11):
@@ -1748,11 +1789,18 @@ def _write_report_sheet(
     ws.freeze_panes = "A3"
 
 
-def _write_attendance_detail_sheet(workbook, exceptions: list[AttendanceException]) -> None:
+def _write_attendance_detail_sheet(
+    workbook,
+    exceptions: list[AttendanceException],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     ws = workbook.create_sheet("考勤异常明细")
     headers = ["序号", "部门（片区）", "姓名", "日期", "异常类型", "数值", "说明", "来源文件", "来源行"]
     _write_headers(ws, headers)
     for index, item in enumerate(exceptions, start=1):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         # 汇总格式的源表：row.day 是占位（该月1号），对异常日期无意义
         day_display: Any = item.day
         if item.is_summary_row:
@@ -1767,12 +1815,19 @@ def _write_attendance_detail_sheet(workbook, exceptions: list[AttendanceExceptio
     ws.column_dimensions["H"].width = 36
 
 
-def _write_report_detail_sheet(workbook, exceptions: list[ReportException]) -> None:
+def _write_report_detail_sheet(
+    workbook,
+    exceptions: list[ReportException],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     ws = workbook.create_sheet("周月报异常明细")
     headers = ["序号", "部门（片区）", "姓名", "类型", "周期", "异常类型", "截止时间", "汇报时间", "扣款金额", "来源文件", "来源行"]
     _write_headers(ws, headers)
     sorted_exceptions = sorted(exceptions, key=lambda item: (item.report_type != "月报", item.department, item.name, item.period))
     for index, item in enumerate(sorted_exceptions, start=1):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         values = [
             index,
             item.department,

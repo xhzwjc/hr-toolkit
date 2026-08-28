@@ -1489,6 +1489,46 @@ class ProjectStore:
         summaries.sort(key=lambda item: (item.started_at or item.created_at, item.id), reverse=True)
         return tuple(summaries)
 
+    def list_batch_locations(
+        self,
+        *,
+        tool_id: str | None = None,
+        group_name: str | None = None,
+    ) -> tuple[tuple[BatchSummary, dict[str, Path]], ...]:
+        """Return lightweight batch locations with one manifest parse per batch.
+
+        The workspace UI only needs status and directory roots for navigation.
+        Building full ``BatchDetail`` objects there would also materialize every
+        registered file, so keep this snapshot intentionally small.
+        """
+        locations: list[tuple[BatchSummary, dict[str, Path]]] = []
+        if self.workspace.format_version > PROJECT_FORMAT_VERSION:
+            return ()
+        for path in sorted(self.manifest_dir.glob("*.json")):
+            try:
+                manifest = _read_json(path)
+                summary = _summary_from_manifest(manifest)
+                _validate_manifest_identity(manifest, summary.id)
+                directories = {
+                    category: _project_join(self.root, relative)
+                    for category, relative in _directory_map(manifest).items()
+                }
+            except (OSError, ValueError, TypeError, ProjectStoreError, json.JSONDecodeError):
+                continue
+            if tool_id is not None and summary.tool_id != tool_id:
+                continue
+            if group_name is not None and summary.group_name != group_name:
+                continue
+            locations.append((summary, directories))
+        locations.sort(
+            key=lambda item: (
+                item[0].started_at or item[0].created_at,
+                item[0].id,
+            ),
+            reverse=True,
+        )
+        return tuple(locations)
+
     def get_batch(self, batch_id: str) -> BatchDetail | None:
         if self.workspace.format_version > PROJECT_FORMAT_VERSION:
             return None

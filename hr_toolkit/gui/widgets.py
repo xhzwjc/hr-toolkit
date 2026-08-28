@@ -467,6 +467,8 @@ class SidebarItem(Canvas):
         self._bg_poly_id: int | None = None
         self._text_item_id: int | None = None
         self._icon_items: list[int] = []
+        self._icon_draw_key: tuple | None = None
+        self._icon_color: str | None = None
         super().__init__(
             master,
             height=_scale_px(height, self._scale),
@@ -547,13 +549,32 @@ class SidebarItem(Canvas):
         icon_size = self._pxf(15)
         icon_x = self._pxf(9)
         icon_y = (height - icon_size) / 2
-        if self._icon_items:
+        icon_draw_key = (height, self._icon_id)
+        icon_items_exist = bool(self._icon_items) and all(
+            self.find_withtag(item_id) for item_id in self._icon_items
+        )
+        if not icon_items_exist or self._icon_draw_key != icon_draw_key:
             for item_id in self._icon_items:
                 self.delete(item_id)
-            self._icon_items = []
-        self._icon_items = _paint_tool_icon(
-            self, self._icon_id, foreground, icon_x, icon_y, icon_size, max(1.0, self._pxf(1.4))
-        )
+            self._icon_items = _paint_tool_icon(
+                self,
+                self._icon_id,
+                foreground,
+                icon_x,
+                icon_y,
+                icon_size,
+                max(1.0, self._pxf(1.4)),
+            )
+            self._icon_draw_key = icon_draw_key
+            self._icon_color = foreground
+        elif self._icon_color != foreground:
+            for item_id in self._icon_items:
+                item_type = self.type(item_id)
+                if item_type == "line":
+                    self.itemconfigure(item_id, fill=foreground)
+                else:
+                    self.itemconfigure(item_id, outline=foreground)
+            self._icon_color = foreground
         family = _get_default_font_family(self)
         font = (family, _font_size(10), "bold") if self._selected else (family, _font_size(10))
         if self._text_item_id is None or not self.find_withtag(self._text_item_id):

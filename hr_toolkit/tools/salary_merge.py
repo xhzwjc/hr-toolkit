@@ -11,7 +11,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, Side
@@ -19,7 +19,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
-from hr_toolkit.common.excel import cached_style_id, set_style_ids
+from hr_toolkit.common.excel import SheetGrid, cached_style_id, set_style_ids
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 from hr_toolkit.common.inputs import (
     extract_archive_excel_files,
@@ -109,7 +109,9 @@ def merge_monthly_salary(
     existing_summary_path: str | Path | None = None,
     year: int | None = None,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> SalaryMergeResult:
+    _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(input_dir)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     output_dir = Path(output_dir).expanduser().resolve()
@@ -120,6 +122,7 @@ def merge_monthly_salary(
             raise FileNotFoundError(f"已有汇总表不存在：{summary_path}")
 
     for input_path in input_paths:
+        _check_cancelled(cancelled)
         if not input_path.exists():
             raise FileNotFoundError(f"工资表文件、压缩包或文件夹不存在：{input_path}")
 
@@ -128,15 +131,21 @@ def merge_monthly_salary(
         temp_dir = Path(temp_root)
         working_summary_path = None if summary_path is None else ensure_xlsx_workbook(summary_path, temp_dir)
         salary_files = _find_salary_files(input_paths, temp_dir, summary_path, warnings)
+        _check_cancelled(cancelled)
         if not salary_files:
             raise ValueError("未在所选路径中找到 .xlsx 或 .xls 工资表")
 
         records: list[SalaryRecord] = []
         source_files: list[str] = []
         for file_path in salary_files:
+            _check_cancelled(cancelled)
             try:
                 month = _detect_month(file_path)
-                file_records, file_warnings = _read_salary_file(file_path, month)
+                file_records, file_warnings = _read_salary_file(
+                    file_path,
+                    month,
+                    cancelled=cancelled,
+                )
             except ValueError as exc:
                 warnings.append(f"{file_path.name} 不是有效月度工资表，已跳过：{exc}")
                 continue
@@ -150,6 +159,7 @@ def merge_monthly_salary(
         existing_employees: list[MergedEmployee] | None = None
         existing_months: list[str] | None = None
         if working_summary_path is not None:
+            _check_cancelled(cancelled)
             existing_months, existing_employees, summary_warnings = _read_existing_summary(working_summary_path)
             warnings.extend(summary_warnings)
 
@@ -178,9 +188,15 @@ def merge_monthly_salary(
         if dry_run:
             return result
 
+        _check_cancelled(cancelled)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / "个人薪资汇总表.xlsx"
-        _write_output_workbook(output_file, employees, months)
+        _write_output_workbook(
+            output_file,
+            employees,
+            months,
+            cancelled=cancelled,
+        )
         result.output_file = output_file
         return result
 
@@ -229,42 +245,54 @@ def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) ->
     return files
 
 
-def _read_salary_file(file_path: Path, month: str) -> tuple[list[SalaryRecord], list[str]]:
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
+
+
+def _read_salary_file(
+    file_path: Path,
+    month: str,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[list[SalaryRecord], list[str]]:
     warnings: list[str] = []
     formula_wb = load_workbook(file_path, data_only=False)
     try:
-        value_wb = load_workbook(file_path, data_only=True)
+        value_wb = load_workbook(file_path, data_only=True, read_only=True)
         try:
             layout = _detect_source_layout(formula_wb)
             formula_ws = formula_wb[layout.detail_sheet_name]
-            value_ws = value_wb[layout.detail_sheet_name]
-
-            records: list[SalaryRecord] = []
-            for row_index in range(layout.data_start_row, formula_ws.max_row + 1):
-                id_card = _cell_text(value_ws, row_index, layout.id_card_col)
-                name = _cell_text(value_ws, row_index, layout.name_col)
-                if not id_card and not name:
-                    continue
-                if not id_card:
-                    warnings.append(f"{file_path.name} 第 {row_index} 行缺少身份证号码，已跳过")
-                    continue
-                amount = _amount_value(value_ws, formula_ws, row_index, layout)
-                if amount is None:
-                    warnings.append(f"{file_path.name} 第 {row_index} 行未识别到应发工资，按 0 处理")
-                    amount = 0
-                records.append(
-                    SalaryRecord(
-                        month=month,
-                        name=name,
-                        id_card=id_card,
-                        amount=amount,
-                        source_file=file_path.name,
-                        source_row=row_index,
-                    )
-                )
-            return records, warnings
+            value_ws = SheetGrid(value_wb[layout.detail_sheet_name])
         finally:
             value_wb.close()
+
+        records: list[SalaryRecord] = []
+        for row_index in range(layout.data_start_row, formula_ws.max_row + 1):
+            if row_index % 500 == 0:
+                _check_cancelled(cancelled)
+            id_card = _cell_text(value_ws, row_index, layout.id_card_col)
+            name = _cell_text(value_ws, row_index, layout.name_col)
+            if not id_card and not name:
+                continue
+            if not id_card:
+                warnings.append(f"{file_path.name} 第 {row_index} 行缺少身份证号码，已跳过")
+                continue
+            amount = _amount_value(value_ws, formula_ws, row_index, layout)
+            if amount is None:
+                warnings.append(f"{file_path.name} 第 {row_index} 行未识别到应发工资，按 0 处理")
+                amount = 0
+            records.append(
+                SalaryRecord(
+                    month=month,
+                    name=name,
+                    id_card=id_card,
+                    amount=amount,
+                    source_file=file_path.name,
+                    source_row=row_index,
+                )
+            )
+        return records, warnings
     finally:
         formula_wb.close()
 
@@ -295,8 +323,12 @@ def _find_sheet_name(sheetnames: list[str], keyword: str) -> str:
 
 
 def _find_header_row(ws: Worksheet, required_header: str) -> int:
+    max_column = ws.max_column
     for row_index in range(1, min(ws.max_row, 20) + 1):
-        values = [str(ws.cell(row_index, col).value or "").strip() for col in range(1, ws.max_column + 1)]
+        values = [
+            str(ws.cell(row_index, col).value or "").strip()
+            for col in range(1, max_column + 1)
+        ]
         if required_header in values:
             return row_index
     raise ValueError(f"未在明细表前 20 行找到字段：{required_header}")
@@ -499,8 +531,12 @@ def _find_sheet_name_or_active(sheetnames: list[str], keyword: str) -> str:
 
 
 def _find_header_row_any(ws: Worksheet, required_headers: tuple[str, ...], *, sheet_label: str) -> int:
+    max_column = ws.max_column
     for row_index in range(1, min(ws.max_row, 20) + 1):
-        values = [str(ws.cell(row_index, col).value or "").strip() for col in range(1, ws.max_column + 1)]
+        values = [
+            str(ws.cell(row_index, col).value or "").strip()
+            for col in range(1, max_column + 1)
+        ]
         if any(required_header in values for required_header in required_headers):
             return row_index
     joined = " / ".join(required_headers)
@@ -583,7 +619,13 @@ def _has_existing_amount(value: Any) -> bool:
     return parsed is not None and parsed != 0
 
 
-def _write_output_workbook(output_file: Path, employees: list[MergedEmployee], months: list[str]) -> None:
+def _write_output_workbook(
+    output_file: Path,
+    employees: list[MergedEmployee],
+    months: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     workbook = Workbook()
     try:
         ws = workbook.active
@@ -611,11 +653,19 @@ def _write_output_workbook(output_file: Path, employees: list[MergedEmployee], m
         ws.freeze_panes = "D5"
 
         for row_index, employee in enumerate(employees, start=5):
+            if row_index % 500 == 0:
+                _check_cancelled(cancelled)
             values: list[Any] = [row_index - 4, employee.name, employee.id_card]
             values.extend(employee.amounts[month] for month in months)
             ws.append(values)
 
-        _format_output_sheet(ws, max_col, len(employees))
+        _format_output_sheet(
+            ws,
+            max_col,
+            len(employees),
+            cancelled=cancelled,
+        )
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
@@ -630,7 +680,13 @@ _OUTPUT_TIMES_PLAIN = Font(name="Times New Roman", size=10, bold=False)
 _OUTPUT_TIMES_BODY = Font(name="Times New Roman", size=10)
 
 
-def _format_output_sheet(ws: Worksheet, max_col: int, employee_count: int) -> None:
+def _format_output_sheet(
+    ws: Worksheet,
+    max_col: int,
+    employee_count: int,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     # 员工行数可能上千，逐格新建 Font/Alignment 再交给 openpyxl 哈希查表开销很大；
     # 这里先把用到的几种样式解析成下标，再直接写入单元格样式下标。
     border_id = cached_style_id(ws, "border", "output_thin", lambda: _OUTPUT_BORDER)
@@ -650,6 +706,8 @@ def _format_output_sheet(ws: Worksheet, max_col: int, employee_count: int) -> No
             set_style_ids(cell, border_id=border_id, alignment_id=alignment_id, font_id=font_id)
 
     for row in ws.iter_rows(min_row=5, max_row=4 + employee_count, max_col=max_col):
+        if row and row[0].row % 500 == 0:
+            _check_cancelled(cancelled)
         for cell in row:
             set_style_ids(cell, border_id=border_id, alignment_id=alignment_id, font_id=times_body_id)
             if cell.column >= 4:

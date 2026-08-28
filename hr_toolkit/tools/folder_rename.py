@@ -4,7 +4,7 @@ import filecmp
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 
@@ -90,7 +90,9 @@ def rename_person_folders(
     replacement_name: str = "",
     file_type: str = FILE_TYPE_FOLDER,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> FolderRenameResult:
+    _check_cancelled(cancelled)
     root_dir = Path(root_dir).expanduser().resolve()
     if mode not in MODES:
         raise ValueError(f"不支持的改名模式：{mode}")
@@ -118,6 +120,7 @@ def rename_person_folders(
     completed: list[FolderRenameOperation] = []
     runtime_warnings = list(warnings)
     for operation in operations:
+        _check_cancelled(cancelled)
         try:
             operation.source.rename(operation.target)
         except OSError as exc:
@@ -140,6 +143,7 @@ def rename_files_by_excel(
     expected_operations: list[tuple[str, str]] | None = None,
     expected_warnings: list[str] | None = None,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> FolderRenameResult:
     """按照 Excel 姓名行顺序批量改名目录中的第一层项目。
 
@@ -154,6 +158,7 @@ def rename_files_by_excel(
         expected_warnings: 已确认预览中的提醒列表；不一致时拒绝执行。
         dry_run: 是否只生成预览而不执行。
     """
+    _check_cancelled(cancelled)
     root_dir = Path(root_dir).expanduser().resolve()
     excel_path = Path(excel_path).expanduser().resolve()
     if not root_dir.exists() or not root_dir.is_dir():
@@ -198,6 +203,7 @@ def rename_files_by_excel(
     completed: list[FolderRenameOperation] = []
     runtime_warnings = list(warnings)
     for operation in operations:
+        _check_cancelled(cancelled)
         if not operation.source.exists():
             runtime_warnings.append(f"{operation.source.name} 已不存在，已跳过")
             continue
@@ -213,6 +219,11 @@ def rename_files_by_excel(
     result.operations = completed
     result.warnings = runtime_warnings
     return result
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
 
 
 def _read_names_from_excel(excel_path: Path, name_column: str, header_row: int) -> list[str]:

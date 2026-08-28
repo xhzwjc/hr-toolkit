@@ -79,6 +79,21 @@ class ProjectStoreTests(unittest.TestCase):
         self.assertTrue(self.store.writable)
         self.assertTrue(self.store.integrity_check())
 
+    def test_list_batch_locations_matches_batch_detail_without_materializing_files(self) -> None:
+        draft = self._draft()
+        source = self.sources / "名单.xlsx"
+        source.write_bytes(b"roster")
+        self.store.import_sources(draft.summary.id, [source])
+
+        locations = self.store.list_batch_locations()
+        detail = self.store.get_batch(draft.summary.id)
+
+        self.assertIsNotNone(detail)
+        self.assertEqual(len(locations), 1)
+        summary, directories = locations[0]
+        self.assertEqual(summary, detail.summary)
+        self.assertEqual(directories, detail.directories)
+
     def test_create_rejects_nonempty_folder_without_touching_it(self) -> None:
         occupied = self.base / "已有资料"
         occupied.mkdir()
@@ -694,6 +709,7 @@ class ProjectStoreTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         with self.assertRaisesRegex(ProjectStoreError, "相对路径|不属于"):
             self.store.get_batch(draft.summary.id)
+        self.assertEqual(self.store.list_batch_locations(), ())
 
     def test_project_can_move_and_reopen_using_only_relative_paths(self) -> None:
         source = self.sources / "迁移.xlsx"

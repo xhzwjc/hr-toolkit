@@ -8,11 +8,15 @@ import unittest
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import py7zr
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.tools.data_statistics import (
+    AttendancePersonSummary,
+    _write_attendance_sheet,
     generate_data_statistics_reports,
     parse_report_date,
     resolve_month_range,
@@ -526,6 +530,32 @@ class DataStatisticsTest(unittest.TestCase):
 
             self.assertEqual(result.attendance_source_count, 2000)
             self.assertLess(elapsed, 20, f"2000 行考勤耗时 {elapsed:.1f}s，疑似退化为逐格重复解析")
+
+    def test_large_attendance_output_does_not_rescan_sheet_width_per_person(self) -> None:
+        workbook = Workbook()
+        ws = workbook.active
+        for col_index in range(1, 18):
+            ws.cell(2, col_index).value = f"字段{col_index}"
+            ws.cell(3, col_index).value = ""
+        summaries = [
+            AttendancePersonSummary("测试公司", "测试部门", f"员工{index}")
+            for index in range(100)
+        ]
+        original_getter = Worksheet.max_column.fget
+        access_count = 0
+
+        def counted_max_column(worksheet):
+            nonlocal access_count
+            access_count += 1
+            return original_getter(worksheet)
+
+        try:
+            with patch.object(Worksheet, "max_column", new=property(counted_max_column)):
+                _write_attendance_sheet(ws, summaries)
+        finally:
+            workbook.close()
+
+        self.assertLessEqual(access_count, 3)
 
     def test_incorrect_declared_dimension_is_recovered_without_output_changes(self) -> None:
         """考勤、周报、月报导出范围过小时，输出仍须与规范文件完全一致。"""

@@ -18,7 +18,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -317,7 +317,9 @@ def generate_social_security_reports(
     output_dir: str | Path,
     *,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> SocialSecurityResult:
+    _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(input_path)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     roster = Path(roster_path).expanduser().resolve()
@@ -325,6 +327,7 @@ def generate_social_security_reports(
     warnings: list[str] = []
 
     for path in input_paths:
+        _check_cancelled(cancelled)
         if not path.exists():
             raise FileNotFoundError(f"社保缴费清单文件、压缩包或文件夹不存在：{path}")
     if not roster.exists() or not roster.is_file():
@@ -336,12 +339,14 @@ def generate_social_security_reports(
         temp_dir = Path(temp_root)
         roster_people = _read_roster(roster, temp_dir)
         source_files = _find_social_security_files(input_paths, temp_dir, warnings)
+        _check_cancelled(cancelled)
         if not source_files:
             raise ValueError("未找到 .xlsx 或 .xls 社保缴费清单。")
 
         lines: list[SocialPaymentLine] = []
         used_files: list[str] = []
         for source_file in source_files:
+            _check_cancelled(cancelled)
             try:
                 file_lines = _read_payment_file(source_file)
             except ValueError as exc:
@@ -370,16 +375,40 @@ def generate_social_security_reports(
         if dry_run:
             return result
 
+        _check_cancelled(cancelled)
         output.mkdir(parents=True, exist_ok=True)
         detail_output = output / DETAIL_OUTPUT_FILENAME
         summary_output = output / SUMMARY_OUTPUT_FILENAME
-        _write_detail_workbook(detail_records, detail_output, temp_dir)
-        split_detail_outputs = _write_split_detail_workbooks(detail_records, output, temp_dir)
-        _write_summary_workbook(detail_records, summary_output, temp_dir, warnings)
+        _write_detail_workbook(
+            detail_records,
+            detail_output,
+            temp_dir,
+            cancelled=cancelled,
+        )
+        _check_cancelled(cancelled)
+        split_detail_outputs = _write_split_detail_workbooks(
+            detail_records,
+            output,
+            temp_dir,
+            cancelled=cancelled,
+        )
+        _check_cancelled(cancelled)
+        _write_summary_workbook(
+            detail_records,
+            summary_output,
+            temp_dir,
+            warnings,
+            cancelled=cancelled,
+        )
         result.detail_output_file = detail_output
         result.detail_output_files = split_detail_outputs
         result.summary_output_file = summary_output
         return result
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
@@ -1117,7 +1146,13 @@ def _append_source_mismatch_warnings(
         )
 
 
-def _write_detail_workbook(records: list[DetailRecord], output_file: Path, temp_dir: Path) -> None:
+def _write_detail_workbook(
+    records: list[DetailRecord],
+    output_file: Path,
+    temp_dir: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     template_path = _copy_template(DETAIL_TEMPLATE_RESOURCE, temp_dir)
     workbook = load_workbook(template_path)
     try:
@@ -1127,25 +1162,37 @@ def _write_detail_workbook(records: list[DetailRecord], output_file: Path, temp_
         if title:
             ws["A1"].value = title
         _write_difference_headers(ws, records)
-        template_snapshot = snapshot_row(ws, 4, ws.max_column)
+        worksheet_max_column = ws.max_column
+        template_snapshot = snapshot_row(ws, 4, worksheet_max_column)
         data_start = 4
         if records:
             insert_rows(ws, data_start + 1, max(len(records) - 1, 0))
         for offset, record in enumerate(records):
+            if offset % 500 == 0:
+                _check_cancelled(cancelled)
             row_index = data_start + offset
             apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
-            _clear_row_values(ws, row_index, ws.max_column)
+            _clear_row_values(ws, row_index, worksheet_max_column)
             _write_detail_row(ws, row_index, offset + 1, record)
         if not records:
-            _clear_row_values(ws, data_start, ws.max_column)
+            _clear_row_values(ws, data_start, worksheet_max_column)
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
 
 
-def _write_split_detail_workbooks(records: list[DetailRecord], output_dir: Path, temp_dir: Path) -> list[Path]:
+def _write_split_detail_workbooks(
+    records: list[DetailRecord],
+    output_dir: Path,
+    temp_dir: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[Path]:
     grouped: OrderedDict[str, list[DetailRecord]] = OrderedDict()
-    for record in records:
+    for index, record in enumerate(records):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         grouped.setdefault(_detail_group_name(record), []).append(record)
     if not grouped:
         return []
@@ -1154,8 +1201,14 @@ def _write_split_detail_workbooks(records: list[DetailRecord], output_dir: Path,
     split_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
     for group_name, group_records in grouped.items():
+        _check_cancelled(cancelled)
         output_file = split_dir / f"{_safe_file_stem(group_name)}-社保明细表.xlsx"
-        _write_detail_workbook(group_records, output_file, temp_dir)
+        _write_detail_workbook(
+            group_records,
+            output_file,
+            temp_dir,
+            cancelled=cancelled,
+        )
         outputs.append(output_file)
     return outputs
 
@@ -1387,27 +1440,58 @@ def _write_detail_totals(ws: Worksheet, row_index: int) -> None:
     )
 
 
-def _write_summary_workbook(records: list[DetailRecord], output_file: Path, temp_dir: Path, warnings: list[str]) -> None:
+def _write_summary_workbook(
+    records: list[DetailRecord],
+    output_file: Path,
+    temp_dir: Path,
+    warnings: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     template_path = _copy_template(SUMMARY_TEMPLATE_RESOURCE, temp_dir)
     workbook = load_workbook(template_path)
     try:
         for sheet_name in list(workbook.sheetnames):
             workbook.remove(workbook[sheet_name])
-        _create_summary_sheet(workbook, "社保汇总表", "社保汇总表", records)
+        _create_summary_sheet(
+            workbook,
+            "社保汇总表",
+            "社保汇总表",
+            records,
+            cancelled=cancelled,
+        )
         records_by_company: dict[str, list[DetailRecord]] = {}
-        for record in records:
+        for index, record in enumerate(records):
+            if index % 500 == 0:
+                _check_cancelled(cancelled)
             if record.company:
                 records_by_company.setdefault(record.company, []).append(record)
         for company, company_records in sorted(records_by_company.items()):
-            _create_summary_sheet(workbook, company, f"{company}社保汇总表", company_records)
+            _check_cancelled(cancelled)
+            _create_summary_sheet(
+                workbook,
+                company,
+                f"{company}社保汇总表",
+                company_records,
+                cancelled=cancelled,
+            )
+        _check_cancelled(cancelled)
         _create_analysis_sheet(workbook, records)
         _create_warning_sheet(workbook, warnings)
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
 
 
-def _create_summary_sheet(workbook, sheet_name: str, title: str, records: list[DetailRecord]) -> None:
+def _create_summary_sheet(
+    workbook,
+    sheet_name: str,
+    title: str,
+    records: list[DetailRecord],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     ws = workbook.create_sheet(_safe_sheet_title(sheet_name, workbook.sheetnames))
     accounts = sorted({record.account_display for record in records if record.account_display})
     if not accounts:
@@ -1427,6 +1511,8 @@ def _create_summary_sheet(workbook, sheet_name: str, title: str, records: list[D
         ws.cell(3, start_col + 2).value = "单位"
     grouped = _group_summary_records(records)
     for row_offset, ((project, cost_center), group_records) in enumerate(grouped.items(), start=4):
+        if row_offset % 500 == 0:
+            _check_cancelled(cancelled)
         ws.cell(row_offset, 1).value = project
         ws.cell(row_offset, 2).value = cost_center
         ws.cell(row_offset, 3).value = len({record.id_card for record in group_records})
@@ -1611,16 +1697,24 @@ def _copy_template(resource_name: str, temp_dir: Path) -> Path:
 
 def _find_header_row(ws: Worksheet, required_headers: tuple[str, ...]) -> int:
     normalized_required = {_normalize_header(header) for header in required_headers}
+    max_column = ws.max_column or 0
     for row_index in range(1, min(ws.max_row or 0, 30) + 1):
-        values = {_normalize_header(ws.cell(row_index, col_index).value) for col_index in range(1, (ws.max_column or 0) + 1)}
+        values = {
+            _normalize_header(ws.cell(row_index, col_index).value)
+            for col_index in range(1, max_column + 1)
+        }
         if normalized_required.issubset(values):
             return row_index
     raise ValueError(f"{ws.title} 未找到表头：{'、'.join(required_headers)}")
 
 
 def _find_payment_header_row(ws: Worksheet) -> int:
+    max_column = ws.max_column or 0
     for row_index in range(1, min(ws.max_row or 0, 20) + 1):
-        values = {_normalize_header(ws.cell(row_index, col_index).value) for col_index in range(1, (ws.max_column or 0) + 1)}
+        values = {
+            _normalize_header(ws.cell(row_index, col_index).value)
+            for col_index in range(1, max_column + 1)
+        }
         if "姓名" in values and ("证件号码" in values or "身份证件号码" in values):
             return row_index
     raise ValueError("未找到包含姓名和证件号码的表头。")

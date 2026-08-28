@@ -13,7 +13,7 @@ import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -131,7 +131,9 @@ def generate_insurance_ledger(
     output_dir: str | Path,
     *,
     dry_run: bool = False,
+    cancelled: Callable[[], bool] | None = None,
 ) -> InsuranceLedgerResult:
+    _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(input_path)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     roster = Path(roster_path).expanduser().resolve()
@@ -139,6 +141,7 @@ def generate_insurance_ledger(
     warnings: list[str] = []
 
     for path in input_paths:
+        _check_cancelled(cancelled)
         if not path.exists():
             raise FileNotFoundError(f"保单人员清单、压缩包或文件夹不存在：{path}")
     if not roster.exists() or not roster.is_file():
@@ -149,15 +152,26 @@ def generate_insurance_ledger(
     with tempfile.TemporaryDirectory(prefix="hr_insurance_ledger_") as temp_root:
         temp_dir = Path(temp_root)
         working_roster = ensure_xlsx_workbook(roster, temp_dir)
-        roster_people = _read_roster(working_roster, roster.name, warnings)
+        roster_people = _read_roster(
+            working_roster,
+            roster.name,
+            warnings,
+            cancelled=cancelled,
+        )
         policy_files = _find_policy_files(input_paths, temp_dir, warnings)
+        _check_cancelled(cancelled)
         if not policy_files:
             raise ValueError("未找到 .xlsx 或 .xls 保单人员清单。")
 
         entries: list[PolicyEntry] = []
         used_files: list[str] = []
         for file_path in policy_files:
-            file_entries = _read_policy_file(file_path, warnings)
+            _check_cancelled(cancelled)
+            file_entries = _read_policy_file(
+                file_path,
+                warnings,
+                cancelled=cancelled,
+            )
             if file_entries:
                 used_files.append(str(file_path))
                 entries.extend(file_entries)
@@ -167,7 +181,12 @@ def generate_insurance_ledger(
         if not entries:
             raise ValueError("未识别到保单人员，请确认保单清单格式。")
 
-        ledger_people, policy_order, personnel_warnings = _build_ledger(entries, roster_people, warnings)
+        ledger_people, policy_order, personnel_warnings = _build_ledger(
+            entries,
+            roster_people,
+            warnings,
+            cancelled=cancelled,
+        )
         add_count = sum(1 for item in personnel_warnings if item.warning_type == "需加保")
         reduce_count = sum(1 for item in personnel_warnings if item.warning_type == "需减保")
 
@@ -187,15 +206,35 @@ def generate_insurance_ledger(
         if dry_run:
             return result
 
+        _check_cancelled(cancelled)
         output.mkdir(parents=True, exist_ok=True)
         output_file = output / OUTPUT_FILENAME
-        _write_output_workbook(output_file, ledger_people, policy_order, personnel_warnings, temp_dir)
+        _write_output_workbook(
+            output_file,
+            ledger_people,
+            policy_order,
+            personnel_warnings,
+            temp_dir,
+            cancelled=cancelled,
+        )
         result.output_file = output_file
         if add_count:
+            _check_cancelled(cancelled)
             roster_warning_file = output / ROSTER_WARNING_OUTPUT_FILENAME
-            _write_roster_warning_workbook(working_roster, roster_warning_file, roster_people, personnel_warnings)
+            _write_roster_warning_workbook(
+                working_roster,
+                roster_warning_file,
+                roster_people,
+                personnel_warnings,
+                cancelled=cancelled,
+            )
             result.roster_warning_file = roster_warning_file
         return result
+
+
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("本次处理已停止。")
 
 
 def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Path]:
@@ -242,7 +281,13 @@ def _is_non_source_file(path: Path) -> bool:
     return any(keyword in path.name for keyword in ("模板", "台账", "汇总"))
 
 
-def _read_roster(workbook_path: Path, source_name: str, warnings: list[str]) -> OrderedDict[str, RosterPerson]:
+def _read_roster(
+    workbook_path: Path,
+    source_name: str,
+    warnings: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> OrderedDict[str, RosterPerson]:
     workbook = load_workbook(workbook_path, data_only=True, read_only=False)
     people: OrderedDict[str, RosterPerson] = OrderedDict()
     try:
@@ -254,6 +299,8 @@ def _read_roster(workbook_path: Path, source_name: str, warnings: list[str]) -> 
             footer_start = _find_roster_footer_start(ws, header_row + 1)
             headers = _read_headers_first(ws, header_row)
             for row_index in range(header_row + 1, footer_start):
+                if row_index % 500 == 0:
+                    _check_cancelled(cancelled)
                 name = _cell_text(_header_value_any(ws, row_index, headers, ("*姓名.简体中文", "姓名", "员工姓名", "人员姓名")))
                 id_card = _normalize_id_card(_header_value_any(ws, row_index, headers, ("*身份证", "身份证", "身份证号码", "证件号")))
                 if not name or not id_card or name in {"姓名", "员工姓名", "人员姓名"} or id_card in {"身份证", "身份证号码", "证件号"}:
@@ -350,7 +397,12 @@ def _cell_fill_rgb(cell) -> str:
     return (color.rgb or "").upper()
 
 
-def _read_policy_file(file_path: Path, warnings: list[str]) -> list[PolicyEntry]:
+def _read_policy_file(
+    file_path: Path,
+    warnings: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[PolicyEntry]:
     workbook = load_workbook(file_path, data_only=True, read_only=True)
     entries: list[PolicyEntry] = []
     seen: set[tuple[str, str]] = set()
@@ -369,6 +421,8 @@ def _read_policy_file(file_path: Path, warnings: list[str]) -> list[PolicyEntry]
             if name_col is None or id_col is None:
                 continue
             for row_index in range(header_row + 1, (ws.max_row or 0) + 1):
+                if row_index % 500 == 0:
+                    _check_cancelled(cancelled)
                 name = _cell_text(ws.cell(row_index, name_col).value)
                 id_card = _normalize_id_card(ws.cell(row_index, id_col).value)
                 if not name or not id_card:
@@ -440,11 +494,15 @@ def _build_ledger(
     entries: list[PolicyEntry],
     roster_people: OrderedDict[str, RosterPerson],
     warnings: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[LedgerPerson], list[str], list[InsuranceWarning]]:
     ledger_by_id: OrderedDict[str, LedgerPerson] = OrderedDict()
     policy_order: list[str] = []
     policy_seen: set[str] = set()
-    for entry in entries:
+    for index, entry in enumerate(entries):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         if entry.policy_no not in policy_seen:
             policy_seen.add(entry.policy_no)
             policy_order.append(entry.policy_no)
@@ -465,7 +523,9 @@ def _build_ledger(
 
     personnel_warnings: list[InsuranceWarning] = []
     insured_ids = set(ledger_by_id)
-    for person in roster_people.values():
+    for index, person in enumerate(roster_people.values()):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         if person.active and person.id_card not in insured_ids:
             personnel_warnings.append(
                 InsuranceWarning(
@@ -476,7 +536,9 @@ def _build_ledger(
                     message="花名册有该在职人员，但保单清单中未找到。",
                 )
             )
-    for id_card, person in ledger_by_id.items():
+    for index, (id_card, person) in enumerate(ledger_by_id.items()):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         roster_person = roster_people.get(id_card)
         if roster_person is None:
             person.warning = "需减保"
@@ -514,13 +576,25 @@ def _write_output_workbook(
     policy_order: list[str],
     personnel_warnings: list[InsuranceWarning],
     temp_dir: Path,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     template_path = _copy_template(temp_dir)
     workbook = load_workbook(template_path)
     try:
         ws = workbook["保险台账"] if "保险台账" in workbook.sheetnames else workbook.active
-        _write_ledger_sheet(ws, ledger_people, policy_order)
-        _write_warning_sheet(workbook, personnel_warnings)
+        _write_ledger_sheet(
+            ws,
+            ledger_people,
+            policy_order,
+            cancelled=cancelled,
+        )
+        _write_warning_sheet(
+            workbook,
+            personnel_warnings,
+            cancelled=cancelled,
+        )
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
@@ -533,7 +607,13 @@ def _copy_template(temp_dir: Path) -> Path:
     return target
 
 
-def _write_ledger_sheet(ws: Worksheet, ledger_people: list[LedgerPerson], policy_order: list[str]) -> None:
+def _write_ledger_sheet(
+    ws: Worksheet,
+    ledger_people: list[LedgerPerson],
+    policy_order: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     headers = _build_headers(policy_order)
     max_col = len(headers)
     row_snapshot = snapshot_row(ws, 3, min(ws.max_column, 9))
@@ -544,6 +624,8 @@ def _write_ledger_sheet(ws: Worksheet, ledger_people: list[LedgerPerson], policy
         ws.delete_cols(max_col + 1, ws.max_column - max_col)
     _write_ledger_headers(ws, policy_order)
     for offset, person in enumerate(ledger_people):
+        if offset % 500 == 0:
+            _check_cancelled(cancelled)
         row_index = 3 + offset
         apply_row_snapshot(ws, row_index, row_snapshot, translate_formulas=False)
         for col_index in range(1, max_col + 1):
@@ -585,7 +667,12 @@ def _write_ledger_headers(ws: Worksheet, policy_order: list[str]) -> None:
         ws.delete_cols(len(headers) + 1, ws.max_column - len(headers))
 
 
-def _write_warning_sheet(workbook, personnel_warnings: list[InsuranceWarning]) -> None:
+def _write_warning_sheet(
+    workbook,
+    personnel_warnings: list[InsuranceWarning],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     if "人员增减预警" in workbook.sheetnames:
         del workbook["人员增减预警"]
     ws = workbook.create_sheet("人员增减预警")
@@ -593,6 +680,8 @@ def _write_warning_sheet(workbook, personnel_warnings: list[InsuranceWarning]) -
     for col_index, header in enumerate(headers, start=1):
         ws.cell(1, col_index).value = header
     for index, item in enumerate(personnel_warnings, start=1):
+        if index % 500 == 0:
+            _check_cancelled(cancelled)
         values = [index, item.warning_type, item.name, item.id_card, item.department, item.message]
         for col_index, value in enumerate(values, start=1):
             ws.cell(index + 1, col_index).value = value
@@ -607,6 +696,8 @@ def _write_roster_warning_workbook(
     output_file: Path,
     roster_people: OrderedDict[str, RosterPerson],
     personnel_warnings: list[InsuranceWarning],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     add_warning_ids = {item.id_card for item in personnel_warnings if item.warning_type == "需加保"}
     if not add_warning_ids:
@@ -615,7 +706,9 @@ def _write_roster_warning_workbook(
     try:
         # 按 sheet 缓存 header_row 和 headers，避免重复扫描
         header_cache: dict[str, tuple[int, dict[str, int]]] = {}
-        for person in roster_people.values():
+        for index, person in enumerate(roster_people.values()):
+            if index % 500 == 0:
+                _check_cancelled(cancelled)
             if person.id_card not in add_warning_ids:
                 continue
             if person.sheet_name not in workbook.sheetnames:
@@ -647,6 +740,7 @@ def _write_roster_warning_workbook(
             cell.font = WARNING_FONT
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = THIN_BLACK_BORDER
+        _check_cancelled(cancelled)
         workbook.save(output_file)
     finally:
         workbook.close()
