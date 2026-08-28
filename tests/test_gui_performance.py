@@ -56,6 +56,7 @@ class GuiPerformanceTests(unittest.TestCase):
         timeout_ms: int = 2000,
         stable_polls: int = 1,
         failure_message: str,
+        diagnostics=None,
     ) -> None:
         """Wait for a Tk state transition without assuming event delivery speed."""
 
@@ -81,6 +82,11 @@ class GuiPerformanceTests(unittest.TestCase):
         if not state["matched"]:
             self.root.after(10, poll)
             self.root.mainloop()
+        if not state["matched"] and diagnostics is not None:
+            try:
+                failure_message = f"{failure_message}: {diagnostics()}"
+            except Exception as exc:
+                failure_message = f"{failure_message}: diagnostics failed: {exc}"
         self.assertTrue(state["matched"], failure_message)
 
     def test_tessellate_round_rect_geometry(self) -> None:
@@ -657,6 +663,11 @@ class GuiPerformanceTests(unittest.TestCase):
                 app = HRToolkitApp(self.root)
             self.root.deiconify()
             self.root.minsize(1, 1)
+            # This case exercises the inactivity-settle path for programmatic
+            # geometry bursts. Do not let the hosted desktop's real mouse
+            # state accidentally turn it into a native-drag test; the native
+            # hold/release path has dedicated deterministic tests below.
+            app._window_resize_pointer_state_reader = lambda: False
             app._dismiss_startup_loading_screen()
             self.root.update()
             right_frame = self.root.nametowidget(
@@ -678,6 +689,30 @@ class GuiPerformanceTests(unittest.TestCase):
                     and app._last_canvas_window_size == expected_window_size
                 )
 
+            def layout_diagnostics() -> str:
+                canvas_width = app._right_canvas.winfo_width()
+                canvas_height = app._right_canvas.winfo_height()
+                expected_window_size = (
+                    canvas_width,
+                    max(right_frame.winfo_reqheight(), canvas_height),
+                )
+                return repr(
+                    {
+                        "root": (self.root.winfo_width(), self.root.winfo_height()),
+                        "active": app._window_resize_active,
+                        "restoring": app._window_resize_restoring,
+                        "native_drag": app._window_resize_native_drag,
+                        "form_mode": app._form_layout_mode,
+                        "workspace_small": app._workspace_small,
+                        "workspace_width": app._workspace_available_width_units(),
+                        "canvas": (canvas_width, canvas_height),
+                        "canvas_window": app._last_canvas_window_size,
+                        "expected_canvas_window": expected_window_size,
+                        "root_frame_manager": app._root_frame.winfo_manager(),
+                        "overlay_manager": app._window_resize_overlay.winfo_manager(),
+                    }
+                )
+
             # Several native resize messages may arrive before the settle job.
             # Only the final dimensions must drive the expensive content reflow.
             for width in range(1180, 699, -40):
@@ -688,6 +723,7 @@ class GuiPerformanceTests(unittest.TestCase):
                 timeout_ms=5000,
                 stable_polls=3,
                 failure_message="narrow resize state did not settle",
+                diagnostics=layout_diagnostics,
             )
 
             self.assertEqual(app._form_layout_mode, "narrow")
@@ -709,6 +745,7 @@ class GuiPerformanceTests(unittest.TestCase):
                 timeout_ms=5000,
                 stable_polls=3,
                 failure_message="wide resize state did not settle",
+                diagnostics=layout_diagnostics,
             )
 
             self.assertEqual(app._form_layout_mode, "wide")
@@ -886,30 +923,42 @@ class GuiPerformanceTests(unittest.TestCase):
             app._dismiss_startup_loading_screen()
             pointer = {"down": True}
             app._window_resize_pointer_state_reader = lambda: pointer["down"]
-            observed = {}
 
             self.root.geometry("1080x690")
+            self._run_event_loop_until(
+                lambda: (
+                    app._window_resize_active
+                    and app._window_resize_native_drag
+                ),
+                failure_message="native resize compositor did not start",
+            )
 
-            def inspect_while_held() -> None:
-                observed["active_while_held"] = app._window_resize_active
-                observed["manager_while_held"] = app._root_frame.winfo_manager()
-                pointer["down"] = False
-
-            def inspect_after_release() -> None:
-                observed["active_after_release"] = app._window_resize_active
-                observed["manager_after_release"] = app._root_frame.winfo_manager()
-
-            # Hold the border motionless beyond the inactivity fallback.  The
+            # Hold the border motionless beyond the inactivity fallback. The
             # complex widget tree must remain unmapped until the real release.
-            self.root.after(WINDOW_RESIZE_SETTLE_MS + 60, inspect_while_held)
-            self.root.after(WINDOW_RESIZE_SETTLE_MS + 130, inspect_after_release)
-            self.root.after(WINDOW_RESIZE_SETTLE_MS + 150, self.root.quit)
+            self.root.after(WINDOW_RESIZE_SETTLE_MS + 60, self.root.quit)
             self.root.mainloop()
+            self.assertTrue(app._window_resize_active)
+            self.assertTrue(app._window_resize_native_drag)
+            self.assertEqual(app._root_frame.winfo_manager(), "")
 
-            self.assertTrue(observed["active_while_held"])
-            self.assertEqual(observed["manager_while_held"], "")
-            self.assertFalse(observed["active_after_release"])
-            self.assertEqual(observed["manager_after_release"], "pack")
+            pointer["down"] = False
+            self._run_event_loop_until(
+                lambda: not app._window_resize_active,
+                timeout_ms=1000,
+                failure_message="native resize compositor did not restore after release",
+                diagnostics=lambda: repr(
+                    {
+                        "active": app._window_resize_active,
+                        "restoring": app._window_resize_restoring,
+                        "native_drag": app._window_resize_native_drag,
+                        "pointer_poll_job": app._window_resize_pointer_poll_job,
+                        "restore_job": app._window_resize_restore_job,
+                        "reveal_job": app._window_resize_reveal_job,
+                        "root_frame_manager": app._root_frame.winfo_manager(),
+                    }
+                ),
+            )
+            self.assertEqual(app._root_frame.winfo_manager(), "pack")
         finally:
             if app is not None:
                 app.destroy()
