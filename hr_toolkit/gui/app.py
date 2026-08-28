@@ -4380,6 +4380,7 @@ class HRToolkitApp:
         if (
             previous_mode_key is not None
             and previous_mode_key[:2] == mode_key[:2] == ("place", "expanded")
+            and self._workspace_panel_layout_matches(small=True, expanded=True)
         ):
             # A narrow-screen drawer only needs its width adjusted while the
             # outer window is being dragged. Tearing down and repacking the

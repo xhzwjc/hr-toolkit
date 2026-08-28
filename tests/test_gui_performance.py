@@ -602,6 +602,19 @@ class GuiPerformanceTests(unittest.TestCase):
             self.assertEqual(app._workspace_panel.winfo_manager(), "place")
             self.assertTrue(app._workspace_drawer_open)
 
+            # Even the width-only fast path must repair a native manager that
+            # diverged from the cached temporary-drawer mode.
+            current_mode = app._workspace_panel_mode_key
+            app._workspace_panel.grid(row=0, column=2, sticky="nsew")
+            app._workspace_panel_mode_key = (
+                "place",
+                "expanded",
+                max(1, int(current_mode[2]) - 1),
+            )
+            app._apply_workspace_panel_mode()
+            self.root.update()
+            self.assertEqual(app._workspace_panel.winfo_manager(), "place")
+
             # A delayed breakpoint callback used to redirect the close-button
             # command into the desktop expansion branch, leaving a fixed panel
             # over the narrow tool page.
