@@ -16,6 +16,7 @@ from hr_toolkit.gui.constants import FORCE_UI_SCALE_ENV
 from hr_toolkit.gui.app import (
     HRToolkitApp,
     UPLOAD_LIST_VISIBLE_ROWS,
+    WORKSPACE_TREE_RENDER_BATCH,
     WINDOW_RESIZE_SETTLE_MS,
     _CoalescedCanvasScroller,
 )
@@ -259,6 +260,75 @@ class GuiPerformanceTests(unittest.TestCase):
             app._render_workspace_search_results(results, False, None)
 
         self.assertEqual(app.workspace_tree.insert.call_count, 2)
+
+    def test_large_workspace_directory_rows_are_rendered_in_bounded_batches(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.root = Mock()
+        scheduled_callbacks = []
+        app.root.after.side_effect = (
+            lambda _delay, callback: scheduled_callbacks.append(callback) or "job"
+        )
+        app.workspace_tree = Mock()
+        app.workspace_tree.insert.side_effect = (
+            f"item-{index}" for index in range(WORKSPACE_TREE_RENDER_BATCH + 5)
+        )
+        app._workspace_tree_paths = {}
+        app._workspace_search_generation = 7
+        app._workspace_small = False
+        app._workspace_preferred_expanded = True
+        app._workspace_drawer_open = False
+        app.current_project_path = Path("/project")
+        app._show_workspace_empty = Mock()
+        app._update_workspace_action_states = Mock()
+        records = [
+            (Path(f"/project/file-{index:04d}.xlsx"), False)
+            for index in range(WORKSPACE_TREE_RENDER_BATCH + 5)
+        ]
+
+        app._render_workspace_directory_records(7, "", Path("/project"), records)
+
+        self.assertEqual(app.workspace_tree.insert.call_count, WORKSPACE_TREE_RENDER_BATCH)
+        self.assertEqual(len(scheduled_callbacks), 1)
+        scheduled_callbacks.pop()()
+        self.assertEqual(app.workspace_tree.insert.call_count, len(records))
+        app._update_workspace_action_states.assert_called_once_with()
+
+    def test_large_workspace_root_scan_moves_full_load_off_ui_thread(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app.workspace_tree = Mock()
+        app.workspace_tree.get_children.return_value = ()
+        app._workspace_tree_paths = {}
+        app._workspace_search_generation = 0
+        app._workspace_small = False
+        app._workspace_preferred_expanded = True
+        app._workspace_drawer_open = False
+        app._invalidate_workspace_batch_location_cache = Mock()
+        app._set_workspace_detail = Mock()
+        app._update_workspace_action_states = Mock()
+        app._start_workspace_directory_load = Mock()
+        app.workspace_search = Mock()
+        app.workspace_search.get.return_value = ""
+        app.workspace_empty_text = Mock()
+        app._show_workspace_empty = Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root_path = Path(temp_dir)
+            app.current_project_path = root_path
+            app._workspace_scope_root = Mock(return_value=root_path)
+            records = [
+                (root_path / f"file-{index:04d}.xlsx", False)
+                for index in range(201)
+            ]
+            app._workspace_visible_child_records = Mock(return_value=records)
+
+            app._refresh_workspace_tree()
+
+        app._start_workspace_directory_load.assert_called_once_with(
+            1,
+            "",
+            root_path,
+        )
+        app.workspace_tree.insert.assert_not_called()
 
     def test_codex_button_idempotent_redraw_and_item_reuse(self) -> None:
         btn = CodexButton(self.root, text="测试按钮", variant="primary")

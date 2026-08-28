@@ -221,6 +221,8 @@ EXCEL_ARCHIVE_FORMAT_TEXT = f".xlsx、.xls 以及 {ARCHIVE_FORMAT_DESCRIPTION} �
 WORKSPACE_UI_SETTINGS_VERSION = 2
 UPLOAD_DIRECTORY_COUNT_LIMIT = 200
 LOG_FLUSH_BATCH_SIZE = 200
+WORKSPACE_TREE_SYNC_LIMIT = 200
+WORKSPACE_TREE_RENDER_BATCH = 64
 UPLOAD_LIST_VIRTUALIZE_AFTER = 12
 UPLOAD_LIST_VISIBLE_ROWS = 8
 UPLOAD_LIST_OVERSCAN_ROWS = 2
@@ -4341,6 +4343,10 @@ class HRToolkitApp:
                 self.root.after_idle(self._update_title_text_wraps)
 
         was_expanded = bool(previous_mode_key and previous_mode_key[1] == "expanded")
+        if was_expanded and not expanded:
+            # Stop hidden search/directory-render work. Reopening always
+            # refreshes from disk, so partially rendered rows are never shown.
+            self._workspace_search_generation += 1
 
         self._workspace_panel.place_forget()
         self._workspace_panel.grid_remove()
@@ -5285,22 +5291,39 @@ class HRToolkitApp:
         except OSError:
             return True
 
-    def _workspace_visible_children(self, path: Path) -> list[Path]:
+    def _workspace_visible_child_records(
+        self,
+        path: Path,
+        *,
+        limit: int | None = None,
+    ) -> list[tuple[Path, bool]]:
         try:
-            children = []
+            children: list[tuple[Path, bool]] = []
             for child in path.iterdir():
                 if self._workspace_should_hide_path(child):
                     continue
-                if child.name == "上传资料" and child.is_dir():
+                try:
+                    is_directory = child.is_dir()
+                except OSError:
+                    is_directory = False
+                if child.name == "上传资料" and is_directory:
                     try:
                         if not any(child.iterdir()):
                             continue
                     except OSError:
                         pass
-                children.append(child)
+                children.append((child, is_directory))
+                if limit is not None and len(children) >= limit:
+                    break
         except OSError:
             return []
-        return sorted(children, key=lambda child: (not child.is_dir(), child.name.casefold()))
+        return sorted(
+            children,
+            key=lambda record: (not record[1], record[0].name.casefold()),
+        )
+
+    def _workspace_visible_children(self, path: Path) -> list[Path]:
+        return [child for child, _is_directory in self._workspace_visible_child_records(path)]
 
     def _refresh_workspace_tree(self) -> None:
         self._invalidate_workspace_batch_location_cache()
@@ -5339,18 +5362,142 @@ class HRToolkitApp:
             ).start()
             self._update_workspace_action_states()
             return
-        children = self._workspace_visible_children(root_path)
-        for child in children:
-            self._insert_workspace_tree_path("", child)
-        if children:
+        records = self._workspace_visible_child_records(
+            root_path,
+            limit=WORKSPACE_TREE_SYNC_LIMIT + 1,
+        )
+        if len(records) > WORKSPACE_TREE_SYNC_LIMIT:
+            self._start_workspace_directory_load(generation, "", root_path)
+            self._update_workspace_action_states()
+            return
+        for child, is_directory in records:
+            self._insert_workspace_tree_path(
+                "",
+                child,
+                is_directory=is_directory,
+            )
+        self._finish_workspace_root_tree_render(bool(records))
+
+    def _finish_workspace_root_tree_render(self, has_children: bool) -> None:
+        if has_children:
             self._show_workspace_empty(False)
         else:
-            label = "当前功能还没有项目文件" if self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL else "这个项目文件夹目前为空"
+            label = (
+                "当前功能还没有项目文件"
+                if self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL
+                else "这个项目文件夹目前为空"
+            )
             self.workspace_empty_text.set(f"{label}\n\n点击“添加”导入资料")
             self._show_workspace_empty(True)
         self._update_workspace_action_states()
 
-    def _insert_workspace_tree_path(self, parent: str, path: Path, *, search_result: bool = False) -> str:
+    def _start_workspace_directory_load(
+        self,
+        generation: int,
+        parent: str,
+        path: Path,
+    ) -> None:
+        if parent:
+            self.workspace_tree.insert(
+                parent,
+                "end",
+                text="正在读取…",
+                tags=("workspace_loading",),
+            )
+        else:
+            self.workspace_empty_text.set("正在读取项目文件…")
+            self._show_workspace_empty(True)
+
+        def worker() -> None:
+            records = self._workspace_visible_child_records(path)
+            self._workspace_queue.put(
+                ("tree_children", generation, (parent, path, records))
+            )
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except RuntimeError:
+            self._render_workspace_directory_records(
+                generation,
+                parent,
+                path,
+                self._workspace_visible_child_records(path),
+            )
+
+    def _render_workspace_directory_records(
+        self,
+        generation: int,
+        parent: str,
+        path: Path,
+        records: list[tuple[Path, bool]],
+    ) -> None:
+        if not getattr(self, "_is_alive", True):
+            return
+        if generation != self._workspace_search_generation:
+            return
+        if not self._workspace_panel_is_expanded():
+            return
+        if parent:
+            try:
+                if (
+                    not self.workspace_tree.exists(parent)
+                    or self._workspace_tree_paths.get(parent) != path
+                ):
+                    return
+            except Exception:
+                return
+            for child_item in self.workspace_tree.get_children(parent):
+                if "workspace_loading" in self.workspace_tree.item(child_item, "tags"):
+                    self.workspace_tree.delete(child_item)
+        elif records:
+            self._show_workspace_empty(False)
+
+        next_index = 0
+
+        def render_next_batch() -> None:
+            nonlocal next_index
+            if not getattr(self, "_is_alive", True):
+                return
+            if generation != self._workspace_search_generation:
+                return
+            if not self._workspace_panel_is_expanded():
+                return
+            if parent:
+                try:
+                    if (
+                        not self.workspace_tree.exists(parent)
+                        or self._workspace_tree_paths.get(parent) != path
+                    ):
+                        return
+                except Exception:
+                    return
+            end = min(next_index + WORKSPACE_TREE_RENDER_BATCH, len(records))
+            for child, is_directory in records[next_index:end]:
+                self._insert_workspace_tree_path(
+                    parent,
+                    child,
+                    is_directory=is_directory,
+                )
+            next_index = end
+            if next_index < len(records):
+                try:
+                    self.root.after(1, render_next_batch)
+                except Exception:
+                    pass
+                return
+            if not parent:
+                self._finish_workspace_root_tree_render(bool(records))
+
+        render_next_batch()
+
+    def _insert_workspace_tree_path(
+        self,
+        parent: str,
+        path: Path,
+        *,
+        search_result: bool = False,
+        is_directory: bool | None = None,
+    ) -> str:
         text = path.name
         if search_result and self.current_project_path is not None:
             try:
@@ -5368,8 +5515,11 @@ class HRToolkitApp:
             tags = ("result",)
         item = self.workspace_tree.insert(parent, "end", text=text, open=False, tags=tags)
         self._workspace_tree_paths[item] = path
-        if not search_result and path.is_dir():
-            self.workspace_tree.insert(item, "end", text="", tags=(WORKSPACE_DUMMY_TAG,))
+        if not search_result:
+            if is_directory is None:
+                is_directory = path.is_dir()
+            if is_directory:
+                self.workspace_tree.insert(item, "end", text="", tags=(WORKSPACE_DUMMY_TAG,))
         return item
 
     def _on_workspace_tree_open(self, _event=None) -> None:
@@ -5381,8 +5531,23 @@ class HRToolkitApp:
         if len(children) != 1 or WORKSPACE_DUMMY_TAG not in self.workspace_tree.item(children[0], "tags"):
             return
         self.workspace_tree.delete(children[0])
-        for child in self._workspace_visible_children(path):
-            self._insert_workspace_tree_path(item, child)
+        records = self._workspace_visible_child_records(
+            path,
+            limit=WORKSPACE_TREE_SYNC_LIMIT + 1,
+        )
+        if len(records) > WORKSPACE_TREE_SYNC_LIMIT:
+            self._start_workspace_directory_load(
+                self._workspace_search_generation,
+                item,
+                path,
+            )
+            return
+        for child, is_directory in records:
+            self._insert_workspace_tree_path(
+                item,
+                child,
+                is_directory=is_directory,
+            )
 
     def _on_workspace_tree_selected(self, _event=None) -> None:
         selected = self.workspace_tree.selection()
@@ -5577,7 +5742,17 @@ class HRToolkitApp:
         try:
             while True:
                 status, generation, payload = self._workspace_queue.get_nowait()
-                if status == "search":
+                if status == "tree_children":
+                    if generation != self._workspace_search_generation:
+                        continue
+                    parent, path, records = payload
+                    self._render_workspace_directory_records(
+                        generation,
+                        parent,
+                        path,
+                        records,
+                    )
+                elif status == "search":
                     if generation != self._workspace_search_generation:
                         continue
                     results, truncated, error = payload
