@@ -72,32 +72,36 @@ class TaskRunnerTests(unittest.TestCase):
 
 
     def test_resubmit_same_task_id_preserves_new_task(self) -> None:
-        first_cancelled = []
+        first_started = threading.Event()
+        first_cancelled = threading.Event()
         second_completed = []
 
         def worker_1(is_cancelled, on_progress):
-            for _ in range(20):
+            first_started.set()
+            while True:
                 if is_cancelled():
-                    first_cancelled.append(True)
+                    first_cancelled.set()
                     return
-                time.sleep(0.01)
+                time.sleep(0.001)
 
         def worker_2(is_cancelled, on_progress):
-            time.sleep(0.05)
             return "second_done"
 
         # Submit task 1
         self.runner.submit("dup_task", worker_1)
         self.assertTrue(self.runner.is_running("dup_task"))
+        self.assertTrue(first_started.wait(timeout=1.0))
 
         # Immediately submit task 2 with the same ID
         self.runner.submit("dup_task", worker_2, on_success=lambda res: second_completed.append(res))
 
-        # Wait for task 1 to finish cancellation and task 2 to complete
-        time.sleep(0.08)
+        self.assertTrue(first_cancelled.wait(timeout=1.0))
+        deadline = time.monotonic() + 1.0
+        while self.runner.is_running("dup_task") and time.monotonic() < deadline:
+            time.sleep(0.001)
         self.runner._poll()
 
-        self.assertEqual(first_cancelled, [True])
+        self.assertTrue(first_cancelled.is_set())
         self.assertEqual(second_completed, ["second_done"])
         self.assertFalse(self.runner.is_running("dup_task"))
 

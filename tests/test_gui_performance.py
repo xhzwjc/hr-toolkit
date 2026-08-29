@@ -971,26 +971,36 @@ class GuiPerformanceTests(unittest.TestCase):
                 app.destroy()
 
     def test_resize_compositor_shutdown_cancels_jobs_and_releases_preview(self) -> None:
-        app = HRToolkitApp(self.root)
-        self.root.deiconify()
-        app._dismiss_startup_loading_screen()
-        self.root.geometry("1080x690")
-        self.root.after(20, self.root.quit)
-        self.root.mainloop()
-        self.assertTrue(app._window_resize_active)
-        bindtag = app._window_resize_configure_bindtag
-        self.assertIn(bindtag, self.root.bindtags())
-        self.assertNotIn(bindtag, app._right_canvas.bindtags())
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            self.root.deiconify()
+            app._dismiss_startup_loading_screen()
+            app._window_resize_pointer_state_reader = lambda: False
+            self.root.update()
+            target_width = max(640, self.root.winfo_width() - 37)
+            target_height = max(480, self.root.winfo_height() - 23)
+            self.root.geometry(f"{target_width}x{target_height}")
+            self._run_event_loop_until(
+                lambda: app._window_resize_active,
+                failure_message="resize compositor did not start before shutdown",
+            )
+            bindtag = app._window_resize_configure_bindtag
+            self.assertIn(bindtag, self.root.bindtags())
+            self.assertNotIn(bindtag, app._right_canvas.bindtags())
 
-        overlay = app._window_resize_overlay
-        app.destroy()
+            overlay = app._window_resize_overlay
+            app.destroy()
 
-        self.assertFalse(app._window_resize_active)
-        self.assertIsNone(app._window_resize_settle_job)
-        self.assertIsNone(app._window_resize_render_job)
-        self.assertIsNone(app._window_resize_snapshot_job)
-        self.assertNotIn(bindtag, self.root.bindtags())
-        self.assertFalse(overlay.winfo_exists())
+            self.assertFalse(app._window_resize_active)
+            self.assertIsNone(app._window_resize_settle_job)
+            self.assertIsNone(app._window_resize_render_job)
+            self.assertIsNone(app._window_resize_snapshot_job)
+            self.assertNotIn(bindtag, self.root.bindtags())
+            self.assertFalse(overlay.winfo_exists())
+        finally:
+            if app is not None and getattr(app, "_is_alive", False):
+                app.destroy()
 
     def test_native_resize_release_restores_immediately_and_preserves_focus(self) -> None:
         app = None
