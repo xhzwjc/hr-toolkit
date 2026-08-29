@@ -1289,7 +1289,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("--ucrt-dir", win7_flat)
         self.assertIn("--vc-runtime-dir", win7_flat)
 
-    def test_release_workflow_mirrors_only_after_github_publish(self) -> None:
+    def test_release_workflow_syncs_gitee_only_after_github_publish(self) -> None:
         workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
@@ -1299,19 +1299,14 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("always()", job_configuration)
         self.assertIn("needs.publish.result == 'success'", job_configuration)
         self.assertIn("secrets.GITEE_TOKEN", mirror_job)
-        self.assertIn("publish_gitee_release.py", mirror_job)
-        self.assertIn("--timeout 600", mirror_job)
-        self.assertIn("--upload-transport curl", mirror_job)
-        self.assertIn('GITEE_MAX_ASSET_BYTES: "100000000"', mirror_job)
-        self.assertIn('--primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe"', mirror_job)
-        self.assertIn(
-            '--primary-download-asset "HRToolkit_${VERSION}_win7_x64-setup.exe"',
-            mirror_job,
-        )
-        self.assertIn('--max-asset-bytes "${GITEE_MAX_ASSET_BYTES}"', mirror_job)
         self.assertIn("http.postBuffer=1073741824", mirror_job)
         self.assertIn("http.version=HTTP/1.1", mirror_job)
         self.assertIn("push --atomic gitee", mirror_job)
+        self.assertNotIn("publish_gitee_release.py", mirror_job)
+        self.assertNotIn("gh release", mirror_job)
+        self.assertNotIn("gitee-release-assets", mirror_job)
+        self.assertNotIn("--upload-transport", mirror_job)
+        self.assertNotIn("GITEE_MAX_ASSET_BYTES", mirror_job)
         self.assertNotIn("git add", mirror_job)
         self.assertNotIn("git commit", mirror_job)
 
@@ -1344,14 +1339,12 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("publish_gitee_release.py", workflow)
         self.assertNotIn("gh release", workflow)
 
-    def test_gitee_release_recovery_reuses_github_assets_without_rebuilding(self) -> None:
+    def test_gitee_release_workflow_syncs_source_and_tag_without_assets(self) -> None:
         workflow = (
             build_windows.REPO_ROOT / ".github" / "workflows" / "gitee-release.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("tag:", workflow)
-        self.assertIn("gh release download", workflow)
-        self.assertIn("publish_gitee_release.py", workflow)
         self.assertIn("push --atomic gitee", workflow)
         self.assertIn("secrets.GITEE_TOKEN", workflow)
         self.assertIn("ref: main", workflow)
@@ -1360,15 +1353,11 @@ class WindowsPackagingTests(unittest.TestCase):
             "--project-version-file tagged-source/hr_toolkit/__init__.py",
             workflow,
         )
-        self.assertIn("--timeout 600", workflow)
-        self.assertIn("--upload-transport curl", workflow)
-        self.assertIn('GITEE_MAX_ASSET_BYTES: "100000000"', workflow)
-        self.assertIn('--primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe"', workflow)
-        self.assertIn(
-            '--primary-download-asset "HRToolkit_${VERSION}_win7_x64-setup.exe"',
-            workflow,
-        )
-        self.assertIn('--max-asset-bytes "${GITEE_MAX_ASSET_BYTES}"', workflow)
+        self.assertNotIn("gh release", workflow)
+        self.assertNotIn("publish_gitee_release.py", workflow)
+        self.assertNotIn("gitee-release-assets", workflow)
+        self.assertNotIn("--upload-transport", workflow)
+        self.assertNotIn("GITEE_MAX_ASSET_BYTES", workflow)
         self.assertNotIn("build_windows.py", workflow)
         self.assertNotIn("build_macos.py", workflow)
 

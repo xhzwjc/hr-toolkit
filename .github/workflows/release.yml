@@ -441,7 +441,7 @@ jobs:
           test "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" = "false"
 
   mirror-gitee:
-    name: Mirror verified Release to Gitee
+    name: Sync verified source and tag to Gitee
     needs:
       - validate
       - publish
@@ -453,23 +453,15 @@ jobs:
     permissions:
       contents: read
     env:
-      VERSION: ${{ needs.validate.outputs.version }}
       TAG: ${{ github.ref_name }}
-      GITHUB_REPOSITORY: ${{ github.repository }}
       GITEE_REPOSITORY: optimistic-little-sunspot/hr-toolkit
-      GITEE_MAX_ASSET_BYTES: "100000000"
     steps:
       - name: Check out tagged source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.12"
-
-      - name: Require Gitee release credential
+      - name: Require Gitee sync credential
         shell: bash
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -479,42 +471,6 @@ jobs:
             echo "Missing required GitHub Actions Secret: GITEE_TOKEN" >&2
             exit 1
           fi
-
-      - name: Download the published GitHub Release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p gitee-release-assets
-          gh release download "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --dir gitee-release-assets
-
-      - name: Regenerate Gitee-first metadata with GitHub fallback
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/generate_release_metadata.py \
-            --version "${VERSION}" \
-            --tag "${TAG}" \
-            --repository "${GITHUB_REPOSITORY}" \
-            --assets-dir gitee-release-assets \
-            --notes "HR Toolkit v${VERSION}" \
-            --download-base-url "https://gitee.com/${GITEE_REPOSITORY}/releases/download" \
-            --release-url "https://gitee.com/${GITEE_REPOSITORY}/releases/tag/${TAG}" \
-            --fallback-download-base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download" \
-            --primary-download-max-bytes "${GITEE_MAX_ASSET_BYTES}" \
-            --primary-download-asset "HRToolkit_${VERSION}_x64-setup.exe" \
-            --primary-download-asset "HRToolkit_${VERSION}_win7_x64-setup.exe"
-          python scripts/publish_gitee_release.py \
-            --version "${VERSION}" \
-            --tag "${TAG}" \
-            --repository "${GITEE_REPOSITORY}" \
-            --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
-            --assets-dir gitee-release-assets \
-            --max-asset-bytes "${GITEE_MAX_ASSET_BYTES}" \
-            --dry-run
 
       - name: Fast-forward source and annotated tag to Gitee
         shell: bash
@@ -551,19 +507,3 @@ jobs:
             push --atomic gitee \
             "${TAG_COMMIT}:refs/heads/main" \
             "refs/tags/${TAG}:refs/tags/${TAG}"
-
-      - name: Publish and verify public Gitee Release assets
-        shell: bash
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: |
-          set -euo pipefail
-          python scripts/publish_gitee_release.py \
-            --version "${VERSION}" \
-            --tag "${TAG}" \
-            --repository "${GITEE_REPOSITORY}" \
-            --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
-            --assets-dir gitee-release-assets \
-            --max-asset-bytes "${GITEE_MAX_ASSET_BYTES}" \
-            --upload-transport curl \
-            --timeout 600
