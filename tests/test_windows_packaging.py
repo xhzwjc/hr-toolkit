@@ -283,6 +283,73 @@ class WindowsPackagingTests(unittest.TestCase):
             )
             self.assertNotIn("UDZO", " ".join(" ".join(command) for command in commands))
 
+    def test_macos_dmg_retries_only_transient_hdiutil_resource_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit.app"
+            app_dir.mkdir()
+            dmg_path = tmp_dir / "output" / f"HRToolkit_{self.version}_x64.dmg"
+            staging_dir = tmp_dir / "work" / "dmg-staging"
+            uncompressed_dmg = staging_dir.parent / f"{dmg_path.stem}.uncompressed.dmg"
+            create_attempts = 0
+            partial_file_survived = None
+
+            def fake_run(command, **_kwargs):
+                nonlocal create_attempts, partial_file_survived
+                if command[0:2] == ["hdiutil", "create"]:
+                    create_attempts += 1
+                    if create_attempts == 1:
+                        uncompressed_dmg.write_bytes(b"partial")
+                        raise build_macos.MacBuildError("hdiutil: create failed - Resource busy")
+                    partial_file_survived = uncompressed_dmg.exists()
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch.object(build_macos, "_run", side_effect=fake_run),
+                patch.object(build_macos.time, "sleep") as mocked_sleep,
+            ):
+                build_macos._create_dmg(
+                    app_dir,
+                    dmg_path,
+                    staging_dir,
+                    self.version,
+                )
+
+            self.assertEqual(create_attempts, 2)
+            self.assertFalse(partial_file_survived)
+            mocked_sleep.assert_called_once_with(build_macos.HDIUTIL_BUSY_RETRY_DELAYS[0])
+
+    def test_macos_dmg_does_not_retry_non_transient_hdiutil_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit.app"
+            app_dir.mkdir()
+            dmg_path = tmp_dir / "output" / f"HRToolkit_{self.version}_x64.dmg"
+            staging_dir = tmp_dir / "work" / "dmg-staging"
+            create_attempts = 0
+
+            def fake_run(command, **_kwargs):
+                nonlocal create_attempts
+                if command[0:2] == ["hdiutil", "create"]:
+                    create_attempts += 1
+                    raise build_macos.MacBuildError("hdiutil: create failed - Permission denied")
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch.object(build_macos, "_run", side_effect=fake_run),
+                patch.object(build_macos.time, "sleep") as mocked_sleep,
+                self.assertRaisesRegex(build_macos.MacBuildError, "Permission denied"),
+            ):
+                build_macos._create_dmg(
+                    app_dir,
+                    dmg_path,
+                    staging_dir,
+                    self.version,
+                )
+
+            self.assertEqual(create_attempts, 1)
+            mocked_sleep.assert_not_called()
+
     def test_windows_payload_prunes_only_optional_opencv_video_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app_dir, _updater = self._fake_app(Path(tmp))

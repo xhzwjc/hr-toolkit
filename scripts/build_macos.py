@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -25,6 +26,7 @@ from verify_macos_bundle import EXPECTED_DMG_FORMAT, verify_app_bundle, verify_d
 ARCHITECTURES = ("universal2", "x86_64", "arm64")
 ARCH_SUFFIXES = {"universal2": "universal", "x86_64": "x64", "arm64": "arm64"}
 DEFAULT_ENTITLEMENTS = REPO_ROOT / "packaging" / "macos" / "entitlements.plist"
+HDIUTIL_BUSY_RETRY_DELAYS = (2.0, 5.0)
 
 
 class MacBuildError(RuntimeError):
@@ -50,6 +52,32 @@ def _run(command: Sequence[str], *, cwd: Path = REPO_ROOT, capture: bool = False
             + (f"\n{detail}" if detail else "")
         )
     return result
+
+
+def _run_hdiutil_with_busy_retry(
+    command: Sequence[str],
+    *,
+    cleanup_paths: Sequence[Path],
+) -> subprocess.CompletedProcess:
+    """Retry only hdiutil's transient disk-image service contention."""
+
+    for attempt in range(len(HDIUTIL_BUSY_RETRY_DELAYS) + 1):
+        for path in cleanup_paths:
+            path.unlink(missing_ok=True)
+        try:
+            return _run(command, capture=True)
+        except MacBuildError as exc:
+            is_resource_busy = "resource busy" in str(exc).casefold()
+            if not is_resource_busy or attempt >= len(HDIUTIL_BUSY_RETRY_DELAYS):
+                raise
+            delay = HDIUTIL_BUSY_RETRY_DELAYS[attempt]
+            print(
+                "hdiutil 磁盘镜像服务暂时繁忙，"
+                f"{delay:g} 秒后重试（{attempt + 2}/{len(HDIUTIL_BUSY_RETRY_DELAYS) + 1}）"
+            )
+            time.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
 def _safe_clean_directory(path: Path) -> None:
@@ -202,7 +230,7 @@ def _create_dmg(app_path: Path, dmg_path: Path, staging_dir: Path, version: str)
     uncompressed_dmg = staging_dir.parent / f"{dmg_path.stem}.uncompressed.dmg"
     uncompressed_dmg.unlink(missing_ok=True)
     try:
-        _run(
+        _run_hdiutil_with_busy_retry(
             [
                 "hdiutil",
                 "create",
@@ -214,9 +242,10 @@ def _create_dmg(app_path: Path, dmg_path: Path, staging_dir: Path, version: str)
                 "-srcfolder",
                 str(staging_dir),
                 str(uncompressed_dmg),
-            ]
+            ],
+            cleanup_paths=(uncompressed_dmg,),
         )
-        _run(
+        _run_hdiutil_with_busy_retry(
             [
                 "hdiutil",
                 "convert",
@@ -225,7 +254,8 @@ def _create_dmg(app_path: Path, dmg_path: Path, staging_dir: Path, version: str)
                 EXPECTED_DMG_FORMAT,
                 "-o",
                 str(dmg_path),
-            ]
+            ],
+            cleanup_paths=(dmg_path,),
         )
     finally:
         uncompressed_dmg.unlink(missing_ok=True)
