@@ -13,6 +13,12 @@ class TaskRunnerTests(unittest.TestCase):
         self.mock_root = MagicMock()
         self.runner = TaskRunner(self.mock_root, poll_interval_ms=10)
 
+    def _wait_for_task(self, task_id: str, *, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while self.runner.is_running(task_id) and time.monotonic() < deadline:
+            time.sleep(0.001)
+        self.assertFalse(self.runner.is_running(task_id), f"task did not stop: {task_id}")
+
     def test_submit_success_task(self) -> None:
         completed = []
 
@@ -29,7 +35,7 @@ class TaskRunnerTests(unittest.TestCase):
             on_success=on_success,
         )
         self.assertFalse(token.is_cancelled)
-        time.sleep(0.05)
+        self._wait_for_task("test_task")
         self.runner._poll()
         self.assertEqual(completed, ["done"])
 
@@ -47,7 +53,7 @@ class TaskRunnerTests(unittest.TestCase):
             worker_fn,
             on_error=on_error,
         )
-        time.sleep(0.05)
+        self._wait_for_task("err_task")
         self.runner._poll()
         self.assertEqual(errors, ["failed!"])
 
@@ -66,7 +72,7 @@ class TaskRunnerTests(unittest.TestCase):
 
         token = self.runner.submit("cancel_task", worker_fn, on_cancel=on_cancel)
         token.cancel()
-        time.sleep(0.05)
+        self._wait_for_task("cancel_task")
         self.runner._poll()
         self.assertEqual(cancelled, [True])
 
@@ -96,9 +102,7 @@ class TaskRunnerTests(unittest.TestCase):
         self.runner.submit("dup_task", worker_2, on_success=lambda res: second_completed.append(res))
 
         self.assertTrue(first_cancelled.wait(timeout=1.0))
-        deadline = time.monotonic() + 1.0
-        while self.runner.is_running("dup_task") and time.monotonic() < deadline:
-            time.sleep(0.001)
+        self._wait_for_task("dup_task")
         self.runner._poll()
 
         self.assertTrue(first_cancelled.is_set())
