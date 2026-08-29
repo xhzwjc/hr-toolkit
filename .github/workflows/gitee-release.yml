@@ -1,4 +1,4 @@
-name: Sync GitHub Release tag to Gitee
+name: Publish GitHub source release to Gitee
 
 on:
   workflow_dispatch:
@@ -12,16 +12,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: gitee-tag-sync-${{ inputs.tag }}
+  group: gitee-source-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   mirror-release:
-    name: Sync source and annotated tag to Gitee
+    name: Publish source archives and checksum
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       TAG: ${{ inputs.tag }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
       GITEE_REPOSITORY: optimistic-little-sunspot/hr-toolkit
       GITEE_USERNAME: optimistic-little-sunspot
     steps:
@@ -67,6 +68,27 @@ jobs:
             exit 1
           fi
 
+      - name: Download and validate checksum metadata only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)" = "false"
+          mkdir -p gitee-release-metadata
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "SHA256SUMS.txt" \
+            --dir gitee-release-metadata
+          python scripts/publish_gitee_release.py \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repository "${GITEE_REPOSITORY}" \
+            --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
+            --assets-dir gitee-release-metadata \
+            --source-metadata-only \
+            --dry-run
+
       - name: Fast-forward source and annotated tag to Gitee
         shell: bash
         env:
@@ -106,3 +128,19 @@ jobs:
             push --atomic gitee \
             "${SOURCE_COMMIT}:refs/heads/main" \
             "refs/tags/${TAG}:refs/tags/${TAG}"
+
+      - name: Create and verify Gitee source release
+        shell: bash
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/publish_gitee_release.py \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repository "${GITEE_REPOSITORY}" \
+            --target-commitish "$(git rev-parse "${TAG}^{commit}")" \
+            --assets-dir gitee-release-metadata \
+            --source-metadata-only \
+            --upload-transport urllib \
+            --timeout 60

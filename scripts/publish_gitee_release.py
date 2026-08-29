@@ -36,6 +36,7 @@ DEFAULT_UPLOAD_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY = 5.0
 UPLOAD_TRANSPORTS = ("urllib", "curl")
 METADATA_NAMES = ("latest.json", "SHA256SUMS.txt")
+SOURCE_RELEASE_ASSET_NAMES = ("SHA256SUMS.txt",)
 USER_AGENT = "HRToolkit-Gitee-Publisher/1.0"
 URLLIB_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
@@ -229,6 +230,14 @@ class GiteeClient:
         return _require_object(result, "读取公开最新 Release")
 
     def get_public_json(self, url: str) -> dict[str, Any]:
+        payload = self.get_public_bytes(url)
+        try:
+            data = json.loads(payload.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GiteeReleaseError(f"公开附件不是有效 JSON：{exc}") from None
+        return _require_object(data, "读取公开 JSON 附件")
+
+    def get_public_bytes(self, url: str) -> bytes:
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with urllib.request.urlopen(
@@ -236,14 +245,9 @@ class GiteeClient:
                 timeout=self.timeout,
                 context=self._ssl_context,
             ) as response:
-                payload = response.read().decode("utf-8-sig")
+                return response.read()
         except Exception as exc:
             raise GiteeReleaseError(f"无法读取公开附件：{_safe_exception(exc, self._token)}") from None
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise GiteeReleaseError(f"公开附件不是有效 JSON：{exc}") from None
-        return _require_object(data, "读取公开 JSON 附件")
 
     def _request_json(
         self,
@@ -498,6 +502,138 @@ def publish_gitee_release(
     return release, names
 
 
+def validate_source_release_assets(assets_dir: Path) -> tuple[str, ...]:
+    """Require a checksum-only staging directory for source-only releases."""
+
+    actual = (
+        {path.name for path in assets_dir.iterdir() if path.is_file()}
+        if assets_dir.is_dir()
+        else set()
+    )
+    expected = set(SOURCE_RELEASE_ASSET_NAMES)
+    if actual != expected:
+        raise GiteeReleaseError(
+            "Gitee 源码发行版目录只能包含 SHA256SUMS.txt："
+            f"期望={sorted(expected)}，实际={sorted(actual)}"
+        )
+    checksum_path = assets_dir / "SHA256SUMS.txt"
+    if checksum_path.stat().st_size <= 0:
+        raise GiteeReleaseError("SHA256SUMS.txt 为空。")
+
+    entries: set[str] = set()
+    for line in checksum_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            digest, name = line.split("  ", 1)
+        except ValueError:
+            raise GiteeReleaseError("SHA256SUMS.txt 格式不正确。") from None
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in digest
+        ):
+            raise GiteeReleaseError("SHA256SUMS.txt 包含无效的 SHA256。")
+        if not name or Path(name).name != name:
+            raise GiteeReleaseError("SHA256SUMS.txt 包含无效的资产名称。")
+        if name in entries:
+            raise GiteeReleaseError(f"SHA256SUMS.txt 包含重复资产：{name}")
+        entries.add(name)
+    if not entries:
+        raise GiteeReleaseError("SHA256SUMS.txt 未包含任何资产校验值。")
+    return SOURCE_RELEASE_ASSET_NAMES
+
+
+def publish_gitee_source_release(
+    client: GiteeClient,
+    *,
+    assets_dir: Path,
+    tag: str,
+    repository: str,
+    target_commitish: str,
+    name: str,
+    body: str,
+    upload_attempts: int = DEFAULT_UPLOAD_ATTEMPTS,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Create a Gitee source release and upload only its checksum manifest.
+
+    Attachments with other names are deliberately left untouched so a retry
+    cannot remove installers that the maintainer uploaded manually.
+    """
+
+    names = validate_source_release_assets(assets_dir)
+    release = client.get_release_by_tag(repository, tag)
+    if release is None:
+        release = client.create_release(
+            repository,
+            tag=tag,
+            target_commitish=target_commitish,
+            name=name,
+            body=body,
+        )
+    else:
+        release = client.update_release(
+            repository,
+            _release_id(release),
+            tag=tag,
+            name=name,
+            body=body,
+        )
+
+    release_id = _release_id(release)
+    checksum_path = assets_dir / SOURCE_RELEASE_ASSET_NAMES[0]
+    if not _reconcile_named_attachment(
+        client,
+        repository=repository,
+        release_id=release_id,
+        file_path=checksum_path,
+    ):
+        _upload_attachment_with_retries(
+            client,
+            repository=repository,
+            release_id=release_id,
+            file_path=checksum_path,
+            attempts=upload_attempts,
+            retry_delay=retry_delay,
+        )
+        print("已确认 Gitee 附件：SHA256SUMS.txt", flush=True)
+
+    if not _reconcile_named_attachment(
+        client,
+        repository=repository,
+        release_id=release_id,
+        file_path=checksum_path,
+    ):
+        raise GiteeReleaseError("Gitee Release 缺少有效的 SHA256SUMS.txt。")
+    return release, names
+
+
+def _reconcile_named_attachment(
+    client: GiteeClient,
+    *,
+    repository: str,
+    release_id: str,
+    file_path: Path,
+) -> bool:
+    expected_size = file_path.stat().st_size
+    exact: Mapping[str, Any] | None = None
+    stale: list[Mapping[str, Any]] = []
+    for attachment in client.list_attachments(repository, release_id):
+        if str(attachment.get("name") or "").strip() != file_path.name:
+            continue
+        try:
+            size = _attachment_size(attachment)
+        except GiteeReleaseError:
+            stale.append(attachment)
+            continue
+        if size == expected_size and exact is None:
+            exact = attachment
+        else:
+            stale.append(attachment)
+    for attachment in stale:
+        client.delete_attachment(repository, release_id, _attachment_id(attachment))
+    return exact is not None
+
+
 def _reconcile_attachments(
     client: GiteeClient,
     *,
@@ -667,6 +803,50 @@ def verify_public_release(
     raise GiteeReleaseError(f"Gitee 公开 Release 验证失败：{last_error}")
 
 
+def verify_public_source_release(
+    client: GiteeClient,
+    *,
+    assets_dir: Path,
+    repository: str,
+    tag: str,
+    attempts: int = 5,
+    retry_delay: float = 2.0,
+) -> None:
+    checksum_bytes = (assets_dir / "SHA256SUMS.txt").read_bytes()
+    required_names = {"SHA256SUMS.txt", f"{tag}.zip", f"{tag}.tar.gz"}
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            release = client.get_public_latest_release(repository)
+            if str(release.get("tag_name") or "") != tag:
+                raise GiteeReleaseError("Gitee 公开 latest Release 尚未指向当前 Tag。")
+            assets = release.get("assets") or release.get("attach_files")
+            if not isinstance(assets, list):
+                raise GiteeReleaseError("Gitee 公开 Release 缺少附件列表。")
+            public_assets = {
+                str(item.get("name") or "").strip(): item
+                for item in assets
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            }
+            missing = required_names - set(public_assets)
+            if missing:
+                raise GiteeReleaseError(
+                    "Gitee 公开 Release 缺少校验文件或源码归档：" + ", ".join(sorted(missing))
+                )
+            for asset_name in required_names:
+                if not str(public_assets[asset_name].get("browser_download_url") or "").strip():
+                    raise GiteeReleaseError(f"Gitee 公开附件缺少下载地址：{asset_name}")
+            checksum_url = str(public_assets["SHA256SUMS.txt"]["browser_download_url"])
+            if client.get_public_bytes(checksum_url) != checksum_bytes:
+                raise GiteeReleaseError("Gitee 公开 SHA256SUMS.txt 与 GitHub Release 不一致。")
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(retry_delay)
+    raise GiteeReleaseError(f"Gitee 公开源码 Release 验证失败：{last_error}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="幂等发布并验证 Gitee Release 镜像")
     parser.add_argument("--version", required=True)
@@ -696,6 +876,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-delay", type=_nonnegative_float, default=DEFAULT_RETRY_DELAY)
     parser.add_argument("--name")
     parser.add_argument("--body")
+    parser.add_argument(
+        "--source-metadata-only",
+        action="store_true",
+        help="只创建源码发行版并上传 SHA256SUMS.txt，不上传或删除安装包",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -707,15 +892,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_release_identity(version, tag, version)
     if not REPOSITORY_PATTERN.fullmatch(args.repository):
         raise GiteeReleaseError(f"Gitee 仓库名必须是 owner/repo：{args.repository!r}")
-    names = validate_mirror_assets(
-        args.assets_dir,
-        version=version,
-        tag=tag,
-        repository=args.repository,
-        max_asset_bytes=args.max_asset_bytes,
-    )
+    if args.source_metadata_only:
+        names = validate_source_release_assets(args.assets_dir)
+    else:
+        names = validate_mirror_assets(
+            args.assets_dir,
+            version=version,
+            tag=tag,
+            repository=args.repository,
+            max_asset_bytes=args.max_asset_bytes,
+        )
     if args.dry_run:
-        print(f"Gitee 镜像 dry-run 通过：{tag}")
+        mode = "源码发行版" if args.source_metadata_only else "镜像"
+        print(f"Gitee {mode} dry-run 通过：{tag}")
         for asset_name in sorted(names):
             print(f"- {asset_name}")
         return 0
@@ -730,28 +919,55 @@ def main(argv: Sequence[str] | None = None) -> int:
         upload_transport=args.upload_transport,
     )
     release_name = args.name or f"HR Toolkit {tag}"
-    body = args.body or "GitHub Release 构建完成后自动同步的国内下载镜像。"
-    _release, names = publish_gitee_release(
-        client,
-        assets_dir=args.assets_dir,
-        version=version,
-        tag=tag,
-        repository=args.repository,
-        target_commitish=args.target_commitish,
-        name=release_name,
-        body=body,
-        upload_attempts=args.upload_attempts,
-        retry_delay=args.retry_delay,
-        max_asset_bytes=args.max_asset_bytes,
-    )
-    verify_public_release(
-        client,
-        assets_dir=args.assets_dir,
-        repository=args.repository,
-        tag=tag,
-        names=names,
-    )
-    print(f"Gitee Release 镜像发布并验证成功：https://gitee.com/{args.repository}/releases/tag/{tag}")
+    if args.source_metadata_only:
+        body = args.body or "源码与校验文件自动同步；安装包由维护者手动上传。"
+        publish_gitee_source_release(
+            client,
+            assets_dir=args.assets_dir,
+            tag=tag,
+            repository=args.repository,
+            target_commitish=args.target_commitish,
+            name=release_name,
+            body=body,
+            upload_attempts=args.upload_attempts,
+            retry_delay=args.retry_delay,
+        )
+        verify_public_source_release(
+            client,
+            assets_dir=args.assets_dir,
+            repository=args.repository,
+            tag=tag,
+        )
+        print(
+            "Gitee 源码 Release 与校验文件发布并验证成功："
+            f"https://gitee.com/{args.repository}/releases/tag/{tag}"
+        )
+    else:
+        body = args.body or "GitHub Release 构建完成后自动同步的国内下载镜像。"
+        _release, names = publish_gitee_release(
+            client,
+            assets_dir=args.assets_dir,
+            version=version,
+            tag=tag,
+            repository=args.repository,
+            target_commitish=args.target_commitish,
+            name=release_name,
+            body=body,
+            upload_attempts=args.upload_attempts,
+            retry_delay=args.retry_delay,
+            max_asset_bytes=args.max_asset_bytes,
+        )
+        verify_public_release(
+            client,
+            assets_dir=args.assets_dir,
+            repository=args.repository,
+            tag=tag,
+            names=names,
+        )
+        print(
+            "Gitee Release 镜像发布并验证成功："
+            f"https://gitee.com/{args.repository}/releases/tag/{tag}"
+        )
     return 0
 
 

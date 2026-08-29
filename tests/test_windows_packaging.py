@@ -1289,7 +1289,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("--ucrt-dir", win7_flat)
         self.assertIn("--vc-runtime-dir", win7_flat)
 
-    def test_release_workflow_syncs_gitee_only_after_github_publish(self) -> None:
+    def test_release_workflow_publishes_only_gitee_source_metadata_after_github(self) -> None:
         workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
@@ -1302,11 +1302,17 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("http.postBuffer=1073741824", mirror_job)
         self.assertIn("http.version=HTTP/1.1", mirror_job)
         self.assertIn("push --atomic gitee", mirror_job)
-        self.assertNotIn("publish_gitee_release.py", mirror_job)
-        self.assertNotIn("gh release", mirror_job)
+        self.assertIn("publish_gitee_release.py", mirror_job)
+        self.assertIn('gh release download "${TAG}"', mirror_job)
+        self.assertIn('--pattern "SHA256SUMS.txt"', mirror_job)
+        self.assertIn("--source-metadata-only", mirror_job)
+        self.assertIn("--upload-transport urllib", mirror_job)
         self.assertNotIn("gitee-release-assets", mirror_job)
-        self.assertNotIn("--upload-transport", mirror_job)
         self.assertNotIn("GITEE_MAX_ASSET_BYTES", mirror_job)
+        self.assertNotIn("latest.json", mirror_job)
+        self.assertNotIn("x64-setup.exe", mirror_job)
+        self.assertNotIn(".msi", mirror_job)
+        self.assertNotIn(".dmg", mirror_job)
         self.assertNotIn("git add", mirror_job)
         self.assertNotIn("git commit", mirror_job)
 
@@ -1339,7 +1345,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("publish_gitee_release.py", workflow)
         self.assertNotIn("gh release", workflow)
 
-    def test_gitee_release_workflow_syncs_source_and_tag_without_assets(self) -> None:
+    def test_gitee_release_workflow_publishes_source_archives_and_checksum_only(self) -> None:
         workflow = (
             build_windows.REPO_ROOT / ".github" / "workflows" / "gitee-release.yml"
         ).read_text(encoding="utf-8")
@@ -1353,11 +1359,17 @@ class WindowsPackagingTests(unittest.TestCase):
             "--project-version-file tagged-source/hr_toolkit/__init__.py",
             workflow,
         )
-        self.assertNotIn("gh release", workflow)
-        self.assertNotIn("publish_gitee_release.py", workflow)
+        self.assertIn('gh release download "${TAG}"', workflow)
+        self.assertIn('--pattern "SHA256SUMS.txt"', workflow)
+        self.assertIn("publish_gitee_release.py", workflow)
+        self.assertIn("--source-metadata-only", workflow)
+        self.assertIn("--upload-transport urllib", workflow)
         self.assertNotIn("gitee-release-assets", workflow)
-        self.assertNotIn("--upload-transport", workflow)
         self.assertNotIn("GITEE_MAX_ASSET_BYTES", workflow)
+        self.assertNotIn("latest.json", workflow)
+        self.assertNotIn("x64-setup.exe", workflow)
+        self.assertNotIn(".msi", workflow)
+        self.assertNotIn(".dmg", workflow)
         self.assertNotIn("build_windows.py", workflow)
         self.assertNotIn("build_macos.py", workflow)
 

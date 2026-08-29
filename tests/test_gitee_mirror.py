@@ -81,10 +81,27 @@ class FakeGiteeClient:
         return attachment
 
     def get_public_latest_release(self, _repository: str):
-        return {"id": 7, "tag_name": self.tag, "assets": list(self.attachments)}
+        source_assets = [
+            {
+                "name": f"{self.tag}.zip",
+                "browser_download_url": f"https://gitee.com/source/{self.tag}.zip",
+            },
+            {
+                "name": f"{self.tag}.tar.gz",
+                "browser_download_url": f"https://gitee.com/source/{self.tag}.tar.gz",
+            },
+        ]
+        return {
+            "id": 7,
+            "tag_name": self.tag,
+            "assets": list(self.attachments) + source_assets,
+        }
 
     def get_public_json(self, _url: str):
         return json.loads((self.assets_dir / "latest.json").read_text(encoding="utf-8"))
+
+    def get_public_bytes(self, _url: str):
+        return (self.assets_dir / "SHA256SUMS.txt").read_bytes()
 
 
 class GiteeMirrorTests(unittest.TestCase):
@@ -392,6 +409,111 @@ class GiteeMirrorTests(unittest.TestCase):
                     "a" * 40,
                     "--assets-dir",
                     str(assets_dir),
+                    "--dry-run",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+
+    def test_source_release_uploads_only_checksum_and_preserves_manual_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            checksum_path = assets_dir / "SHA256SUMS.txt"
+            checksum_path.write_text(
+                f"{'a' * 64}  HRToolkit_{self.VERSION}_x64-setup.exe\n",
+                encoding="utf-8",
+            )
+            client = FakeGiteeClient(assets_dir, self.TAG)
+            client.attachments = [
+                {
+                    "id": 20,
+                    "name": f"HRToolkit_{self.VERSION}_x64-setup.exe",
+                    "size": 123,
+                    "browser_download_url": "https://gitee.com/manual-installer.exe",
+                },
+                {
+                    "id": 21,
+                    "name": "SHA256SUMS.txt",
+                    "size": 1,
+                    "browser_download_url": "https://gitee.com/stale-checksum.txt",
+                },
+            ]
+
+            _release, names = gitee_publish.publish_gitee_source_release(
+                client,
+                assets_dir=assets_dir,
+                tag=self.TAG,
+                repository=self.GITEE_REPOSITORY,
+                target_commitish="a" * 40,
+                name=f"HR Toolkit {self.TAG}",
+                body="source release",
+                retry_delay=0,
+            )
+            gitee_publish.verify_public_source_release(
+                client,
+                assets_dir=assets_dir,
+                repository=self.GITEE_REPOSITORY,
+                tag=self.TAG,
+                attempts=1,
+            )
+
+            self.assertEqual(names, ("SHA256SUMS.txt",))
+            self.assertEqual(client.upload_order, ["SHA256SUMS.txt"])
+            self.assertIn("21", client.deleted)
+            self.assertIn(
+                f"HRToolkit_{self.VERSION}_x64-setup.exe",
+                {item["name"] for item in client.attachments},
+            )
+
+            client.upload_order.clear()
+            gitee_publish.publish_gitee_source_release(
+                client,
+                assets_dir=assets_dir,
+                tag=self.TAG,
+                repository=self.GITEE_REPOSITORY,
+                target_commitish="a" * 40,
+                name=f"HR Toolkit {self.TAG}",
+                body="source release",
+                retry_delay=0,
+            )
+            self.assertEqual(client.upload_order, [])
+
+    def test_source_release_rejects_any_staged_installer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            (assets_dir / "SHA256SUMS.txt").write_text(
+                f"{'a' * 64}  HRToolkit_{self.VERSION}_x64-setup.exe\n",
+                encoding="utf-8",
+            )
+            (assets_dir / f"HRToolkit_{self.VERSION}_x64-setup.exe").write_bytes(b"installer")
+
+            with self.assertRaisesRegex(
+                gitee_publish.GiteeReleaseError,
+                "只能包含 SHA256SUMS.txt",
+            ):
+                gitee_publish.validate_source_release_assets(assets_dir)
+
+    def test_source_release_dry_run_does_not_require_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            assets_dir = Path(temporary)
+            (assets_dir / "SHA256SUMS.txt").write_text(
+                f"{'a' * 64}  HRToolkit_{self.VERSION}_x64-setup.exe\n",
+                encoding="utf-8",
+            )
+
+            exit_code = gitee_publish.main(
+                [
+                    "--version",
+                    self.VERSION,
+                    "--tag",
+                    self.TAG,
+                    "--repository",
+                    self.GITEE_REPOSITORY,
+                    "--target-commitish",
+                    "a" * 40,
+                    "--assets-dir",
+                    str(assets_dir),
+                    "--source-metadata-only",
                     "--dry-run",
                 ]
             )
