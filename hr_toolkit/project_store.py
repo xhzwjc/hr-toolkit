@@ -2934,16 +2934,37 @@ def _unsafe_active_location_reason(path: Path) -> str | None:
     for variable in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer", "Dropbox"):
         value = os.environ.get(variable, "").strip()
         if value:
-            known_sync_roots.append(Path(value).expanduser().resolve())
+            sync_root = _optional_sync_root(value)
+            if sync_root is not None:
+                known_sync_roots.append(sync_root)
     known_sync_roots.extend(
         (
             Path.home() / "Library" / "CloudStorage",
             Path.home() / "Library" / "Mobile Documents",
         )
     )
-    if any(root.exists() and _is_inside(path, root) for root in known_sync_roots):
-        return "同步盘不能作为活动项目位置，请使用本机文件夹后再备份。"
+    for root in known_sync_roots:
+        try:
+            if root.exists() and _is_inside(path, root):
+                return "同步盘不能作为活动项目位置，请使用本机文件夹后再备份。"
+        except (OSError, RuntimeError):
+            # Cloud clients occasionally leave stale or malformed environment
+            # path hints behind after a drive is disconnected.  These optional
+            # hints must never prevent an unrelated local project from opening.
+            continue
     return None
+
+
+def _optional_sync_root(value: str) -> Path | None:
+    """Resolve a trustworthy absolute cloud-root hint, or ignore the hint."""
+
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            return None
+        return candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _assert_existing_ancestors_are_real(

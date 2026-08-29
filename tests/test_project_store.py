@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -136,6 +137,62 @@ class ProjectStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ProjectStoreError, "链接|重定向"):
             ProjectStore.create(linked_parent / "新项目", "新项目")
         self.assertFalse((real_parent / "新项目").exists())
+
+    def test_malformed_sync_environment_hint_cannot_block_local_project(self) -> None:
+        original_resolve = Path.resolve
+
+        def reject_malformed_hint(path: Path, *args, **kwargs):
+            if str(path) == "R?":
+                raise OSError(123, "invalid path", str(path))
+            return original_resolve(path, *args, **kwargs)
+
+        environment = {
+            "OneDrive": "R?",
+            "OneDriveCommercial": "",
+            "OneDriveConsumer": "",
+            "Dropbox": "",
+        }
+        with patch.dict(os.environ, environment), patch.object(Path, "resolve", reject_malformed_hint):
+            reason = project_store_module._unsafe_active_location_reason(self.base / "本机项目")
+
+        self.assertIsNone(reason)
+
+    def test_existing_absolute_sync_environment_root_remains_blocked(self) -> None:
+        sync_root = self.base / "同步盘"
+        sync_root.mkdir()
+        environment = {
+            "OneDrive": str(sync_root),
+            "OneDriveCommercial": "",
+            "OneDriveConsumer": "",
+            "Dropbox": "",
+        }
+        with patch.dict(os.environ, environment):
+            reason = project_store_module._unsafe_active_location_reason(sync_root / "活动项目")
+
+        self.assertIn("同步盘", reason or "")
+
+    @unittest.skipUnless(os.name == "nt", "Windows 路径语义回归")
+    def test_windows_project_creation_survives_invalid_sync_hint(self) -> None:
+        environment = {
+            "OneDrive": "R?",
+            "OneDriveCommercial": "",
+            "OneDriveConsumer": "",
+            "Dropbox": "",
+        }
+        with patch.dict(os.environ, environment):
+            project_root = self.base / "Windows本机项目"
+            store = ProjectStore.create(project_root, "Windows本机项目")
+        try:
+            visible = sorted(
+                path.name
+                for path in project_root.iterdir()
+                if path.name != PROJECT_METADATA_DIR
+            )
+            self.assertEqual(visible, [COMMON_VISIBLE_DIR])
+            self.assertTrue(store.integrity_check())
+            self.assertTrue(store.writable)
+        finally:
+            store.close()
 
     def test_draft_layout_is_group_tool_batch_and_supplements_are_on_demand(self) -> None:
         detail = self._draft(group_name="华东事业部", tool_name="社保明细与汇总")
