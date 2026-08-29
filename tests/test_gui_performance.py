@@ -893,6 +893,7 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.after_cancel(snapshot_job)
                 app._window_resize_snapshot_job = None
             app._window_resize_snapshot_supported = False
+            app._window_resize_pointer_state_reader = lambda: False
             observed = {}
 
             def inspect_during_drag() -> None:
@@ -908,14 +909,29 @@ class GuiPerformanceTests(unittest.TestCase):
                     index * 5,
                     lambda w=width, h=height: self.root.geometry(f"{w}x{h}"),
                 )
-            self.root.after(60, inspect_during_drag)
-            self.root.after(300, self.root.quit)
-            self.root.mainloop()
+            self._run_event_loop_until(
+                lambda: (
+                    app._window_resize_active
+                    and app._window_resize_overlay_frames > 0
+                ),
+                failure_message="live resize preview did not start",
+            )
+            inspect_during_drag()
 
             self.assertTrue(observed["active"])
             self.assertEqual(observed["manager"], "")
             self.assertEqual(observed["overlay"], "place")
             self.assertEqual(observed["activations"], 1)
+            self._run_event_loop_until(
+                lambda: (
+                    not app._window_resize_active
+                    and not app._window_resize_restoring
+                    and app._root_frame.winfo_manager() == "pack"
+                    and app._window_resize_overlay.winfo_manager() == ""
+                ),
+                stable_polls=2,
+                failure_message="live resize preview did not restore",
+            )
             self.assertFalse(app._window_resize_active)
             self.assertEqual(app._root_frame.winfo_manager(), "pack")
             self.assertEqual(app._window_resize_overlay.winfo_manager(), "")
@@ -1280,6 +1296,7 @@ class GuiPerformanceTests(unittest.TestCase):
         try:
             app = HRToolkitApp(self.root)
             self.root.deiconify()
+            app._dismiss_startup_loading_screen()
             app._select_tool("personnel_change_merge")
             with tempfile.TemporaryDirectory() as temp_dir:
                 paths = []
@@ -1303,9 +1320,20 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.update()
                 self.assertIs(app.upload_body.winfo_children()[0], upload_canvas)
                 self.root.minsize(1, 1)
+                app._window_resize_pointer_state_reader = lambda: False
                 self.root.geometry("900x650")
-                self.root.after(250, self.root.quit)
-                self.root.mainloop()
+                self._run_event_loop_until(
+                    lambda: app._window_resize_active,
+                    failure_message="upload-list resize preview did not start",
+                )
+                self._run_event_loop_until(
+                    lambda: (
+                        not app._window_resize_active
+                        and not app._window_resize_restoring
+                    ),
+                    stable_polls=2,
+                    failure_message="upload-list resize preview did not restore",
+                )
                 self.assertEqual(upload_canvas.find_all(), initial_items)
 
                 app.change_input_paths = None
@@ -1315,8 +1343,18 @@ class GuiPerformanceTests(unittest.TestCase):
                 drop_zone = app.upload_body.winfo_children()[0]
                 initial_drop_items = drop_zone.find_all()
                 self.root.geometry("1180x760")
-                self.root.after(250, self.root.quit)
-                self.root.mainloop()
+                self._run_event_loop_until(
+                    lambda: app._window_resize_active,
+                    failure_message="drop-zone resize preview did not start",
+                )
+                self._run_event_loop_until(
+                    lambda: (
+                        not app._window_resize_active
+                        and not app._window_resize_restoring
+                    ),
+                    stable_polls=2,
+                    failure_message="drop-zone resize preview did not restore",
+                )
                 self.assertEqual(drop_zone.find_all(), initial_drop_items)
         finally:
             if app is not None:
