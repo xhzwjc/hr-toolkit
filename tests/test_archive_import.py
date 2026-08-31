@@ -5,12 +5,14 @@ import tempfile
 import unittest
 import zipfile
 import shutil
+from copy import copy
 from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
-from openpyxl.styles import PatternFill
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from hr_toolkit.tools.archive_import import (
     _find_footer_start_row,
@@ -88,6 +90,45 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(ws3.cell(4, 2).value, "张五")
             self.assertIsNone(ws3.cell(4, 12).value)
             self.assertIsNone(ws3.cell(4, 19).value)
+
+    def test_import_preserves_uploaded_summary_data_row_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "茂名项目部人事档案移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            output_dir = root / "output"
+            _write_transfer_file(source)
+            _write_summary_file(target)
+
+            target_wb = load_workbook(target)
+            target_ws = target_wb["公司1"]
+            _apply_distinctive_format(target_ws.cell(4, 2))
+            target_ws.row_dimensions[4].height = 42
+            target_ws.column_dimensions["B"].width = 27.5
+            target_wb.save(target)
+            target_wb.close()
+
+            source_sha256 = _sha256(source)
+            target_sha256 = _sha256(target)
+            saved_target_wb = load_workbook(target)
+            expected_style = _style_signature(saved_target_wb["公司1"].cell(4, 2))
+            saved_target_wb.close()
+
+            result = import_archive_transfers(source, target, output_dir)
+
+            self.assertEqual(_sha256(source), source_sha256)
+            self.assertEqual(_sha256(target), target_sha256)
+            output_wb = load_workbook(result.output_file, data_only=False)
+            try:
+                output_ws = output_wb["公司1"]
+                self.assertEqual(output_ws.cell(5, 2).value, "张三")
+                self.assertEqual(_style_signature(output_ws.cell(4, 2)), expected_style)
+                self.assertEqual(_style_signature(output_ws.cell(5, 2)), expected_style)
+                self.assertEqual(output_ws.row_dimensions[4].height, 42)
+                self.assertEqual(output_ws.row_dimensions[5].height, 42)
+                self.assertEqual(output_ws.column_dimensions["B"].width, 27.5)
+            finally:
+                output_wb.close()
 
     def test_existing_materials_merge_using_template_field_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -705,6 +746,66 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(wb["公司3"].cell(4, 2).value, "张五")
             wb.close()
 
+    def test_export_preserves_uploaded_summary_format_and_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary = root / "档案汇总.xlsx"
+            output_dir = root / "output"
+            _write_summary_file(summary)
+
+            summary_wb = load_workbook(summary)
+            summary_ws = summary_wb["公司1"]
+            summary_ws.cell(4, 2).value = "模板\n行"
+            _apply_distinctive_format(summary_ws.cell(4, 2))
+            summary_ws.cell(3, 2).fill = PatternFill(fill_type="solid", fgColor="FFF2CC")
+            summary_ws.cell(1, 1).fill = PatternFill(fill_type="solid", fgColor="C6E0B4")
+            summary_ws.row_dimensions[4].height = 42
+            summary_ws.column_dimensions["B"].width = 27.5
+            summary_ws.freeze_panes = "D4"
+            summary_ws.sheet_view.showGridLines = False
+            summary_ws.page_setup.orientation = "landscape"
+            summary_ws.merge_cells("A1:C1")
+            summary_ws.conditional_formatting.add(
+                "S4:S10",
+                CellIsRule(
+                    operator="greaterThan",
+                    formula=["0"],
+                    fill=PatternFill(fill_type="solid", fgColor="E2F0D9"),
+                ),
+            )
+            summary_wb.save(summary)
+            summary_wb.close()
+
+            source_sha256 = _sha256(summary)
+            saved_summary_wb = load_workbook(summary)
+            saved_summary_ws = saved_summary_wb["公司1"]
+            expected_data_style = _style_signature(saved_summary_ws.cell(4, 2))
+            expected_header_style = _style_signature(saved_summary_ws.cell(3, 2))
+            expected_title_style = _style_signature(saved_summary_ws.cell(1, 1))
+            saved_summary_wb.close()
+
+            result = export_company_archive_tables(summary, output_dir)
+
+            self.assertEqual(_sha256(summary), source_sha256)
+            output_wb = load_workbook(output_dir / "公司1-档案表.xlsx", data_only=False)
+            try:
+                self.assertEqual(output_wb.sheetnames, ["公司1"])
+                output_ws = output_wb["公司1"]
+                self.assertEqual(output_ws.cell(4, 2).value, "模板\n行")
+                self.assertEqual(_style_signature(output_ws.cell(4, 2)), expected_data_style)
+                self.assertEqual(_style_signature(output_ws.cell(3, 2)), expected_header_style)
+                self.assertEqual(_style_signature(output_ws.cell(1, 1)), expected_title_style)
+                self.assertEqual(output_ws.row_dimensions[4].height, 42)
+                self.assertEqual(output_ws.column_dimensions["B"].width, 27.5)
+                self.assertEqual(output_ws.freeze_panes, "D4")
+                self.assertFalse(output_ws.sheet_view.showGridLines)
+                self.assertEqual(output_ws.page_setup.orientation, "landscape")
+                self.assertIn("A1:C1", output_ws.merged_cells)
+                self.assertEqual(len(output_ws.conditional_formatting), 1)
+            finally:
+                output_wb.close()
+            self.assertEqual(result.inserted_count, 2)
+
     def test_export_reports_progress_without_changing_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -766,6 +867,15 @@ class ArchiveImportTest(unittest.TestCase):
             imported = import_archive_transfers(input_file, None, import_output)
             existing_company1 = existing_dir / "公司1档案表.xlsx"
             _write_existing_company_archive(existing_company1)
+            existing_wb = load_workbook(existing_company1)
+            existing_ws = existing_wb["公司1"]
+            _apply_distinctive_format(existing_ws.cell(4, 2))
+            existing_ws.row_dimensions[4].height = 42
+            existing_wb.save(existing_company1)
+            existing_wb.close()
+            saved_existing_wb = load_workbook(existing_company1)
+            expected_existing_style = _style_signature(saved_existing_wb["公司1"].cell(4, 2))
+            saved_existing_wb.close()
 
             result = export_company_archive_tables(imported.output_file, export_output, existing_archive_path=existing_dir)
 
@@ -786,9 +896,9 @@ class ArchiveImportTest(unittest.TestCase):
             self.assertEqual(ws1.cell(5, 1).value, "11")
             self.assertEqual(ws1.cell(5, 4).value, '=MIDB(C5,7,4)&"-"&MIDB(C5,11,2)&"-"&MIDB(C5,13,2)')
             self.assertEqual(ws1.cell(5, 9).value, '=A5&"-"&TEXT(G5,"00000000")&"-"&TEXT(J5,"00")&"-"&H5')
-            self.assertEqual(ws1.cell(5, 2).alignment.horizontal, "center")
-            self.assertEqual(ws1.cell(5, 2).border.left.style, "thin")
-            self.assertFalse(ws1.cell(5, 2).font.bold)
+            self.assertEqual(_style_signature(ws1.cell(4, 2)), expected_existing_style)
+            self.assertEqual(_style_signature(ws1.cell(5, 2)), _style_signature(ws1.cell(4, 2)))
+            self.assertEqual(ws1.row_dimensions[5].height, 42)
             wb1.close()
 
             wb3 = load_workbook(export_output / "公司3-档案表.xlsx", data_only=False)
@@ -1045,6 +1155,26 @@ def _write_summary_file(
     ws2.cell(4, 3).value = "440921198009XXXXXX"
     ws2.cell(4, 12).value = None
     wb.save(path)
+
+
+def _apply_distinctive_format(cell) -> None:
+    red_double = Side(style="double", color="C00000")
+    cell.font = Font(name="微软雅黑", size=14, bold=True, color="FFFFFF")
+    cell.fill = PatternFill(fill_type="solid", fgColor="4472C4")
+    cell.border = Border(left=red_double, right=red_double, top=red_double, bottom=red_double)
+    cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True, indent=1)
+    cell.number_format = "@"
+
+
+def _style_signature(cell):
+    return (
+        copy(cell.font),
+        copy(cell.fill),
+        copy(cell.border),
+        copy(cell.alignment),
+        cell.number_format,
+        copy(cell.protection),
+    )
 
 
 def _sha256(path: Path) -> str:

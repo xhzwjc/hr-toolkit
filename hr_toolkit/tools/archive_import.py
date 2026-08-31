@@ -17,7 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -166,6 +166,12 @@ class ArchiveTransferRecord:
     source_file: str
     source_title: str
     source_row: int
+
+
+@dataclass(frozen=True)
+class ArchiveFormatTemplate:
+    path: Path
+    sheet_title: str
 
 
 @dataclass
@@ -354,9 +360,11 @@ def export_company_archive_tables(
         if not summary_files:
             raise ValueError("未找到 .xlsx 或 .xls 档案汇总表。")
         _report_archive_progress(progress_callback, 0, 0, "正在读取档案汇总表...", force=True)
-        records = _read_archive_summary_records(
+        format_template_dir = temp_dir / "summary_format_templates"
+        records, format_templates = _read_archive_summary_records(
             summary_files,
             warnings,
+            format_template_dir=None if dry_run else format_template_dir,
             progress_callback=progress_callback,
             cancelled=cancelled,
         )
@@ -410,6 +418,7 @@ def export_company_archive_tables(
                 company,
                 company_records,
                 existing_by_company.get(company),
+                format_templates.get(company),
                 output_file,
                 temp_dir,
                 warnings,
@@ -815,18 +824,26 @@ def _append_archive_rows(
     template_snapshot = snapshot_row(ws, template_row, layout.max_column)
     target_rows = _blank_data_rows(ws, layout)
     remaining_count = len(records) - len(target_rows)
+    inserted_rows: set[int] = set()
     if remaining_count > 0:
         insert_at = layout.footer_start_row
         insert_rows(ws, insert_at, remaining_count)
-        target_rows.extend(range(insert_at, insert_at + remaining_count))
+        inserted_row_range = range(insert_at, insert_at + remaining_count)
+        inserted_rows = set(inserted_row_range)
+        target_rows.extend(inserted_row_range)
     total = progress_total if progress_total is not None else len(records)
     for record_index, (row_index, record) in enumerate(zip(target_rows, records), start=1):
         if record_index == 1 or record_index % ARCHIVE_PROGRESS_INTERVAL == 0:
             _check_archive_cancelled(cancelled)
-        apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
+        # 已有空白数据行可能包含甲方设置的颜色、换行、字体、边框和行高，
+        # 直接在原行写值即可；只有真正新插入的行才继承模板行格式。
+        if row_index in inserted_rows:
+            apply_row_snapshot(ws, row_index, template_snapshot, translate_formulas=True)
         _clear_archive_record_values(ws, layout, row_index)
         _write_archive_record(ws, layout, row_index, record)
-        _format_archive_data_row(ws, layout, row_index)
+        # 内置空模板没有数据样式可继承，此时才使用工具默认数据行样式。
+        if template_row == layout.header_row:
+            _format_archive_data_row(ws, layout, row_index)
         completed = progress_start + record_index
         _report_archive_progress(
             progress_callback,
@@ -1157,15 +1174,13 @@ def _format_archive_data_row(
     ws: Worksheet,
     layout: ArchiveSheetLayout,
     row_index: int,
-    *,
-    clear_fill: bool = True,
 ) -> None:
     # 整行套用的是固定样式，逐格 cell.border = ... 会让 openpyxl 每次都对样式
     # 对象做一次递归哈希去查样式表。样式表只增不改，下标查一次就能重复使用。
     border_id = cached_style_id(ws, "border", "archive_data_thin", lambda: _DATA_ROW_BORDER)
     alignment_id = cached_style_id(ws, "alignment", "archive_data_center", lambda: _DATA_ROW_ALIGNMENT)
     font_id = cached_style_id(ws, "font", "archive_data_song10", lambda: _DATA_ROW_FONT)
-    fill_id = cached_style_id(ws, "fill", "archive_data_empty", lambda: _DATA_ROW_EMPTY_FILL) if clear_fill else None
+    fill_id = cached_style_id(ws, "fill", "archive_data_empty", lambda: _DATA_ROW_EMPTY_FILL)
     for col_index in range(1, layout.max_column + 1):
         set_style_ids(
             ws.cell(row_index, col_index),
@@ -1174,25 +1189,6 @@ def _format_archive_data_row(
             font_id=font_id,
             fill_id=fill_id,
         )
-
-
-def _normalize_archive_output_sheet(
-    ws: Worksheet,
-    layout: ArchiveSheetLayout,
-    *,
-    cancelled: ArchiveCancelCallback | None = None,
-) -> None:
-    name_col = layout.headers.get(HEADER_NAME)
-    id_col = layout.headers.get(HEADER_ID_CARD)
-    if name_col is None or id_col is None:
-        return
-    for row_index in range(layout.data_start_row, layout.footer_start_row):
-        if row_index == layout.data_start_row or row_index % ARCHIVE_PROGRESS_INTERVAL == 0:
-            _check_archive_cancelled(cancelled)
-        if _has_value(ws.cell(row_index, name_col).value) or _has_value(ws.cell(row_index, id_col).value):
-            _format_archive_data_row(ws, layout, row_index, clear_fill=False)
-    _check_archive_cancelled(cancelled)
-    _apply_archive_column_widths(ws, layout)
 
 
 def _apply_archive_column_widths(ws: Worksheet, layout: ArchiveSheetLayout) -> None:
@@ -1250,17 +1246,119 @@ def _copy_default_company_archive_template(temp_dir: Path) -> Path:
     return target
 
 
+def _save_archive_format_template(source_ws: Worksheet, output_path: Path) -> None:
+    """将单个公司工作表精简为格式底稿，避免按公司反复加载整份汇总表。"""
+    source_workbook = source_ws.parent
+    target_workbook = Workbook()
+    try:
+        target_workbook.properties = copy(source_workbook.properties)
+        target_workbook.calculation = copy(source_workbook.calculation)
+        target_workbook.security = copy(source_workbook.security)
+        target_workbook.loaded_theme = source_workbook.loaded_theme
+        target_workbook.iso_dates = source_workbook.iso_dates
+        target_workbook.epoch = source_workbook.epoch
+        # 条件格式规则会引用工作簿级 differential style 表。
+        target_workbook._differential_styles = copy(source_workbook._differential_styles)
+
+        target_ws = target_workbook.active
+        target_ws.title = source_ws.title
+        _copy_archive_worksheet(source_ws, target_ws)
+        target_workbook.save(output_path)
+    finally:
+        target_workbook.close()
+
+
+def _copy_archive_worksheet(source_ws: Worksheet, target_ws: Worksheet) -> None:
+    """跨工作簿复制档案表的值、样式、尺寸和常用页面设置。"""
+    style_cache: dict[tuple[int, ...], Any] = {}
+    for (row_index, col_index), source_cell in source_ws._cells.items():
+        target_cell = target_ws.cell(row=row_index, column=col_index)
+        target_cell._value = copy(source_cell._value)
+        target_cell.data_type = source_cell.data_type
+        if source_cell.has_style:
+            _copy_archive_style(source_cell, target_cell, style_cache)
+        if getattr(source_cell, "hyperlink", None) is not None:
+            target_cell._hyperlink = copy(source_cell.hyperlink)
+        if getattr(source_cell, "comment", None) is not None:
+            target_cell.comment = copy(source_cell.comment)
+
+    for attr in ("row_dimensions", "column_dimensions"):
+        source_dimensions = getattr(source_ws, attr)
+        target_dimensions = getattr(target_ws, attr)
+        for key, source_dimension in source_dimensions.items():
+            target_dimension = copy(source_dimension)
+            target_dimension.worksheet = target_ws
+            target_dimension._style = None
+            if source_dimension.has_style:
+                _copy_archive_style(source_dimension, target_dimension, style_cache)
+            target_dimensions[key] = target_dimension
+
+    for attr in (
+        "sheet_format",
+        "sheet_properties",
+        "merged_cells",
+        "page_margins",
+        "page_setup",
+        "print_options",
+        "views",
+        "auto_filter",
+        "conditional_formatting",
+        "data_validations",
+        "protection",
+        "row_breaks",
+        "col_breaks",
+        "scenarios",
+    ):
+        setattr(target_ws, attr, copy(getattr(source_ws, attr)))
+    # 独立公司档案只保留这一张工作表，必须保持可见才能被 Excel 正常打开。
+    target_ws.sheet_state = "visible"
+
+    for table in source_ws.tables.values():
+        target_ws.add_table(copy(table))
+
+
+def _copy_archive_style(source, target, cache: dict[tuple[int, ...], Any]) -> None:
+    source_style = source._style
+    key = tuple(source_style)
+    translated = cache.get(key)
+    if translated is None:
+        target.font = copy(source.font)
+        target.fill = copy(source.fill)
+        target.border = copy(source.border)
+        target.alignment = copy(source.alignment)
+        target.number_format = source.number_format
+        target.protection = copy(source.protection)
+        translated = copy(target._style)
+        translated.quotePrefix = source_style.quotePrefix
+        translated.pivotButton = source_style.pivotButton
+        cache[key] = translated
+    target._style = copy(translated)
+
+
+def _clear_archive_output_data_rows(ws: Worksheet, layout: ArchiveSheetLayout) -> None:
+    """只清空格式底稿的数据内容，所有单元格和页面格式保持不变。"""
+    for row_index in range(layout.data_start_row, layout.footer_start_row):
+        for col_index in range(1, layout.max_column + 1):
+            cell = ws.cell(row_index, col_index)
+            cell.value = None
+            cell.comment = None
+            cell._hyperlink = None
+
+
 def _read_archive_summary_records(
     summary_files: list[Path],
     warnings: list[str],
     *,
+    format_template_dir: Path | None = None,
     progress_callback: ArchiveProgressCallback | None = None,
     cancelled: ArchiveCancelCallback | None = None,
-) -> list[ArchiveTransferRecord]:
+) -> tuple[list[ArchiveTransferRecord], dict[str, ArchiveFormatTemplate]]:
     records: list[ArchiveTransferRecord] = []
+    format_templates: dict[str, ArchiveFormatTemplate] = {}
     for summary_file in summary_files:
         _check_archive_cancelled(cancelled)
         workbook = load_workbook(summary_file, data_only=False)
+        pending_format_sheets: list[Worksheet] = []
         try:
             for ws in workbook.worksheets:
                 if _is_placeholder_sheet_title(ws.title):
@@ -1270,6 +1368,7 @@ def _read_archive_summary_records(
                 except ValueError:
                     warnings.append(f"{summary_file.name} 的 {ws.title} 未识别到档案表表头，已跳过。")
                     continue
+                sheet_record_start = len(records)
                 for row_index in range(layout.data_start_row, layout.footer_start_row):
                     if row_index == layout.data_start_row or row_index % ARCHIVE_PROGRESS_INTERVAL == 0:
                         _check_archive_cancelled(cancelled)
@@ -1305,9 +1404,55 @@ def _read_archive_summary_records(
                         0,
                         f"正在读取档案汇总数据：已读取 {len(records)} 条",
                     )
+                if (
+                    format_template_dir is not None
+                    and len(records) > sheet_record_start
+                    and ws.title not in format_templates
+                ):
+                    pending_format_sheets.append(ws)
+            if pending_format_sheets and format_template_dir is not None:
+                _register_archive_format_templates(
+                    summary_file,
+                    workbook,
+                    pending_format_sheets,
+                    format_template_dir,
+                    format_templates,
+                    warnings,
+                )
         finally:
             workbook.close()
-    return records
+    return records, format_templates
+
+
+def _register_archive_format_templates(
+    summary_file: Path,
+    workbook,
+    worksheets: list[Worksheet],
+    output_dir: Path,
+    format_templates: dict[str, ArchiveFormatTemplate],
+    warnings: list[str],
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    use_original_workbook = len(workbook.worksheets) == 1 and len(worksheets) == 1
+    for ws in worksheets:
+        template_path = output_dir / f"sheet_{len(format_templates) + 1}.xlsx"
+        if use_original_workbook or getattr(ws, "_images", None) or getattr(ws, "_charts", None):
+            # 单工作表大文件直接复用原表可避免一次完整复制；图表和图片也需要
+            # 保留原工作簿关系文件。输出阶段只修改内存副本，不会改动源文件。
+            template_path = summary_file
+        else:
+            try:
+                _save_archive_format_template(ws, template_path)
+            except Exception as exc:
+                warnings.append(
+                    f"{summary_file.name} 的 {ws.title} 格式底稿精简失败，"
+                    f"已使用原工作簿保留格式：{exc}"
+                )
+                template_path = summary_file
+        format_templates[ws.title] = ArchiveFormatTemplate(
+            path=template_path,
+            sheet_title=ws.title,
+        )
 
 
 def _find_existing_company_archives(
@@ -1364,6 +1509,7 @@ def _write_company_archive_file(
     company: str,
     records: list[ArchiveTransferRecord],
     existing_file: Path | None,
+    format_template: ArchiveFormatTemplate | None,
     output_file: Path,
     temp_dir: Path,
     warnings: list[str],
@@ -1372,19 +1518,30 @@ def _write_company_archive_file(
     cancelled: ArchiveCancelCallback | None = None,
 ) -> dict[str, int | bool]:
     _check_archive_cancelled(cancelled)
-    source_file = existing_file or _copy_default_company_archive_template(temp_dir)
+    using_default_template = existing_file is None and format_template is None
+    source_file = (
+        existing_file
+        or (format_template.path if format_template is not None else None)
+        or _copy_default_company_archive_template(temp_dir)
+    )
     workbook = load_workbook(source_file)
     created = existing_file is None
     try:
-        ws = _select_company_archive_sheet(workbook, company)
+        if format_template is not None and existing_file is None and format_template.sheet_title in workbook.sheetnames:
+            ws = workbook[format_template.sheet_title]
+        else:
+            ws = _select_company_archive_sheet(workbook, company)
         for other_ws in list(workbook.worksheets):
             if other_ws is not ws:
                 workbook.remove(other_ws)
+        ws.sheet_state = "visible"
         ws.title = _safe_sheet_title(company, [])
         if ws["A1"].value:
             ws["A1"].value = f"{company}人员档案编号表"
         _ensure_exit_date_columns(workbook, warnings, worksheets=(ws,))
         layout = _detect_archive_layout(ws)
+        if format_template is not None and existing_file is None:
+            _clear_archive_output_data_rows(ws, layout)
         write_counts = _append_or_merge_archive_records(
             ws,
             layout,
@@ -1393,7 +1550,8 @@ def _write_company_archive_file(
             progress_callback=progress_callback,
             cancelled=cancelled,
         )
-        _normalize_archive_output_sheet(ws, layout, cancelled=cancelled)
+        if using_default_template:
+            _apply_archive_column_widths(ws, layout)
         _report_archive_progress(
             progress_callback,
             len(records),
