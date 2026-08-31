@@ -5,8 +5,11 @@ import sys
 import unittest
 import shutil
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 from openpyxl import Workbook, load_workbook
 
@@ -27,7 +30,9 @@ from hr_toolkit.common.excel_compat import (
     _convert_with_xlrd,
     _diagnose_missing_libreoffice,
     _find_libreoffice,
+    capture_xlsx_save_compatibility,
     ensure_xlsx_workbook,
+    finalize_xlsx_after_openpyxl_save,
 )
 from hr_toolkit.common.resources import open_template_resource
 
@@ -109,6 +114,330 @@ class ExcelHelperTest(unittest.TestCase):
             after_size = xls_file.stat().st_size
             self.assertEqual(before_sha, after_sha, "源文件哈希绝不能发生改变")
             self.assertEqual(before_size, after_size, "源文件大小绝不能发生改变")
+
+    def test_preserve_formatting_uses_native_converter_before_xlrd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "档案模板.xls"
+            xls_file.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+
+            def fake_native_convert(_source: Path, output_path: Path) -> None:
+                workbook = Workbook()
+                workbook.active["A1"] = "保留格式"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                workbook.save(output_path)
+                workbook.close()
+
+            with (
+                patch("hr_toolkit.common.excel_compat.sys.platform", "linux"),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_libreoffice",
+                    side_effect=fake_native_convert,
+                ) as native_convert,
+                patch("hr_toolkit.common.excel_compat._convert_with_xlrd") as xlrd_convert,
+            ):
+                converted = ensure_xlsx_workbook(
+                    xls_file,
+                    root / "temp",
+                    preserve_formatting=True,
+                )
+
+            self.assertTrue(converted.exists())
+            native_convert.assert_called_once()
+            xlrd_convert.assert_not_called()
+
+    def test_preserve_formatting_prefers_excel_or_wps_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "档案模板.xls"
+            original_bytes = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64
+            xls_file.write_bytes(original_bytes)
+
+            def fake_windows_convert(source: Path, output_path: Path) -> None:
+                self.assertNotEqual(source, xls_file)
+                self.assertEqual(source.read_bytes(), original_bytes)
+                workbook = Workbook()
+                workbook.active["A1"] = "Excel/WPS 原生转换"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                workbook.save(output_path)
+                workbook.close()
+
+            with (
+                patch("hr_toolkit.common.excel_compat.sys.platform", "win32"),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_windows_com",
+                    side_effect=fake_windows_convert,
+                ) as windows_convert,
+                patch("hr_toolkit.common.excel_compat._convert_with_libreoffice") as libreoffice_convert,
+                patch("hr_toolkit.common.excel_compat._convert_with_xlrd") as xlrd_convert,
+            ):
+                converted = ensure_xlsx_workbook(
+                    xls_file,
+                    root / "temp",
+                    preserve_formatting=True,
+                )
+
+            self.assertTrue(converted.exists())
+            self.assertEqual(xls_file.read_bytes(), original_bytes)
+            windows_convert.assert_called_once()
+            libreoffice_convert.assert_not_called()
+            xlrd_convert.assert_not_called()
+
+    def test_preserve_formatting_falls_back_to_data_mode_without_native_converter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "档案模板.xls"
+            xls_file.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+            warnings: list[str] = []
+
+            def fake_xlrd_convert(_source: Path, output_path: Path) -> None:
+                workbook = Workbook()
+                workbook.active["A1"] = "兼容模式数据"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                workbook.save(output_path)
+                workbook.close()
+
+            with (
+                patch("hr_toolkit.common.excel_compat.sys.platform", "linux"),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_libreoffice",
+                    side_effect=RuntimeError("未安装转换器"),
+                ),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_xlrd",
+                    side_effect=fake_xlrd_convert,
+                ) as xlrd_convert,
+            ):
+                converted = ensure_xlsx_workbook(
+                    xls_file,
+                    root / "temp",
+                    preserve_formatting=True,
+                    warning_callback=warnings.append,
+                )
+
+            self.assertTrue(converted.exists())
+            xlrd_convert.assert_called_once()
+            self.assertTrue(any("自动切换兼容模式" in warning for warning in warnings))
+            workbook = load_workbook(converted, data_only=True)
+            self.assertEqual(workbook.active["A1"].value, "兼容模式数据")
+            workbook.close()
+
+    def test_native_output_validation_error_falls_back_without_leaking_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "档案模板.xls"
+            xls_file.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+
+            def fake_native_convert(_source: Path, output_path: Path) -> None:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(b"PK\x03\x04legacy-invalid")
+
+            def fake_xlrd_convert(_source: Path, output_path: Path) -> None:
+                workbook = Workbook()
+                workbook.active["A1"] = "降级成功"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                workbook.save(output_path)
+                workbook.close()
+
+            real_zip_file = ZipFile
+
+            class ValidationErrorZipFile:
+                def __new__(cls, path, *args, **kwargs):
+                    if Path(path).read_bytes().startswith(b"PK\x03\x04legacy"):
+                        raise RuntimeError("模拟旧系统压缩校验异常")
+                    return real_zip_file(path, *args, **kwargs)
+
+            with (
+                patch("hr_toolkit.common.excel_compat.sys.platform", "linux"),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_libreoffice",
+                    side_effect=fake_native_convert,
+                ),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_xlrd",
+                    side_effect=fake_xlrd_convert,
+                ) as xlrd_convert,
+                patch("hr_toolkit.common.excel_compat.ZipFile", ValidationErrorZipFile),
+            ):
+                converted = ensure_xlsx_workbook(
+                    xls_file,
+                    root / "temp",
+                    preserve_formatting=True,
+                )
+
+            xlrd_convert.assert_called_once()
+            workbook = load_workbook(converted, data_only=True)
+            self.assertEqual(workbook.active["A1"].value, "降级成功")
+            workbook.close()
+
+    def test_preserve_formatting_raises_only_when_all_readers_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "损坏文件.xls"
+            xls_file.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+
+            with (
+                patch("hr_toolkit.common.excel_compat.sys.platform", "linux"),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_libreoffice",
+                    side_effect=RuntimeError("未安装转换器"),
+                ),
+                patch(
+                    "hr_toolkit.common.excel_compat._convert_with_xlrd",
+                    side_effect=RuntimeError("文件内容损坏"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "未损坏、未加密"):
+                    ensure_xlsx_workbook(
+                        xls_file,
+                        root / "temp",
+                        preserve_formatting=True,
+                    )
+
+    def test_formatted_and_values_only_conversions_use_separate_cache_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            xls_file = root / "档案模板.xls"
+            xls_file.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+            modes: list[bool] = []
+
+            def fake_convert(
+                _source: Path,
+                output_path: Path,
+                *args,
+                preserve_formatting: bool = False,
+                **kwargs,
+            ) -> None:
+                modes.append(preserve_formatting)
+                workbook = Workbook()
+                workbook.active["A1"] = preserve_formatting
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                workbook.save(output_path)
+                workbook.close()
+
+            with patch("hr_toolkit.common.excel_compat._convert_xls_to_xlsx", side_effect=fake_convert):
+                values_only = ensure_xlsx_workbook(xls_file, root / "temp")
+                formatted = ensure_xlsx_workbook(
+                    xls_file,
+                    root / "temp",
+                    preserve_formatting=True,
+                )
+
+            self.assertNotEqual(values_only, formatted)
+            self.assertEqual(modes, [False, True])
+
+    def test_finalize_xlsx_repairs_legacy_style_and_drawing_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "原始模板.xlsx"
+            output = root / "输出.xlsx"
+            for path in (source, output):
+                workbook = Workbook()
+                workbook.active["A1"] = "测试"
+                workbook.save(path)
+                workbook.close()
+
+            namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+            tag = f"{{{namespace}}}"
+
+            def source_styles(styles_xml: bytes) -> bytes:
+                style_root = ElementTree.fromstring(styles_xml)
+                style_xfs = style_root.find(f"{tag}cellStyleXfs")
+                cell_xfs = style_root.find(f"{tag}cellXfs")
+                cell_styles = style_root.find(f"{tag}cellStyles")
+                self.assertIsNotNone(style_xfs)
+                self.assertIsNotNone(cell_xfs)
+                self.assertIsNotNone(cell_styles)
+                style_xfs.append(deepcopy(style_xfs[0]))
+                style_xfs.set("count", str(len(style_xfs)))
+                cell_xfs[0].set("xfId", "1")
+                cell_styles.append(
+                    ElementTree.Element(
+                        f"{tag}cellStyle",
+                        {"name": "旧模板样式", "xfId": "1"},
+                    )
+                )
+                cell_styles.set("count", str(len(cell_styles)))
+                ElementTree.register_namespace("", namespace)
+                return ElementTree.tostring(style_root, encoding="utf-8")
+
+            def invalid_output_styles(styles_xml: bytes) -> bytes:
+                style_root = ElementTree.fromstring(styles_xml)
+                cell_xfs = style_root.find(f"{tag}cellXfs")
+                self.assertIsNotNone(cell_xfs)
+                cell_xfs[0].set("xfId", "1")
+                ElementTree.register_namespace("", namespace)
+                return ElementTree.tostring(style_root, encoding="utf-8")
+
+            def rewrite_package(
+                path: Path,
+                replacements: dict[str, bytes],
+                additions: dict[str, bytes] | None = None,
+            ) -> None:
+                temp_path = path.with_name(f".{path.name}.tmp")
+                with ZipFile(path) as source_archive, ZipFile(temp_path, "w") as target_archive:
+                    for info in source_archive.infolist():
+                        target_archive.writestr(
+                            info,
+                            replacements.get(info.filename, source_archive.read(info.filename)),
+                        )
+                    for name, data in (additions or {}).items():
+                        target_archive.writestr(name, data)
+                os.replace(temp_path, path)
+
+            with ZipFile(source) as archive:
+                original_source_styles = archive.read("xl/styles.xml")
+            rewrite_package(source, {"xl/styles.xml": source_styles(original_source_styles)})
+
+            with ZipFile(output) as archive:
+                original_output_styles = archive.read("xl/styles.xml")
+            drawing_xml = (
+                b'<wsDr xmlns="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+                b'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                b'<a:prstGeom prst="rect"><avLst /></a:prstGeom></wsDr>'
+            )
+            rewrite_package(
+                output,
+                {"xl/styles.xml": invalid_output_styles(original_output_styles)},
+                {"xl/drawings/drawing1.xml": drawing_xml},
+            )
+
+            snapshot = capture_xlsx_save_compatibility(source)
+            finalize_xlsx_after_openpyxl_save(output, snapshot)
+
+            with ZipFile(output) as archive:
+                repaired_styles = ElementTree.fromstring(archive.read("xl/styles.xml"))
+                repaired_drawing = archive.read("xl/drawings/drawing1.xml")
+            repaired_style_xfs = repaired_styles.find(f"{tag}cellStyleXfs")
+            repaired_cell_xfs = repaired_styles.find(f"{tag}cellXfs")
+            repaired_cell_styles = repaired_styles.find(f"{tag}cellStyles")
+            self.assertEqual(len(repaired_style_xfs), 2)
+            self.assertLess(int(repaired_cell_xfs[0].get("xfId")), len(repaired_style_xfs))
+            self.assertIn("旧模板样式", {style.get("name") for style in repaired_cell_styles})
+            self.assertIn(b"<a:avLst", repaired_drawing)
+            self.assertNotIn(b"<avLst", repaired_drawing)
+
+            fallback_output = root / "无样式快照输出.xlsx"
+            workbook = Workbook()
+            workbook.active["A1"] = "测试"
+            workbook.save(fallback_output)
+            workbook.close()
+            with ZipFile(fallback_output) as archive:
+                fallback_styles = archive.read("xl/styles.xml")
+            rewrite_package(
+                fallback_output,
+                {"xl/styles.xml": invalid_output_styles(fallback_styles)},
+                {"xl/drawings/drawing1.xml": drawing_xml},
+            )
+
+            finalize_xlsx_after_openpyxl_save(fallback_output, None)
+
+            with ZipFile(fallback_output) as archive:
+                normalized_styles = ElementTree.fromstring(archive.read("xl/styles.xml"))
+                normalized_drawing = archive.read("xl/drawings/drawing1.xml")
+            normalized_cell_xfs = normalized_styles.find(f"{tag}cellXfs")
+            self.assertEqual(normalized_cell_xfs[0].get("xfId"), "0")
+            self.assertIn(b"<a:avLst", normalized_drawing)
 
     def test_open_template_resource_falls_back_without_files_api(self) -> None:
         with (

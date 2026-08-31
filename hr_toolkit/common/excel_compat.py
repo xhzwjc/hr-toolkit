@@ -1,22 +1,174 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Callable
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 
 SUPPORTED_EXCEL_SUFFIXES = {".xlsx", ".xls"}
+_SPREADSHEET_XML_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_SPREADSHEET_XML_TAG = f"{{{_SPREADSHEET_XML_NAMESPACE}}}"
+
+
+@dataclass(frozen=True)
+class XlsxSaveCompatibilitySnapshot:
+    """保存 openpyxl 无法完整往返的工作簿级样式表。"""
+
+    cell_style_xfs: bytes
+    cell_styles: bytes
 
 
 def is_supported_excel_file(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_EXCEL_SUFFIXES and not path.name.startswith(("~$", ".~"))
 
 
-def ensure_xlsx_workbook(path: Path, temp_dir: Path) -> Path:
+def capture_xlsx_save_compatibility(path: Path) -> XlsxSaveCompatibilitySnapshot:
+    """在 openpyxl 保存前快照其可能重排或丢弃的样式父表。"""
+
+    try:
+        with ZipFile(path) as archive:
+            styles_xml = archive.read("xl/styles.xml")
+        root = ElementTree.fromstring(styles_xml)
+        cell_style_xfs = root.find(f"{_SPREADSHEET_XML_TAG}cellStyleXfs")
+        cell_styles = root.find(f"{_SPREADSHEET_XML_TAG}cellStyles")
+    except (BadZipFile, KeyError, ElementTree.ParseError, OSError) as exc:
+        raise RuntimeError(f"无法读取 Excel 样式结构：{path}") from exc
+    if cell_style_xfs is None or cell_styles is None:
+        raise RuntimeError(f"Excel 文件缺少必要样式结构：{path}")
+    return XlsxSaveCompatibilitySnapshot(
+        cell_style_xfs=ElementTree.tostring(cell_style_xfs, encoding="utf-8"),
+        cell_styles=ElementTree.tostring(cell_styles, encoding="utf-8"),
+    )
+
+
+def finalize_xlsx_after_openpyxl_save(
+    output_path: Path,
+    snapshot: XlsxSaveCompatibilitySnapshot | None,
+) -> None:
+    """修复 openpyxl 保存旧版 Excel 模板时产生的 OOXML 兼容性退化。
+
+    openpyxl 会把部分非连续 ``cellStyleXfs`` 压缩掉，却保留单元格原来的
+    ``xfId``；同时会把绘图几何中的 ``a:avLst`` 写成错误的默认命名空间。
+    这两类问题在新版软件中通常会被静默容错，但旧版 Excel 可能提示修复文件。
+    """
+
+    output_path = Path(output_path)
+    temp_path: Path | None = None
+    try:
+        with ZipFile(output_path) as source_archive:
+            styles_xml = source_archive.read("xl/styles.xml")
+            repaired_styles = _restore_openpyxl_style_tables(styles_xml, snapshot)
+            drawing_names = [
+                name
+                for name in source_archive.namelist()
+                if name.startswith("xl/drawings/") and name.endswith(".xml")
+            ]
+            drawing_repairs = {
+                name
+                for name in drawing_names
+                if b"<avLst" in source_archive.read(name)
+            }
+            if repaired_styles == styles_xml and not drawing_repairs:
+                return
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{output_path.name}.",
+                suffix=".repairing",
+                dir=output_path.parent,
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+            with ZipFile(temp_path, "w") as target_archive:
+                target_archive.comment = source_archive.comment
+                for info in source_archive.infolist():
+                    data = source_archive.read(info.filename)
+                    if info.filename == "xl/styles.xml":
+                        data = repaired_styles
+                    elif info.filename in drawing_repairs:
+                        if b"xmlns:a=" not in data:
+                            raise RuntimeError(f"Excel 绘图缺少 a 命名空间：{info.filename}")
+                        data = data.replace(b"<avLst", b"<a:avLst").replace(
+                            b"</avLst>",
+                            b"</a:avLst>",
+                        )
+                    target_archive.writestr(info, data)
+        os.replace(temp_path, output_path)
+        temp_path = None
+    except (BadZipFile, KeyError, ElementTree.ParseError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Excel 输出兼容性校验失败：{output_path}") from exc
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _restore_openpyxl_style_tables(
+    styles_xml: bytes,
+    snapshot: XlsxSaveCompatibilitySnapshot | None,
+) -> bytes:
+    root = ElementTree.fromstring(styles_xml)
+    cell_style_xfs = root.find(f"{_SPREADSHEET_XML_TAG}cellStyleXfs")
+    cell_xfs = root.find(f"{_SPREADSHEET_XML_TAG}cellXfs")
+    cell_styles = root.find(f"{_SPREADSHEET_XML_TAG}cellStyles")
+    if cell_style_xfs is None or cell_xfs is None or cell_styles is None:
+        raise RuntimeError("Excel 输出缺少必要样式结构。")
+
+    style_count = len(cell_style_xfs)
+    raw_style_ids = [xf.get("xfId") for xf in cell_xfs if xf.get("xfId") is not None]
+    referenced_style_ids = {int(xf_id) for xf_id in raw_style_ids if xf_id and xf_id.isdigit()}
+    if all(xf_id and xf_id.isdigit() and int(xf_id) < style_count for xf_id in raw_style_ids):
+        return styles_xml
+
+    restored_source_tables = False
+    if snapshot is not None:
+        source_cell_style_xfs = ElementTree.fromstring(snapshot.cell_style_xfs)
+        source_cell_styles = ElementTree.fromstring(snapshot.cell_styles)
+        output_style_names = {style.get("name") for style in cell_styles}
+        source_style_names = {style.get("name") for style in source_cell_styles}
+        if (
+            all(xf_id and xf_id.isdigit() for xf_id in raw_style_ids)
+            and all(xf_id < len(source_cell_style_xfs) for xf_id in referenced_style_ids)
+            and not output_style_names - source_style_names
+        ):
+            for current, restored in (
+                (cell_style_xfs, source_cell_style_xfs),
+                (cell_styles, source_cell_styles),
+            ):
+                index = list(root).index(current)
+                root.remove(current)
+                root.insert(index, restored)
+            restored_source_tables = True
+
+    if not restored_source_tables:
+        # 即使源样式父表无法恢复，也要保证文件结构可被旧版 Excel 打开。
+        # cellXfs 已包含单元格的直接格式，失效的父样式引用降为 Normal 即可。
+        for xf in cell_xfs:
+            xf_id = xf.get("xfId")
+            if xf_id is None or not xf_id.isdigit() or int(xf_id) >= style_count:
+                xf.set("xfId", "0")
+    ElementTree.register_namespace("", _SPREADSHEET_XML_NAMESPACE)
+    return ElementTree.tostring(root, encoding="utf-8")
+
+
+def ensure_xlsx_workbook(
+    path: Path,
+    temp_dir: Path,
+    *,
+    preserve_formatting: bool = False,
+    warning_callback: Callable[[str], None] | None = None,
+) -> Path:
     path = Path(path).expanduser().resolve()
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXCEL_SUFFIXES:
@@ -25,17 +177,25 @@ def ensure_xlsx_workbook(path: Path, temp_dir: Path) -> Path:
     file_kind = _detect_excel_file_kind(path)
     if suffix == ".xlsx" and file_kind == "xlsx":
         return path
-    output_dir = _conversion_dir(path, temp_dir)
+    output_dir = _conversion_dir(path, temp_dir, preserve_formatting=preserve_formatting)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{path.stem}.xlsx"
     if output_path.exists():
-        return output_path
+        if _is_usable_xlsx(output_path):
+            return output_path
+        _remove_incomplete_conversion(output_path)
 
     if file_kind == "xlsx":
         shutil.copyfile(path, output_path)
     else:
-        _convert_xls_to_xlsx(path, output_path, temp_dir=temp_dir)
-    if not output_path.exists():
+        _convert_xls_to_xlsx(
+            path,
+            output_path,
+            temp_dir=temp_dir,
+            preserve_formatting=preserve_formatting,
+            warning_callback=warning_callback,
+        )
+    if not _is_usable_xlsx(output_path):
         raise RuntimeError(f".xls 转换失败，未生成文件：{output_path}")
     return output_path
 
@@ -50,8 +210,9 @@ def _detect_excel_file_kind(path: Path) -> str:
     return path.suffix.lower().lstrip(".")
 
 
-def _conversion_dir(path: Path, temp_dir: Path) -> Path:
-    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:12]
+def _conversion_dir(path: Path, temp_dir: Path, *, preserve_formatting: bool = False) -> Path:
+    mode = "formatted" if preserve_formatting else "values"
+    digest = hashlib.sha1(f"{path}\0{mode}".encode("utf-8")).hexdigest()[:12]
     return temp_dir / "xls_converted" / digest
 
 
@@ -104,54 +265,139 @@ def _convert_with_xlrd(source: Path, output_path: Path) -> None:
         rb.release_resources()
 
 
-def _convert_xls_to_xlsx(source: Path, output_path: Path, temp_dir: Path | None = None) -> None:
+def _convert_xls_to_xlsx(
+    source: Path,
+    output_path: Path,
+    temp_dir: Path | None = None,
+    *,
+    preserve_formatting: bool = False,
+    warning_callback: Callable[[str], None] | None = None,
+) -> None:
     errors: list[str] = []
 
-    # 1. 优先使用纯 Python xlrd 内存转换（极速、跨平台、绝不触碰源文件）
-    try:
-        _convert_with_xlrd(source, output_path)
-        if output_path.exists() and output_path.stat().st_size > 0:
+    if not preserve_formatting:
+        # 仅提取数据的场景优先走纯 Python 快速路径；该路径不复制工作簿样式。
+        if _try_xls_converter(
+            "内置 xlrd 转换",
+            _convert_with_xlrd,
+            source,
+            output_path,
+            errors,
+        ):
             return
-    except Exception as exc:
-        errors.append(f"内置 xlrd 转换失败：{exc}")
 
-    # 2. 如果源文件为特殊格式导致 xlrd 失败，在临时沙箱副本中通过 COM / LibreOffice 转换
+    # 优先让 Excel/WPS/LibreOffice 在只读沙箱副本上保留格式、公式和结构。
+    # 这些组件不可用时，格式不能成为阻断项，后面会自动退回 xlrd 数据模式。
     sandbox_dir = (temp_dir or output_path.parent) / "xls_sandbox"
-    sandbox_dir.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:8]
     sandbox_source = sandbox_dir / f"{digest}_{source.name}"
     try:
+        sandbox_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, sandbox_source)
     except Exception as exc:
         errors.append(f"创建只读转换副本失败：{exc}")
-        raise RuntimeError(
-            "无法创建 .xls 临时转换副本；为保护源文件，已停止外部转换。"
-            + (" 详细信息：" + "；".join(errors) if errors else "")
-        ) from exc
-
-    try:
-        if sys.platform.startswith("win"):
-            try:
-                _convert_with_windows_com(sandbox_source, output_path)
-                return
-            except Exception as exc:
-                errors.append(f"Excel/WPS 转换失败：{exc}")
+    else:
         try:
-            _convert_with_libreoffice(sandbox_source, output_path)
-            return
-        except Exception as exc:
-            errors.append(f"LibreOffice 转换失败：{exc}")
-    finally:
-        if sandbox_source != source and sandbox_source.exists():
-            try:
-                sandbox_source.unlink()
-            except Exception:
-                pass
+            if sys.platform.startswith("win") and _try_xls_converter(
+                "Excel/WPS 转换",
+                _convert_with_windows_com,
+                sandbox_source,
+                output_path,
+                errors,
+            ):
+                return
+            if _try_xls_converter(
+                "LibreOffice 转换",
+                _convert_with_libreoffice,
+                sandbox_source,
+                output_path,
+                errors,
+            ):
+                return
+        finally:
+            if sandbox_source.exists():
+                try:
+                    sandbox_source.unlink()
+                except OSError:
+                    pass
 
-    raise RuntimeError(
-        "无法将 .xls 转换为 .xlsx。请确认文件格式完整，或本机已安装 Microsoft Excel、WPS 表格或 LibreOffice。"
-        + (" 详细信息：" + "；".join(errors) if errors else "")
+    if preserve_formatting and _try_xls_converter(
+        "内置 xlrd 兼容转换",
+        _convert_with_xlrd,
+        source,
+        output_path,
+        errors,
+    ):
+        _report_conversion_warning(
+            warning_callback,
+            f"{source.name} 无法使用本机表格组件完整保留格式，已自动切换兼容模式继续生成；"
+            "数据会正常输出，但原表颜色、边框、换行和公式格式可能简化。",
+        )
+        return
+
+    message = (
+        "无法读取 .xls 文件内容。请确认文件未损坏、未加密，"
+        "或先在 Excel/WPS 中另存为 .xlsx 后重试。"
     )
+    raise RuntimeError(message + (" 详细信息：" + "；".join(errors) if errors else ""))
+
+
+def _try_xls_converter(
+    label: str,
+    converter: Callable[[Path, Path], None],
+    source: Path,
+    output_path: Path,
+    errors: list[str],
+) -> bool:
+    _remove_incomplete_conversion(output_path)
+    try:
+        converter(source, output_path)
+    except Exception as exc:
+        errors.append(f"{label}失败：{exc}")
+        _remove_incomplete_conversion(output_path)
+        return False
+    if _is_usable_xlsx(output_path):
+        return True
+    errors.append(f"{label}失败：未生成有效的 .xlsx 文件")
+    _remove_incomplete_conversion(output_path)
+    return False
+
+
+def _is_usable_xlsx(path: Path) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        with ZipFile(path) as archive:
+            names = set(archive.namelist())
+            if "[Content_Types].xml" not in names or "xl/workbook.xml" not in names:
+                return False
+            return archive.testzip() is None
+    except Exception:
+        # 这里只负责判断转换产物是否可用。旧系统上的压缩库、异常压缩方式或
+        # 不完整文件都应触发下一个兼容转换方案，不能把校验异常直接暴露给用户。
+        return False
+
+
+def _remove_incomplete_conversion(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _report_conversion_warning(
+    callback: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        # 警告展示失败不能反过来阻断已经成功的数据转换。
+        pass
 
 
 def _convert_with_windows_com(source: Path, output_path: Path) -> None:

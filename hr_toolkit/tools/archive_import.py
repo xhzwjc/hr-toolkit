@@ -24,7 +24,13 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from hr_toolkit.common.resources import open_template_resource
-from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
+from hr_toolkit.common.excel_compat import (
+    XlsxSaveCompatibilitySnapshot,
+    capture_xlsx_save_compatibility,
+    ensure_xlsx_workbook,
+    finalize_xlsx_after_openpyxl_save,
+    is_supported_excel_file,
+)
 from hr_toolkit.common.excel import (
     apply_row_snapshot,
     cached_style_id,
@@ -316,7 +322,16 @@ def import_archive_transfers(
 
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / OUTPUT_FILENAME
-        target_for_write = ensure_xlsx_workbook(target, temp_dir) if target is not None else _copy_default_archive_template(temp_dir)
+        target_for_write = (
+            ensure_xlsx_workbook(
+                target,
+                temp_dir,
+                preserve_formatting=True,
+                warning_callback=warnings.append,
+            )
+            if target is not None
+            else _copy_default_archive_template(temp_dir)
+        )
         apply_result = _write_archive_summary(
             target_for_write,
             output_file,
@@ -510,6 +525,8 @@ def _find_excel_input_files(input_paths: list[Path], temp_dir: Path, warnings: l
     seen: set[Path] = set()
     for input_path in input_paths:
         for file_path in _iter_excel_input_files(input_path, temp_dir, warnings):
+            # 来源表只读取业务值，不参与最终输出外观；保持纯数据快速路径，
+            # 避免在 Win7/老电脑上为无用格式启动 Excel/WPS。
             working_path = ensure_xlsx_workbook(file_path, temp_dir)
             resolved = working_path.resolve()
             if resolved in seen:
@@ -602,6 +619,7 @@ def _write_archive_summary(
     *,
     remove_template_sheet: bool = False,
 ) -> dict[str, int]:
+    compatibility_snapshot = _try_capture_xlsx_save_compatibility(target_path, warnings)
     workbook = load_workbook(target_path)
     inserted_count = 0
     updated_count = 0
@@ -645,9 +663,47 @@ def _write_archive_summary(
         if remove_template_sheet:
             _remove_unused_template_sheet(workbook)
         workbook.save(output_file)
+        _try_finalize_xlsx_after_save(output_file, compatibility_snapshot, warnings)
     finally:
         workbook.close()
     return {"inserted_count": inserted_count, "updated_count": updated_count, "skipped_count": skipped_count}
+
+
+def _try_capture_xlsx_save_compatibility(
+    source_path: Path,
+    warnings: list[str],
+) -> XlsxSaveCompatibilitySnapshot | None:
+    try:
+        return capture_xlsx_save_compatibility(source_path)
+    except Exception:
+        warnings.append(
+            f"{source_path.name} 的高级格式兼容信息无法读取，已继续生成结果；部分格式可能简化。"
+        )
+        return None
+
+
+def _try_finalize_xlsx_after_save(
+    output_path: Path,
+    snapshot: XlsxSaveCompatibilitySnapshot | None,
+    warnings: list[str],
+) -> None:
+    try:
+        finalize_xlsx_after_openpyxl_save(output_path, snapshot)
+    except Exception:
+        if snapshot is not None:
+            try:
+                # 无法恢复原样式父表时，再降一级：只修正旧 Excel 无法容错的结构。
+                finalize_xlsx_after_openpyxl_save(output_path, None)
+                warnings.append(
+                    f"{output_path.name} 的部分高级格式无法恢复，已使用兼容格式继续生成。"
+                )
+                return
+            except Exception:
+                pass
+        # openpyxl 已经先完整保存了输出；最终增强失败仍保留结果，不中断业务。
+        warnings.append(
+            f"{output_path.name} 的旧版 Excel 格式兼容增强未完成，结果文件已正常生成。"
+        )
 
 
 def _get_or_create_company_sheet(
@@ -1524,6 +1580,7 @@ def _write_company_archive_file(
         or (format_template.path if format_template is not None else None)
         or _copy_default_company_archive_template(temp_dir)
     )
+    compatibility_snapshot = _try_capture_xlsx_save_compatibility(source_file, warnings)
     workbook = load_workbook(source_file)
     created = existing_file is None
     try:
@@ -1561,6 +1618,7 @@ def _write_company_archive_file(
         )
         _check_archive_cancelled(cancelled)
         workbook.save(output_file)
+        _try_finalize_xlsx_after_save(output_file, compatibility_snapshot, warnings)
         _check_archive_cancelled(cancelled)
         return {
             "created": created,

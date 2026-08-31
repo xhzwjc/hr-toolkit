@@ -8,6 +8,7 @@ import shutil
 from copy import copy
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
@@ -699,6 +700,62 @@ class ArchiveImportTest(unittest.TestCase):
             names = [ws.cell(row, 2).value for row in range(4, 8)]
             self.assertEqual(names.count("张三"), 1)
             wb.close()
+
+    def test_import_requests_format_preserving_conversion_for_uploaded_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "茂名项目部人事档案移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            _write_transfer_file(source)
+            _write_summary_file(target)
+
+            with patch(
+                "hr_toolkit.tools.archive_import.ensure_xlsx_workbook",
+                side_effect=lambda path, _temp_dir, **_kwargs: Path(path),
+            ) as ensure_workbook:
+                import_archive_transfers(source, target, root / "output")
+
+            target_calls = [
+                call
+                for call in ensure_workbook.call_args_list
+                if Path(call.args[0]).resolve() == target.resolve()
+            ]
+            self.assertEqual(len(target_calls), 1)
+            self.assertIs(target_calls[0].kwargs.get("preserve_formatting"), True)
+            self.assertTrue(callable(target_calls[0].kwargs.get("warning_callback")))
+            source_calls = [
+                call
+                for call in ensure_workbook.call_args_list
+                if Path(call.args[0]).resolve() == source.resolve()
+            ]
+            self.assertEqual(len(source_calls), 1)
+            self.assertNotIn("preserve_formatting", source_calls[0].kwargs)
+
+    def test_format_compatibility_enhancement_failure_does_not_block_output(self) -> None:
+        failure_cases = (
+            ("capture_xlsx_save_compatibility", "高级格式兼容信息无法读取"),
+            ("finalize_xlsx_after_openpyxl_save", "格式兼容增强未完成"),
+        )
+        for function_name, expected_warning in failure_cases:
+            with self.subTest(function_name=function_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "茂名项目部人事档案移交表.xlsx"
+                target = root / "档案汇总.xlsx"
+                output_dir = root / "output"
+                _write_transfer_file(source)
+                _write_summary_file(target)
+
+                with patch(
+                    f"hr_toolkit.tools.archive_import.{function_name}",
+                    side_effect=RuntimeError("模拟格式兼容失败"),
+                ):
+                    result = import_archive_transfers(source, target, output_dir)
+
+                self.assertTrue(result.output_file and result.output_file.exists())
+                self.assertTrue(any(expected_warning in warning for warning in result.warnings))
+                workbook = load_workbook(result.output_file, data_only=False)
+                self.assertEqual(workbook["公司1"].cell(5, 2).value, "张三")
+                workbook.close()
 
     def test_import_from_zip_with_default_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
