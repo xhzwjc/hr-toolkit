@@ -11,6 +11,7 @@ _OTHER_PART_SEPARATOR = re.compile(r"[；;]+")
 
 import shutil
 import tempfile
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -48,11 +49,13 @@ HEADER_COMPANY = "公司"
 HEADER_NAME = "姓名"
 HEADER_ID_CARD = "身份证"
 HEADER_OTHER = "其他"
+HEADER_EXIT_DATE = "离职时间"
+EXIT_DATE_HEADERS = (HEADER_EXIT_DATE, "离职日期")
 # 人事移交表填表说明：仅这三项填写数量；照片、离职证明等其余材料只表示是否已有。
 QUANTITY_MATERIAL_HEADERS = frozenset({"劳动合同", "保密协议", "入职员工须知"})
 PRESENCE_MARKS = frozenset({"√", "✓", "✔", "✅"})
 PLACEHOLDER_SHEET_TITLES = {"模板", "公司……", "公司..."}
-HISTORY_DATE_HEADERS = {"入职时间": "入职", "离职时间": "离职"}
+HISTORY_DATE_HEADERS = {"入职时间": "入职", "离职时间": "离职", "离职日期": "离职"}
 # 不可见边界只用于识别工具生成的批注段落；用户在 Excel 中看到的仍是约定格式。
 _HISTORY_COMMENT_START = "\u2063\u2060"
 _HISTORY_COMMENT_END = "\u2060\u2063"
@@ -141,7 +144,8 @@ DIRECT_FIELD_MAP = {
     "转正考试试卷": "转正考试试卷",
     "增购社保申请单": "增购社保申请单",
     "离职申请单、交接清单": "离职申请单",
-    "离职时间": "离职时间",
+    "离职时间": HEADER_EXIT_DATE,
+    "离职日期": HEADER_EXIT_DATE,
 }
 
 FORMULA_HEADERS = {"出生日期", "年齡", "年龄", "入职公式", "出生年月公式", "档案号"}
@@ -594,6 +598,7 @@ def _write_archive_summary(
     updated_count = 0
     skipped_count = 0
     try:
+        _ensure_exit_date_columns(workbook, warnings)
         template_sheet = workbook[workbook.sheetnames[0]]
         for company, company_records in _group_by_company(records).items():
             ws = _get_or_create_company_sheet(
@@ -676,6 +681,61 @@ def _detect_archive_layout(ws: Worksheet) -> ArchiveSheetLayout:
         max_column=_last_header_column(ws, header_row),
         headers=headers,
     )
+
+
+def _ensure_exit_date_columns(
+    workbook,
+    warnings: list[str],
+    *,
+    worksheets: tuple[Worksheet, ...] | None = None,
+) -> None:
+    """让旧档案表兼容离职日期；只在两个受支持列头都不存在时追加新列。"""
+    added_sheets: list[str] = []
+    candidates = tuple(workbook.worksheets) if worksheets is None else worksheets
+    for ws in candidates:
+        try:
+            if _ensure_exit_date_column(ws):
+                added_sheets.append(ws.title)
+        except ValueError:
+            # 非档案工作表保持原样，后续仍由既有布局识别逻辑决定是否处理。
+            continue
+    if added_sheets:
+        warnings.append(
+            "以下档案工作表没有“离职时间”或“离职日期”列，"
+            f"已自动追加“离职时间”列：{'、'.join(added_sheets)}"
+        )
+
+
+def _ensure_exit_date_column(ws: Worksheet) -> bool:
+    header_row = _find_header_row(ws, (HEADER_NAME, HEADER_ID_CARD))
+    headers = _read_headers(ws, header_row)
+    if any(header in headers for header in EXIT_DATE_HEADERS):
+        return False
+
+    last_header_column = _last_header_column(ws, header_row)
+    new_column = last_header_column + 1
+    max_row = ws.max_row
+    while new_column <= ws.max_column and any(
+        _has_value(ws.cell(row_index, new_column).value)
+        for row_index in range(1, max_row + 1)
+    ):
+        new_column += 1
+
+    # 追加而不是插入，避免移动原有业务列、公式和数据。样式沿用最后一个业务列，
+    # 仅将新列设置为日期显示格式。
+    for row_index in range(1, max_row + 1):
+        source_cell = ws.cell(row_index, last_header_column)
+        target_cell = ws.cell(row_index, new_column)
+        if source_cell.has_style:
+            target_cell._style = copy(source_cell._style)
+    ws.cell(header_row, new_column).value = HEADER_EXIT_DATE
+    for row_index in range(header_row, max_row + 1):
+        ws.cell(row_index, new_column).number_format = r"yyyy\-mm\-dd"
+
+    new_letter = get_column_letter(new_column)
+    current_width = ws.column_dimensions[new_letter].width or 0
+    ws.column_dimensions[new_letter].width = max(current_width, 14)
+    return True
 
 
 def _find_header_row(ws: Worksheet, required_headers: tuple[str, ...]) -> int:
@@ -1041,6 +1101,11 @@ def _target_values_for_record(record: ArchiveTransferRecord, target_headers: dic
         normalized_source = _normalize_header(source_header)
         if normalized_source in SOURCE_SKIP_HEADERS or normalized_source in FORMULA_HEADERS:
             continue
+        if normalized_source in EXIT_DATE_HEADERS:
+            target_header = next((header for header in EXIT_DATE_HEADERS if header in target_headers), None)
+            if target_header is not None:
+                values[target_header] = _normalize_date_value(target_header, value)
+                continue
         if normalized_source in target_headers:
             values[normalized_source] = _normalize_date_value(normalized_source, value)
             continue
@@ -1139,6 +1204,8 @@ def _apply_archive_column_widths(ws: Worksheet, layout: ArchiveSheetLayout) -> N
         "年齡": 8,
         "年龄": 8,
         "入职时间": 13,
+        "离职时间": 14,
+        "离职日期": 14,
         "入职公式": 12,
         "序号": 8,
         "档案号": 24,
@@ -1316,6 +1383,7 @@ def _write_company_archive_file(
         ws.title = _safe_sheet_title(company, [])
         if ws["A1"].value:
             ws["A1"].value = f"{company}人员档案编号表"
+        _ensure_exit_date_columns(workbook, warnings, worksheets=(ws,))
         layout = _detect_archive_layout(ws)
         write_counts = _append_or_merge_archive_records(
             ws,
@@ -1504,7 +1572,7 @@ def _format_other_part(header: str, value: Any) -> str:
 
 
 # 仅对日期类字段做截断：datetime → date，避免输出 00:00:00 影响阅读
-_DATE_FIELD_HEADERS = {"入职时间", "离职时间", "出生日期"}
+_DATE_FIELD_HEADERS = {"入职时间", "离职时间", "离职日期", "出生日期"}
 
 
 def _normalize_date_value(header: str, value: Any) -> Any:

@@ -440,6 +440,186 @@ class ArchiveImportTest(unittest.TestCase):
             finally:
                 output_wb.close()
 
+    def test_exit_date_and_exit_time_headers_are_bidirectionally_compatible(self) -> None:
+        cases = (
+            ("离职日期", "离职时间"),
+            ("离职时间", "离职日期"),
+        )
+        for source_header, target_header in cases:
+            with self.subTest(source_header=source_header, target_header=target_header):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    source = root / "人事档案移交表.xlsx"
+                    target = root / "档案汇总.xlsx"
+                    _write_history_transfer_file(
+                        source,
+                        entry_date=date(2026, 1, 1),
+                        exit_date=date(2026, 7, 31),
+                        exit_date_header=source_header,
+                    )
+                    _write_summary_file(target, exit_date_header=target_header)
+                    source_sha256 = _sha256(source)
+                    target_sha256 = _sha256(target)
+
+                    result = import_archive_transfers(source, target, root / "output")
+
+                    self.assertEqual(_sha256(source), source_sha256)
+                    self.assertEqual(_sha256(target), target_sha256)
+                    self.assertFalse(any("已自动追加" in warning for warning in result.warnings))
+                    output_wb = load_workbook(result.output_file, data_only=False)
+                    try:
+                        output_ws = output_wb["公司1"]
+                        headers = _header_columns(output_ws, 3)
+                        self.assertIn(target_header, headers)
+                        self.assertNotIn(
+                            "离职时间" if target_header == "离职日期" else "离职日期",
+                            headers,
+                        )
+                        row_index = next(
+                            row
+                            for row in range(4, output_ws.max_row + 1)
+                            if output_ws.cell(row, headers["身份证"]).value == "4600271987030XXXXX"
+                        )
+                        self.assertEqual(
+                            _date_only(output_ws.cell(row_index, headers[target_header]).value),
+                            date(2026, 7, 31),
+                        )
+                        other_text = str(output_ws.cell(row_index, headers["其他"]).value or "")
+                        self.assertNotIn("离职时间：", other_text)
+                        self.assertNotIn("离职日期：", other_text)
+                    finally:
+                        output_wb.close()
+
+    def test_exit_date_alias_keeps_existing_value_and_writes_history_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "人事档案移交表.xlsx"
+            target = root / "档案汇总.xlsx"
+            _write_history_transfer_file(
+                source,
+                entry_date=date(2026, 1, 1),
+                exit_date=date(2026, 7, 31),
+                exit_date_header="离职时间",
+            )
+            _write_summary_file(target, exit_date_header="离职日期")
+            target_wb = load_workbook(target)
+            target_ws = target_wb["公司1"]
+            headers = _header_columns(target_ws, 3)
+            target_ws.cell(4, headers["姓名"]).value = "张三"
+            target_ws.cell(4, headers["身份证"]).value = "4600271987030XXXXX"
+            target_ws.cell(4, headers["离职日期"]).value = date(2025, 12, 31)
+            target_wb.save(target)
+            target_wb.close()
+
+            result = import_archive_transfers(source, target, root / "output")
+
+            output_wb = load_workbook(result.output_file, data_only=False)
+            try:
+                output_ws = output_wb["公司1"]
+                headers = _header_columns(output_ws, 3)
+                exit_cell = output_ws.cell(4, headers["离职日期"])
+                self.assertEqual(_date_only(exit_cell.value), date(2025, 12, 31))
+                self.assertEqual(
+                    _visible_comment_text(exit_cell.comment.text),
+                    "第一次离职：2025/12/31\n第二次离职：2026/7/31",
+                )
+            finally:
+                output_wb.close()
+
+    def test_import_appends_exit_date_column_when_legacy_target_has_no_supported_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "人事档案移交表.xlsx"
+            target = root / "旧版档案汇总.xlsx"
+            _write_history_transfer_file(
+                source,
+                entry_date=date(2026, 1, 1),
+                exit_date=date(2026, 7, 31),
+                exit_date_header="离职日期",
+            )
+            _write_summary_file(target, exit_date_header=None)
+            target_wb = load_workbook(target)
+            target_ws = target_wb["公司1"]
+            target_headers = _header_columns(target_ws, 3)
+            target_ws.cell(4, target_headers["姓名"]).value = "张三"
+            target_ws.cell(4, target_headers["身份证"]).value = "4600271987030XXXXX"
+            target_ws.cell(4, target_headers["其他"]).value = "解除合同协议书：√"
+            target_wb.save(target)
+            target_wb.close()
+            source_sha256 = _sha256(source)
+            target_sha256 = _sha256(target)
+
+            result = import_archive_transfers(source, target, root / "output")
+
+            self.assertEqual(_sha256(source), source_sha256)
+            self.assertEqual(_sha256(target), target_sha256)
+            self.assertTrue(any("已自动追加“离职时间”列" in warning for warning in result.warnings))
+            output_wb = load_workbook(result.output_file, data_only=False)
+            try:
+                for sheet_name in ("公司1", "公司2"):
+                    headers = _header_columns(output_wb[sheet_name], 3)
+                    self.assertEqual(headers["离职时间"], 37)
+                    self.assertNotIn("离职日期", headers)
+
+                output_ws = output_wb["公司1"]
+                headers = _header_columns(output_ws, 3)
+                row_index = next(
+                    row
+                    for row in range(4, output_ws.max_row + 1)
+                    if output_ws.cell(row, headers["身份证"]).value == "4600271987030XXXXX"
+                )
+                exit_cell = output_ws.cell(row_index, headers["离职时间"])
+                self.assertEqual(_date_only(exit_cell.value), date(2026, 7, 31))
+                self.assertEqual(exit_cell.number_format, r"yyyy\-mm\-dd")
+                other_text = str(output_ws.cell(row_index, headers["其他"]).value or "")
+                self.assertEqual(other_text, "解除合同协议书：√")
+            finally:
+                output_wb.close()
+
+    def test_export_appends_exit_date_column_to_legacy_company_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "人事档案移交表.xlsx"
+            _write_history_transfer_file(
+                source,
+                entry_date=date(2026, 1, 1),
+                exit_date=date(2026, 7, 31),
+                exit_date_header="离职日期",
+            )
+            imported = import_archive_transfers(source, None, root / "summary-output")
+            existing = root / "公司1旧版档案表.xlsx"
+            _write_existing_company_archive(existing, exit_date_header=None)
+            summary_sha256 = _sha256(imported.output_file)
+            existing_sha256 = _sha256(existing)
+
+            result = export_company_archive_tables(
+                imported.output_file,
+                root / "export-output",
+                existing_archive_path=existing,
+            )
+
+            self.assertEqual(_sha256(imported.output_file), summary_sha256)
+            self.assertEqual(_sha256(existing), existing_sha256)
+            self.assertTrue(any("已自动追加“离职时间”列" in warning for warning in result.warnings))
+            output_wb = load_workbook(result.output_files[0], data_only=False)
+            try:
+                output_ws = output_wb["公司1"]
+                headers = _header_columns(output_ws, 3)
+                self.assertEqual(headers["离职时间"], 37)
+                row_index = next(
+                    row
+                    for row in range(4, output_ws.max_row + 1)
+                    if output_ws.cell(row, headers["身份证"]).value == "4600271987030XXXXX"
+                )
+                self.assertEqual(
+                    _date_only(output_ws.cell(row_index, headers["离职时间"]).value),
+                    date(2026, 7, 31),
+                )
+                other_text = str(output_ws.cell(row_index, headers["其他"]).value or "")
+                self.assertNotIn("离职", other_text)
+            finally:
+                output_wb.close()
+
     def test_dry_run_does_not_write_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -768,11 +948,12 @@ def _write_history_transfer_file(
     *,
     entry_date: date,
     exit_date: date,
+    exit_date_header: str = "离职时间",
 ) -> None:
     wb = Workbook()
     ws = wb.active
     ws.title = "移交表"
-    headers = ["公司", "姓名", "身份证", "入职时间", "离职时间"]
+    headers = ["公司", "姓名", "身份证", "入职时间", exit_date_header]
     for col_index, header in enumerate(headers, start=1):
         ws.cell(2, col_index).value = header
     values = ["公司1", "张三", "4600271987030XXXXX", entry_date, exit_date]
@@ -782,11 +963,21 @@ def _write_history_transfer_file(
     wb.close()
 
 
-def _write_existing_company_archive(path: Path) -> None:
+def _write_existing_company_archive(
+    path: Path,
+    *,
+    exit_date_header: str | None = "离职时间",
+) -> None:
     template = Path(__file__).resolve().parents[1] / "hr_toolkit" / "templates" / "archive_company_template.xlsx"
     shutil.copyfile(template, path)
     wb = load_workbook(path)
     ws = wb["公司1"]
+    headers = _header_columns(ws, 3)
+    exit_date_column = headers["离职时间"]
+    if exit_date_header is None:
+        ws.delete_cols(exit_date_column, 1)
+    elif exit_date_header != "离职时间":
+        ws.cell(3, exit_date_column).value = exit_date_header
     ws.cell(4, 1).value = "11"
     ws.cell(4, 2).value = "旧员工"
     ws.cell(4, 3).value = "111111199901019999"
@@ -794,7 +985,11 @@ def _write_existing_company_archive(path: Path) -> None:
     wb.close()
 
 
-def _write_summary_file(path: Path) -> None:
+def _write_summary_file(
+    path: Path,
+    *,
+    exit_date_header: str | None = "离职时间",
+) -> None:
     wb = Workbook()
     ws1 = wb.active
     ws1.title = "公司1"
@@ -839,6 +1034,8 @@ def _write_summary_file(path: Path) -> None:
             "增购社保申请单",
             "离职申请单",
         ]
+        if exit_date_header is not None:
+            headers.append(exit_date_header)
         for col, header in enumerate(headers, start=1):
             ws.cell(3, col).value = header
         ws.cell(4, 2).value = "模板行"
