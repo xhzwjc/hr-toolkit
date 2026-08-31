@@ -22,7 +22,7 @@ packaging==24.2
 pefile==2024.8.26; platform_system == "Windows"
 pillow==10.4.0
 pip==25.0.1
-protobuf==5.29.5
+protobuf==7.36.0
 psutil==6.1.1
 py7zr==0.22.0
 pybcj==1.0.2
