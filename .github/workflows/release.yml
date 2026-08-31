@@ -142,7 +142,7 @@ jobs:
           }
 
       - name: Upload direct Windows assets
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows
           path: |
@@ -153,7 +153,7 @@ jobs:
           compression-level: 0
 
       - name: Upload legacy server bridge manifest for operations
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: legacy-server-bridge
           path: artifacts/windows/legacy-server-latest.json
@@ -249,7 +249,7 @@ jobs:
           }
 
       - name: Upload direct Win7 assets
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows-win7
           path: |
@@ -260,7 +260,7 @@ jobs:
           compression-level: 0
 
       - name: Upload Win7 bridge manifest for operations
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: legacy-server-bridge-win7
           path: artifacts/windows-win7/legacy-server-latest-win7.json
@@ -325,7 +325,7 @@ jobs:
             --output-dir artifacts/macos
 
       - name: Upload verified architecture DMG
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos-${{ matrix.asset_suffix }}
           path: artifacts/macos/HRToolkit_${{ env.VERSION }}_${{ matrix.asset_suffix }}.dmg
