@@ -22,6 +22,7 @@ from hr_toolkit.gui.app import (
     WORKSPACE_TREE_RENDER_BATCH,
     WINDOW_RESIZE_SETTLE_MS,
     _CoalescedCanvasScroller,
+    _build_native_primary_pointer_reader,
     _responsive_layout_mode,
 )
 from hr_toolkit.gui.widgets import CodexButton, RoundedCard, SidebarItem
@@ -211,7 +212,7 @@ class GuiPerformanceTests(unittest.TestCase):
         self.assertEqual(len(app._pending_log_entries), 0)
         self.assertGreater(app.log_text.insert.call_count, 0)
 
-    def test_log_paint_is_deferred_during_windows_native_resize(self) -> None:
+    def test_log_paint_is_deferred_during_native_resize(self) -> None:
         app = HRToolkitApp.__new__(HRToolkitApp)
         app._is_alive = True
         app._scroll_active = False
@@ -237,7 +238,7 @@ class GuiPerformanceTests(unittest.TestCase):
         self.assertEqual(len(app._pending_log_entries), 0)
         self.assertGreater(app.log_text.insert.call_count, 0)
 
-    def test_worker_status_queue_is_not_drained_inside_windows_resize_loop(self) -> None:
+    def test_worker_status_queue_is_not_drained_inside_native_resize_loop(self) -> None:
         app = HRToolkitApp.__new__(HRToolkitApp)
         app._window_resize_active = True
         app._window_resize_live_layout_enabled = False
@@ -965,6 +966,34 @@ class GuiPerformanceTests(unittest.TestCase):
             if app is not None:
                 app.destroy()
 
+    def test_packaged_desktops_default_to_retained_tree_resize(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            expected_live_layout = not (
+                sys.platform.startswith("win") or sys.platform == "darwin"
+            )
+
+            self.assertEqual(
+                app._window_resize_live_layout_enabled,
+                expected_live_layout,
+            )
+            if expected_live_layout:
+                self.assertIsNone(app._window_resize_pointer_state_reader)
+            else:
+                self.assertIsNotNone(app._window_resize_pointer_state_reader)
+                self.assertIsInstance(
+                    app._window_resize_pointer_state_reader(),
+                    bool,
+                )
+        finally:
+            if app is not None:
+                app.destroy()
+
+    def test_native_pointer_reader_has_safe_unsupported_platform_fallback(self) -> None:
+        with patch("hr_toolkit.gui.app.sys.platform", "linux"):
+            self.assertIsNone(_build_native_primary_pointer_reader())
+
     def test_live_resize_coalesces_native_size_burst(self) -> None:
         app = None
         try:
@@ -1005,7 +1034,7 @@ class GuiPerformanceTests(unittest.TestCase):
             if app is not None:
                 app.destroy()
 
-    def test_windows_resize_defers_tree_reflow_until_border_release(self) -> None:
+    def test_retained_resize_defers_tree_reflow_until_border_release(self) -> None:
         app = None
         try:
             app = HRToolkitApp(self.root)

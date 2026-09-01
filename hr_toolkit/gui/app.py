@@ -233,32 +233,48 @@ WINDOW_RESIZE_FRAME_MS = 24
 WINDOW_RESIZE_SETTLE_MS = 100
 WINDOW_RESIZE_SLOW_FRAME_MS = 10.0
 WINDOW_RESIZE_MAX_FRAME_MS = 32
-WINDOWS_RESIZE_RELEASE_POLL_MS = 16
-WINDOWS_RESIZE_QUIET_FALLBACK_MS = 80
-WINDOWS_RESIZE_HELD_QUIET_MS = 160
+NATIVE_RESIZE_RELEASE_POLL_MS = 16
+NATIVE_RESIZE_QUIET_FALLBACK_MS = 80
+NATIVE_RESIZE_HELD_QUIET_MS = 160
 
 
-def _windows_primary_pointer_down() -> bool | None:
-    """Return the physical primary-button state without entering Tk again.
+def _build_native_primary_pointer_reader():
+    """Build a cheap primary-button reader without calling back into Tk.
 
-    Tk 8.6 services Tcl timers synchronously from the Windows interactive
-    move/size loop.  The resize scheduler uses this tiny Win32 query to defer
-    expensive widget geometry until the user releases the window border.  A
-    ``None`` result selects the timestamp-only fallback, which also covers
-    keyboard/programmatic resizes and restricted runtimes.
+    Both APIs are present on the oldest desktop versions supported by this
+    application.  Resolving the native function once keeps the 16 ms release
+    poll effectively free.  Returning ``None`` selects the timestamp fallback
+    for keyboard/programmatic resizes and restricted runtimes.
     """
 
-    if not sys.platform.startswith("win"):
-        return None
     try:
         import ctypes
 
-        user32 = ctypes.windll.user32
-        # SM_SWAPBUTTON is available on every supported Windows version.
-        virtual_key = 0x02 if user32.GetSystemMetrics(23) else 0x01
-        return bool(user32.GetAsyncKeyState(virtual_key) & 0x8000)
+        if sys.platform.startswith("win"):
+            user32 = ctypes.windll.user32
+            get_async_key_state = user32.GetAsyncKeyState
+            get_async_key_state.argtypes = (ctypes.c_int,)
+            get_async_key_state.restype = ctypes.c_short
+            get_system_metrics = user32.GetSystemMetrics
+            get_system_metrics.argtypes = (ctypes.c_int,)
+            get_system_metrics.restype = ctypes.c_int
+            # SM_SWAPBUTTON is available on every supported Windows version.
+            virtual_key = 0x02 if get_system_metrics(23) else 0x01
+            return lambda: bool(get_async_key_state(virtual_key) & 0x8000)
+        if sys.platform == "darwin":
+            application_services = ctypes.CDLL(
+                "/System/Library/Frameworks/"
+                "ApplicationServices.framework/ApplicationServices"
+            )
+            button_state = application_services.CGEventSourceButtonState
+            button_state.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+            button_state.restype = ctypes.c_bool
+            # Combined-session state and button zero represent the physical
+            # primary button used for a normal macOS window-border drag.
+            return lambda: bool(button_state(0, 0))
     except Exception:
-        return None
+        pass
+    return None
 
 
 def _is_excel_or_archive_file(path: Path) -> bool:
@@ -745,16 +761,17 @@ class HRToolkitApp:
         self._window_resize_frame_interval_ms = WINDOW_RESIZE_FRAME_MS
         self._window_resize_layout_frames = 0
         self._window_resize_slow_frames = 0
-        # Tk's Windows toplevel procedure calls Tcl_ServiceAll() from inside
-        # every native sizing message.  Running a full 200+ widget reflow from
-        # that nested loop blocks the non-client mouse handler, which makes the
-        # border feel stuck.  Keep the retained real tree visible and commit
-        # its newest geometry immediately after the primary button is released.
-        # macOS does not have that nested service-loop behaviour and keeps the
-        # existing frame-cadence live layout.
-        self._window_resize_live_layout_enabled = not sys.platform.startswith("win")
+        # Chromium-class desktop apps resize an already-committed compositor
+        # layer instead of reflowing their complete control tree for every
+        # pointer message.  Tk has no compositor thread, so use the closest
+        # safe equivalent on both packaged desktop targets: keep the real,
+        # sharp tree mapped at its last committed size and publish only the
+        # newest geometry after the native border gesture ends.  This removes
+        # the 200+ widget Configure cascade without screenshots or placeholders.
+        retained_resize = sys.platform.startswith("win") or sys.platform == "darwin"
+        self._window_resize_live_layout_enabled = not retained_resize
         self._window_resize_pointer_state_reader = (
-            _windows_primary_pointer_down if sys.platform.startswith("win") else None
+            _build_native_primary_pointer_reader() if retained_resize else None
         )
         self._window_resize_configure_binding = None
         self._window_resize_configure_bindtag = None
@@ -1288,15 +1305,15 @@ class HRToolkitApp:
             pass
 
     def _schedule_live_window_resize_settle(self) -> None:
-        # Do not cancel/recreate a Tcl timer for every Configure event.  On
-        # Windows those calls run in the modal non-client sizing loop itself;
-        # the timer churn alone can make the resize handle fall behind.
+        # Do not cancel/recreate a Tcl timer for every Configure event.  The
+        # timer churn competes with native pointer delivery and can make a
+        # low-spec desktop's resize handle fall behind.
         if getattr(self, "_window_resize_settle_job", None) is not None:
             return
         delay_ms = (
             WINDOW_RESIZE_SETTLE_MS
             if getattr(self, "_window_resize_live_layout_enabled", True)
-            else WINDOWS_RESIZE_RELEASE_POLL_MS
+            else NATIVE_RESIZE_RELEASE_POLL_MS
         )
         try:
             self._window_resize_settle_job = self.root.after(
@@ -1328,17 +1345,17 @@ class HRToolkitApp:
             # sharp responsive layout at that stationary size.  Continuous
             # motion never reaches this threshold, so it cannot block the
             # non-client pointer loop.
-            remaining_held_ms = WINDOWS_RESIZE_HELD_QUIET_MS - quiet_ms
+            remaining_held_ms = NATIVE_RESIZE_HELD_QUIET_MS - quiet_ms
             if remaining_held_ms > 0:
                 return max(
                     1,
-                    min(WINDOWS_RESIZE_RELEASE_POLL_MS, int(round(remaining_held_ms))),
+                    min(NATIVE_RESIZE_RELEASE_POLL_MS, int(round(remaining_held_ms))),
                 )
             return 0
         quiet_target_ms = (
-            WINDOWS_RESIZE_RELEASE_POLL_MS
+            NATIVE_RESIZE_RELEASE_POLL_MS
             if pointer_down is False
-            else WINDOWS_RESIZE_QUIET_FALLBACK_MS
+            else NATIVE_RESIZE_QUIET_FALLBACK_MS
         )
         return max(0, int(round(quiet_target_ms - quiet_ms)))
 
@@ -1429,6 +1446,11 @@ class HRToolkitApp:
     def _flush_live_window_resize(self) -> None:
         """Apply the newest size before a direct page or drawer action."""
 
+        geometry_changed = bool(
+            getattr(self, "_window_resize_active", False)
+            or getattr(self, "_last_root_window_size", None)
+            != getattr(self, "_live_root_frame_size", None)
+        )
         for job_name in (
             "_window_resize_frame_job",
             "_window_resize_settle_job",
@@ -1445,6 +1467,23 @@ class HRToolkitApp:
         self._restore_processing_thread_fairness()
         self._window_resize_pending_size = None
         self._apply_live_window_resize_layout()
+        if geometry_changed:
+            # ``place_configure`` publishes descendant sizes on an idle pass.
+            # A page/drawer action immediately after a resize must observe the
+            # new viewport rather than scheduling its responsive layout from
+            # stale Canvas geometry.  This runs only on an explicit flush, not
+            # inside the native border loop.
+            try:
+                self.root.update_idletasks()
+            except Exception:
+                pass
+            self._apply_live_window_resize_layout()
+            try:
+                update_now = getattr(self, "_update_title_text_wraps_now", None)
+                if update_now is not None:
+                    update_now()
+            except Exception:
+                pass
 
     def _shutdown_live_window_resize(self) -> None:
         self._flush_live_window_resize()
@@ -1907,9 +1946,9 @@ class HRToolkitApp:
 
     def _build_layout(self) -> None:
         # These two childless surfaces cost virtually nothing to resize and
-        # keep newly exposed pixels visually consistent while Windows holds
-        # the complex retained tree at its last sharp size during a border
-        # drag.  The real root frame remains above them at all times.
+        # keep newly exposed pixels visually consistent while the desktop
+        # holds the complex retained tree at its last sharp size during a
+        # border drag.  The real root frame remains above them at all times.
         sidebar_width = self._responsive_sidebar_width()
         self._window_resize_sidebar_backdrop = ttk.Frame(
             self.root,
@@ -12800,7 +12839,7 @@ class HRToolkitApp:
             if self._defer_background_ui_for_native_resize():
                 try:
                     self._log_flush_job = self.root.after(
-                        WINDOWS_RESIZE_RELEASE_POLL_MS,
+                        NATIVE_RESIZE_RELEASE_POLL_MS,
                         self._flush_pending_log_entries,
                     )
                 except Exception:

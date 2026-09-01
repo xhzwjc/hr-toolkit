@@ -65,9 +65,13 @@ def run_benchmark(
             app._window_resize_pointer_state_reader = None
         elif resize_policy == "deferred":
             app._window_resize_live_layout_enabled = False
-            app._window_resize_pointer_state_reader = lambda: pointer_state["down"]
         elif resize_policy != "auto":
             raise ValueError(f"unsupported resize policy: {resize_policy}")
+        if not app._window_resize_live_layout_enabled:
+            # ``geometry()`` does not press a physical mouse button.  Model a
+            # real native border gesture so auto/deferred measurements do not
+            # publish layouts in artificial gaps between scheduled requests.
+            app._window_resize_pointer_state_reader = lambda: pointer_state["down"]
 
         try:
             paths: list[Path] = []
@@ -309,7 +313,7 @@ def main() -> None:
         "--policy",
         choices=("auto", "live", "deferred"),
         default="auto",
-        help="缩放布局策略；deferred 用于在非 Windows 主机复现 Windows 路径。",
+        help="缩放布局策略；deferred 为 Windows/macOS 的保留式控件树路径。",
     )
     parser.add_argument(
         "--status-messages",
