@@ -233,6 +233,32 @@ WINDOW_RESIZE_FRAME_MS = 24
 WINDOW_RESIZE_SETTLE_MS = 100
 WINDOW_RESIZE_SLOW_FRAME_MS = 10.0
 WINDOW_RESIZE_MAX_FRAME_MS = 32
+WINDOWS_RESIZE_RELEASE_POLL_MS = 16
+WINDOWS_RESIZE_QUIET_FALLBACK_MS = 80
+WINDOWS_RESIZE_HELD_QUIET_MS = 160
+
+
+def _windows_primary_pointer_down() -> bool | None:
+    """Return the physical primary-button state without entering Tk again.
+
+    Tk 8.6 services Tcl timers synchronously from the Windows interactive
+    move/size loop.  The resize scheduler uses this tiny Win32 query to defer
+    expensive widget geometry until the user releases the window border.  A
+    ``None`` result selects the timestamp-only fallback, which also covers
+    keyboard/programmatic resizes and restricted runtimes.
+    """
+
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        # SM_SWAPBUTTON is available on every supported Windows version.
+        virtual_key = 0x02 if user32.GetSystemMetrics(23) else 0x01
+        return bool(user32.GetAsyncKeyState(virtual_key) & 0x8000)
+    except Exception:
+        return None
 
 
 def _is_excel_or_archive_file(path: Path) -> bool:
@@ -715,9 +741,21 @@ class HRToolkitApp:
         self._window_resize_finalize_job = None
         self._window_resize_pending_size: tuple[int, int] | None = None
         self._window_resize_last_frame_at = 0.0
+        self._window_resize_last_event_at = 0.0
         self._window_resize_frame_interval_ms = WINDOW_RESIZE_FRAME_MS
         self._window_resize_layout_frames = 0
         self._window_resize_slow_frames = 0
+        # Tk's Windows toplevel procedure calls Tcl_ServiceAll() from inside
+        # every native sizing message.  Running a full 200+ widget reflow from
+        # that nested loop blocks the non-client mouse handler, which makes the
+        # border feel stuck.  Keep the retained real tree visible and commit
+        # its newest geometry immediately after the primary button is released.
+        # macOS does not have that nested service-loop behaviour and keeps the
+        # existing frame-cadence live layout.
+        self._window_resize_live_layout_enabled = not sys.platform.startswith("win")
+        self._window_resize_pointer_state_reader = (
+            _windows_primary_pointer_down if sys.platform.startswith("win") else None
+        )
         self._window_resize_configure_binding = None
         self._window_resize_configure_bindtag = None
         self._window_resize_direct_binding = None
@@ -1167,7 +1205,9 @@ class HRToolkitApp:
             return
 
         self._window_resize_active = True
+        self._prioritize_ui_thread_for_scroll()
         self._window_resize_pending_size = size
+        self._window_resize_last_event_at = time.perf_counter()
         finalize_job = getattr(self, "_window_resize_finalize_job", None)
         if finalize_job is not None:
             try:
@@ -1175,7 +1215,8 @@ class HRToolkitApp:
             except Exception:
                 pass
             self._window_resize_finalize_job = None
-        self._schedule_live_window_resize_frame()
+        if getattr(self, "_window_resize_live_layout_enabled", True):
+            self._schedule_live_window_resize_frame()
         self._schedule_live_window_resize_settle()
 
     def _schedule_live_window_resize_frame(self) -> None:
@@ -1247,22 +1288,80 @@ class HRToolkitApp:
             pass
 
     def _schedule_live_window_resize_settle(self) -> None:
-        settle_job = getattr(self, "_window_resize_settle_job", None)
-        if settle_job is not None:
-            try:
-                self.root.after_cancel(settle_job)
-            except Exception:
-                pass
+        # Do not cancel/recreate a Tcl timer for every Configure event.  On
+        # Windows those calls run in the modal non-client sizing loop itself;
+        # the timer churn alone can make the resize handle fall behind.
+        if getattr(self, "_window_resize_settle_job", None) is not None:
+            return
+        delay_ms = (
+            WINDOW_RESIZE_SETTLE_MS
+            if getattr(self, "_window_resize_live_layout_enabled", True)
+            else WINDOWS_RESIZE_RELEASE_POLL_MS
+        )
         try:
             self._window_resize_settle_job = self.root.after(
-                WINDOW_RESIZE_SETTLE_MS,
+                delay_ms,
                 self._finish_live_window_resize,
             )
         except Exception:
             self._window_resize_settle_job = None
 
+    def _window_resize_remaining_settle_ms(self) -> int:
+        """Return a non-zero delay while a native resize gesture is active."""
+
+        quiet_ms = max(
+            0.0,
+            (time.perf_counter() - self._window_resize_last_event_at) * 1000.0,
+        )
+        if getattr(self, "_window_resize_live_layout_enabled", True):
+            return max(0, int(round(WINDOW_RESIZE_SETTLE_MS - quiet_ms)))
+
+        pointer_down = None
+        reader = getattr(self, "_window_resize_pointer_state_reader", None)
+        if reader is not None:
+            try:
+                pointer_down = reader()
+            except Exception:
+                pointer_down = None
+        if pointer_down is True:
+            # If the user pauses while still holding the border, publish one
+            # sharp responsive layout at that stationary size.  Continuous
+            # motion never reaches this threshold, so it cannot block the
+            # non-client pointer loop.
+            remaining_held_ms = WINDOWS_RESIZE_HELD_QUIET_MS - quiet_ms
+            if remaining_held_ms > 0:
+                return max(
+                    1,
+                    min(WINDOWS_RESIZE_RELEASE_POLL_MS, int(round(remaining_held_ms))),
+                )
+            return 0
+        quiet_target_ms = (
+            WINDOWS_RESIZE_RELEASE_POLL_MS
+            if pointer_down is False
+            else WINDOWS_RESIZE_QUIET_FALLBACK_MS
+        )
+        return max(0, int(round(quiet_target_ms - quiet_ms)))
+
+    def _defer_background_ui_for_native_resize(self) -> bool:
+        """Keep non-critical painting out of Windows' modal sizing loop."""
+
+        return bool(
+            getattr(self, "_window_resize_active", False)
+            and not getattr(self, "_window_resize_live_layout_enabled", True)
+        )
+
     def _finish_live_window_resize(self) -> None:
         self._window_resize_settle_job = None
+        remaining_ms = self._window_resize_remaining_settle_ms()
+        if remaining_ms > 0:
+            try:
+                self._window_resize_settle_job = self.root.after(
+                    max(1, remaining_ms),
+                    self._finish_live_window_resize,
+                )
+            except Exception:
+                self._window_resize_settle_job = None
+            return
         frame_job = getattr(self, "_window_resize_frame_job", None)
         if frame_job is not None:
             try:
@@ -1270,7 +1369,6 @@ class HRToolkitApp:
             except Exception:
                 pass
             self._window_resize_frame_job = None
-        self._window_resize_active = False
         self._window_resize_pending_size = None
         self._apply_live_window_resize_layout()
         try:
@@ -1286,9 +1384,47 @@ class HRToolkitApp:
             return
         self._apply_live_window_resize_layout()
         try:
-            self._update_title_text_wraps()
+            update_now = getattr(self, "_update_title_text_wraps_now", None)
+            if update_now is not None:
+                update_now()
+            else:
+                self._update_title_text_wraps()
         except Exception:
             pass
+        try:
+            self._window_resize_finalize_job = self.root.after(
+                WINDOW_RESIZE_FRAME_MS,
+                self._complete_live_window_resize,
+            )
+        except Exception:
+            self._window_resize_finalize_job = None
+            self._complete_live_window_resize()
+
+    def _complete_live_window_resize(self) -> None:
+        """Publish the settled geometry after Tk has propagated one idle turn."""
+
+        self._window_resize_finalize_job = None
+        if not getattr(self, "_is_alive", True):
+            return
+        self._apply_live_window_resize_layout()
+        try:
+            update_now = getattr(self, "_update_title_text_wraps_now", None)
+            if update_now is not None:
+                update_now()
+        except Exception:
+            pass
+        self._window_resize_active = False
+        self._restore_processing_thread_fairness()
+        if (
+            getattr(self, "_pending_log_entries", None)
+            and getattr(self, "_log_flush_job", None) is None
+        ):
+            try:
+                self._log_flush_job = self.root.after_idle(
+                    self._flush_pending_log_entries
+                )
+            except Exception:
+                self._log_flush_job = None
 
     def _flush_live_window_resize(self) -> None:
         """Apply the newest size before a direct page or drawer action."""
@@ -1306,6 +1442,7 @@ class HRToolkitApp:
                     pass
                 setattr(self, job_name, None)
         self._window_resize_active = False
+        self._restore_processing_thread_fairness()
         self._window_resize_pending_size = None
         self._apply_live_window_resize_layout()
 
@@ -1769,6 +1906,31 @@ class HRToolkitApp:
         )
 
     def _build_layout(self) -> None:
+        # These two childless surfaces cost virtually nothing to resize and
+        # keep newly exposed pixels visually consistent while Windows holds
+        # the complex retained tree at its last sharp size during a border
+        # drag.  The real root frame remains above them at all times.
+        sidebar_width = self._responsive_sidebar_width()
+        self._window_resize_sidebar_backdrop = ttk.Frame(
+            self.root,
+            style="Sidebar.TFrame",
+        )
+        self._window_resize_sidebar_backdrop.place(
+            x=0,
+            y=0,
+            width=sidebar_width,
+            relheight=1.0,
+        )
+        self._window_resize_separator_backdrop = ttk.Frame(
+            self.root,
+            style="Separator.TFrame",
+        )
+        self._window_resize_separator_backdrop.place(
+            x=sidebar_width,
+            y=0,
+            width=self._px(1),
+            relheight=1.0,
+        )
         root_frame = ttk.Frame(self.root, padding=0, style="App.TFrame")
         self._root_frame = root_frame
         initial_width, initial_height = self._initial_window_size
@@ -1778,6 +1940,7 @@ class HRToolkitApp:
         # drags a corner; the real tree follows at the display-frame cadence
         # instead of cascading through every child for every OS message.
         root_frame.place(x=0, y=0, width=initial_width, height=initial_height)
+        root_frame.lift()
 
         def _clear_entry_focus(event) -> None:
             # 点击输入框以外的地方时收起光标（可编辑控件自己会接管焦点）
@@ -2544,6 +2707,7 @@ class HRToolkitApp:
                 self._title_wrap_job = None
 
         self._update_title_text_wraps = _schedule_title_text_wraps
+        self._update_title_text_wraps_now = _update_text_wraps
         title_row.bind("<Configure>", _schedule_title_text_wraps, add="+")
         right_frame.bind("<Configure>", _schedule_title_text_wraps, add="+")
         self.root.after_idle(_update_text_wraps)
@@ -5409,6 +5573,9 @@ class HRToolkitApp:
             return progress_store.get(token)
 
     def _poll_workspace_queue(self) -> None:
+        if self._defer_background_ui_for_native_resize():
+            self.root.after(180, self._poll_workspace_queue)
+            return
         progress_store = getattr(self, "_workspace_write_progress", {})
         progress_lock = getattr(self, "_workspace_write_progress_lock", None)
         if progress_lock is None:
@@ -7524,6 +7691,9 @@ class HRToolkitApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll_history_queue(self) -> None:
+        if self._defer_background_ui_for_native_resize():
+            self.root.after(200, self._poll_history_queue)
+            return
         try:
             while True:
                 status, payload = self.history_queue.get_nowait()
@@ -7701,6 +7871,15 @@ class HRToolkitApp:
             if not self.root.winfo_exists():
                 return
         except Exception:
+            return
+        if self._defer_background_ui_for_native_resize():
+            try:
+                self._poll_update_timer = self.root.after(
+                    150,
+                    self._poll_update_queue,
+                )
+            except Exception:
+                self._poll_update_timer = None
             return
         try:
             while True:
@@ -12217,6 +12396,9 @@ class HRToolkitApp:
             raise
 
     def _poll_status_queue(self) -> None:
+        if self._defer_background_ui_for_native_resize():
+            self.root.after(150, self._poll_status_queue)
+            return
         try:
             while True:
                 status, token, payload = self.status_queue.get_nowait()
@@ -12590,7 +12772,10 @@ class HRToolkitApp:
             pending = deque()
             self._pending_log_entries = pending
         pending.append((text, tag, dot_tag, timestamp))
-        if getattr(self, "_scroll_active", False):
+        if (
+            getattr(self, "_scroll_active", False)
+            or self._defer_background_ui_for_native_resize()
+        ):
             return
         if getattr(self, "_log_flush_job", None) is None:
             try:
@@ -12605,7 +12790,21 @@ class HRToolkitApp:
         if not getattr(self, "_is_alive", True):
             getattr(self, "_pending_log_entries", []).clear()
             return
-        if getattr(self, "_scroll_active", False) and not force:
+        if (
+            not force
+            and (
+                getattr(self, "_scroll_active", False)
+                or self._defer_background_ui_for_native_resize()
+            )
+        ):
+            if self._defer_background_ui_for_native_resize():
+                try:
+                    self._log_flush_job = self.root.after(
+                        WINDOWS_RESIZE_RELEASE_POLL_MS,
+                        self._flush_pending_log_entries,
+                    )
+                except Exception:
+                    self._log_flush_job = None
             return
         pending = getattr(self, "_pending_log_entries", [])
         if not pending:

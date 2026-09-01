@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import sys
 import tempfile
 import time
@@ -209,6 +210,45 @@ class GuiPerformanceTests(unittest.TestCase):
         app._flush_pending_log_entries()
         self.assertEqual(len(app._pending_log_entries), 0)
         self.assertGreater(app.log_text.insert.call_count, 0)
+
+    def test_log_paint_is_deferred_during_windows_native_resize(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app._is_alive = True
+        app._scroll_active = False
+        app._window_resize_active = True
+        app._window_resize_live_layout_enabled = False
+        app._pending_log_entries = deque()
+        app._log_flush_job = None
+        app.root = Mock()
+        app.root.after.return_value = "resize-log-job"
+        app.log_text = Mock()
+        app.log_text.winfo_exists.return_value = True
+
+        app._write_log("正在处理第 1 条")
+
+        self.assertEqual(len(app._pending_log_entries), 1)
+        app.root.after_idle.assert_not_called()
+        app._flush_pending_log_entries()
+        app.log_text.insert.assert_not_called()
+        self.assertEqual(app._log_flush_job, "resize-log-job")
+
+        app._window_resize_active = False
+        app._flush_pending_log_entries()
+        self.assertEqual(len(app._pending_log_entries), 0)
+        self.assertGreater(app.log_text.insert.call_count, 0)
+
+    def test_worker_status_queue_is_not_drained_inside_windows_resize_loop(self) -> None:
+        app = HRToolkitApp.__new__(HRToolkitApp)
+        app._window_resize_active = True
+        app._window_resize_live_layout_enabled = False
+        app.status_queue = queue.Queue()
+        app.status_queue.put(("progress", 1, "处理中"))
+        app.root = Mock()
+
+        app._poll_status_queue()
+
+        self.assertEqual(app.status_queue.qsize(), 1)
+        app.root.after.assert_called_once_with(150, app._poll_status_queue)
 
     def test_smooth_wheel_scroller_animates_then_reaches_exact_target(self) -> None:
         root = Mock()
@@ -883,6 +923,10 @@ class GuiPerformanceTests(unittest.TestCase):
             self.root.minsize(1, 1)
             app._dismiss_startup_loading_screen()
             self.root.update()
+            # Exercise the frame-cadence path explicitly on every CI platform.
+            # Windows production uses the separate deferred native-drag path
+            # covered below.
+            app._window_resize_live_layout_enabled = True
             initial_children = tuple(app._root_frame.winfo_children())
             initial_frames = app._window_resize_layout_frames
 
@@ -927,6 +971,7 @@ class GuiPerformanceTests(unittest.TestCase):
             app = HRToolkitApp(self.root)
             app._dismiss_startup_loading_screen()
             self.root.update()
+            app._window_resize_live_layout_enabled = True
             original_size = app._last_root_window_size
 
             first = SimpleNamespace(
@@ -956,6 +1001,68 @@ class GuiPerformanceTests(unittest.TestCase):
                 app._live_root_frame_size,
                 (second.width, second.height),
             )
+        finally:
+            if app is not None:
+                app.destroy()
+
+    def test_windows_resize_defers_tree_reflow_until_border_release(self) -> None:
+        app = None
+        try:
+            app = HRToolkitApp(self.root)
+            app._dismiss_startup_loading_screen()
+            self.root.update()
+            initial_size = app._live_root_frame_size
+            pointer_state = {"down": True}
+            app._window_resize_live_layout_enabled = False
+            app._window_resize_pointer_state_reader = lambda: pointer_state["down"]
+
+            first = SimpleNamespace(
+                widget=self.root,
+                width=initial_size[0] - 30,
+                height=initial_size[1] - 20,
+            )
+            second = SimpleNamespace(
+                widget=self.root,
+                width=initial_size[0] - 70,
+                height=initial_size[1] - 40,
+            )
+            app._on_live_window_configure(first)
+            scheduled_settle = app._window_resize_settle_job
+            app._on_live_window_configure(second)
+
+            self.assertIsNotNone(scheduled_settle)
+            self.assertEqual(app._window_resize_settle_job, scheduled_settle)
+            self.assertIsNone(app._window_resize_frame_job)
+            self.assertEqual(app._live_root_frame_size, initial_size)
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+
+            self.root.after_cancel(scheduled_settle)
+            app._window_resize_settle_job = None
+            app._finish_live_window_resize()
+            self.assertTrue(app._window_resize_active)
+            self.assertEqual(app._live_root_frame_size, initial_size)
+            self.assertIsNotNone(app._window_resize_settle_job)
+
+            self.root.after_cancel(app._window_resize_settle_job)
+            app._window_resize_settle_job = None
+            pointer_state["down"] = False
+            app._window_resize_last_event_at -= 1.0
+            app._finish_live_window_resize()
+
+            self.assertTrue(app._window_resize_active)
+            self.root.after_cancel(app._window_resize_finalize_job)
+            app._window_resize_finalize_job = None
+            app._finalize_live_window_resize()
+            self.root.after_cancel(app._window_resize_finalize_job)
+            app._window_resize_finalize_job = None
+            app._complete_live_window_resize()
+
+            self.assertFalse(app._window_resize_active)
+            self.assertEqual(
+                app._live_root_frame_size,
+                (second.width, second.height),
+            )
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
         finally:
             if app is not None:
                 app.destroy()
