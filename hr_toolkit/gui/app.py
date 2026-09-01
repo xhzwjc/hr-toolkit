@@ -231,6 +231,8 @@ UI_SCROLL_SWITCH_INTERVAL_SECONDS = 0.0001
 SCROLL_SETTLE_MS = 140
 WINDOW_RESIZE_FRAME_MS = 16
 WINDOW_RESIZE_SETTLE_MS = 100
+WINDOW_RESIZE_SNAPSHOT_DELAY_MS = 800
+WINDOW_RESIZE_RENDER_BUDGET_MS = 10.0
 
 
 def _is_excel_or_archive_file(path: Path) -> bool:
@@ -699,7 +701,7 @@ class HRToolkitApp:
             runlog.log_exception("历史资料库初始化失败", exc)
 
         self._is_alive = True
-        self._window_resize_optimizations_ready = True
+        self._window_resize_optimizations_ready = False
         self._poll_update_timer = None
         self._startup_check_timer = None
         self._title_wrap_job = None
@@ -708,9 +710,35 @@ class HRToolkitApp:
         self._workspace_area_resize_job = None
         self._window_resize_active = False
         self._window_resize_restoring = False
+        self._window_resize_settle_job = None
+        self._window_resize_render_job = None
+        self._window_resize_restore_job = None
+        self._window_resize_reveal_job = None
+        self._window_resize_pointer_poll_job = None
         self._window_resize_native_drag = False
         self._window_resize_pointer_state_reader = None
-        self._window_resize_overlay = None
+        self._window_resize_snapshot_job = None
+        self._window_resize_snapshot_poll_job = None
+        self._window_resize_snapshot_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
+        self._window_resize_snapshot_inflight = False
+        self._window_resize_snapshot_dirty = False
+        # macOS screen capture launches a permission-gated helper process and
+        # can steal a frame from scrolling on weaker machines.  The vector
+        # preview is deterministic and cheaper there; Windows keeps the cached
+        # client bitmap path where ImageGrab is an in-process GDI operation.
+        self._window_resize_snapshot_supported = sys.platform != "darwin"
+        self._window_resize_snapshot_generation = 0
+        self._window_resize_snapshot_image = None
+        self._window_resize_snapshot_photo = None
+        self._window_resize_overlay_photo = None
+        self._window_resize_overlay_target_size = (0, 0)
+        self._window_resize_overlay_rendered_size = (0, 0)
+        self._window_resize_fast_resample = False
+        self._window_resize_overlay_frames = 0
+        self._window_resize_overlay_activations = 0
+        self._window_resize_configure_binding = None
+        self._window_resize_configure_bindtag = None
+        self._window_resize_restore_focus = None
 
         try:
             tk_scaling = float(self.root.tk.call("tk", "scaling"))
@@ -728,6 +756,7 @@ class HRToolkitApp:
         self._configure_style()
         self._set_tool_texts()
         self._build_layout()
+        self._install_window_resize_compositor()
         if self._loading_overlay is not None:
             try:
                 self._loading_overlay.lift()
@@ -1067,14 +1096,702 @@ class HRToolkitApp:
             overlay.destroy()
         except Exception:
             pass
-    def _shutdown_window_resize_compositor(self) -> None:
-        pass
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
+
+    def _install_window_resize_compositor(self) -> None:
+        """Keep Tk's native child-window tree out of live resize messages.
+
+        A complex Tk form is made from many native child windows.  On Windows,
+        moving a top-level border normally sends a Configure/repaint cascade to
+        every one of them, even when Python-level layout work is debounced.  A
+        single Canvas preview is therefore shown for the short native resize
+        gesture; the real tree is laid out once beneath it when the gesture
+        settles.  This is intentionally a presentation-only optimization: no
+        widget state or business data is copied into the preview.
+        """
+
+        if not hasattr(self, "_root_frame"):
+            return
+        overlay = Canvas(
+            self.root,
+            bg=COLOR_BG,
+            highlightthickness=0,
+            bd=0,
+            takefocus=False,
+        )
+        self._window_resize_overlay = overlay
+        self._window_resize_overlay_image_item = overlay.create_image(
+            0,
+            0,
+            anchor="nw",
+            state="hidden",
+        )
+        # A deterministic, low-cost fallback is retained for desktops where
+        # screen capture is unavailable or denied (notably macOS permissions).
+        self._window_resize_fallback_items = (
+            overlay.create_rectangle(0, 0, 1, 1, fill=COLOR_SIDEBAR, outline="", state="hidden"),
+            overlay.create_rectangle(0, 0, 1, 1, fill=COLOR_SURFACE, outline="", state="hidden"),
+            overlay.create_rectangle(0, 0, 1, 1, fill=COLOR_PRIMARY_SOFT, outline="", state="hidden"),
+            overlay.create_rectangle(0, 0, 1, 1, fill=COLOR_SURFACE_ALT, outline="", state="hidden"),
+            overlay.create_rectangle(0, 0, 1, 1, fill=COLOR_SURFACE_ALT, outline="", state="hidden"),
+        )
+        overlay.place_forget()
+        bindtag = None
+        try:
+            self._last_root_window_size = (
+                max(self.root.winfo_width(), 1),
+                max(self.root.winfo_height(), 1),
+            )
+            bindtag = f"HRToolkitWindowResize-{id(self):x}"
+            self._window_resize_configure_bindtag = bindtag
+            self._window_resize_configure_binding = self.root.bind_class(
+                bindtag,
+                "<Configure>",
+                self._on_root_window_configure,
+                add="+",
+            )
+            self.root.bindtags((bindtag, *self.root.bindtags()))
+        except Exception:
+            # The class callback is registered before the tag is added to the
+            # root.  If either operation only partially succeeds, remove both
+            # pieces so a failed compositor cannot leave a Tcl command behind.
+            if bindtag is not None:
+                try:
+                    self.root.bindtags(
+                        tuple(tag for tag in self.root.bindtags() if tag != bindtag)
+                    )
+                    self.root.unbind_class(bindtag, "<Configure>")
+                except Exception:
+                    pass
+            self._window_resize_configure_binding = None
+            self._window_resize_configure_bindtag = None
+
+    def _schedule_window_resize_snapshot_refresh(self, *, delay_ms: int = 220) -> None:
+        """Debounce a non-blocking capture of the stable client area."""
+
+        if (
+            not getattr(self, "_is_alive", True)
+            or not getattr(self, "_window_resize_snapshot_supported", True)
+            or getattr(self, "_window_resize_active", False)
+            or getattr(self, "_loading_overlay", None) is not None
+        ):
+            return
+        job = getattr(self, "_window_resize_snapshot_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        try:
+            self._window_resize_snapshot_job = self.root.after(
+                max(0, int(delay_ms)),
+                self._request_window_resize_snapshot,
+            )
+        except Exception:
+            self._window_resize_snapshot_job = None
+
+    def _request_window_resize_snapshot(self) -> None:
+        self._window_resize_snapshot_job = None
+        if (
+            not getattr(self, "_is_alive", True)
+            or not getattr(self, "_window_resize_snapshot_supported", True)
+            or getattr(self, "_window_resize_active", False)
+        ):
+            return
+        if getattr(self, "_window_resize_snapshot_inflight", False):
+            self._window_resize_snapshot_dirty = True
+            return
+        try:
+            if not self.root.winfo_viewable():
+                return
+            width = max(int(self.root.winfo_width()), 1)
+            height = max(int(self.root.winfo_height()), 1)
+            left = int(self.root.winfo_rootx())
+            top = int(self.root.winfo_rooty())
+        except Exception:
+            return
+        if width <= 1 or height <= 1:
+            return
+
+        self._window_resize_snapshot_generation += 1
+        generation = self._window_resize_snapshot_generation
+        expected_size = (width, height)
+        bbox = (left, top, left + width, top + height)
+        self._window_resize_snapshot_inflight = True
+        self._window_resize_snapshot_dirty = False
+
+        def _capture() -> None:
+            try:
+                from PIL import ImageGrab
+
+                image = ImageGrab.grab(bbox=bbox)
+                if image.size != expected_size:
+                    image = image.resize(expected_size)
+                if image.mode not in {"RGB", "RGBA"}:
+                    image = image.convert("RGB")
+                # A denied capture can produce a uniform black bitmap without
+                # raising.  The real UI always contains several surface colors.
+                probe = image.resize((8, 8))
+                extrema = probe.convert("RGB").getextrema()
+                if all(low == high for low, high in extrema):
+                    raise RuntimeError("window capture returned a uniform image")
+                result: tuple[object, ...] = (
+                    generation,
+                    expected_size,
+                    image,
+                    None,
+                )
+            except Exception as exc:
+                result = (generation, expected_size, None, str(exc))
+            self._window_resize_snapshot_queue.put(result)
+
+        threading.Thread(
+            target=_capture,
+            name="hr-toolkit-resize-snapshot",
+            daemon=True,
+        ).start()
+        self._poll_window_resize_snapshot()
+
+    def _poll_window_resize_snapshot(self) -> None:
+        self._window_resize_snapshot_poll_job = None
+        if not getattr(self, "_is_alive", True):
+            return
+        result = None
+        while True:
+            try:
+                result = self._window_resize_snapshot_queue.get_nowait()
+            except queue.Empty:
+                break
+        if result is None:
+            if getattr(self, "_window_resize_snapshot_inflight", False):
+                try:
+                    self._window_resize_snapshot_poll_job = self.root.after(
+                        WINDOW_RESIZE_FRAME_MS,
+                        self._poll_window_resize_snapshot,
+                    )
+                except Exception:
+                    self._window_resize_snapshot_poll_job = None
+            return
+
+        generation, expected_size, image, error = result
+        self._window_resize_snapshot_inflight = False
+        current_size = None
+        try:
+            current_size = (self.root.winfo_width(), self.root.winfo_height())
+        except Exception:
+            pass
+        if (
+            generation == self._window_resize_snapshot_generation
+            and image is not None
+            and not self._window_resize_active
+            and current_size == expected_size
+        ):
+            try:
+                from PIL import ImageTk
+
+                self._window_resize_snapshot_image = image
+                self._window_resize_snapshot_photo = ImageTk.PhotoImage(
+                    image,
+                    master=self.root,
+                )
+            except Exception:
+                self._window_resize_snapshot_image = None
+                self._window_resize_snapshot_photo = None
+                self._window_resize_snapshot_supported = False
+        elif error is not None:
+            # Keep the lightweight fallback for this session. Repeated capture
+            # attempts would only waste CPU on a desktop that denied access.
+            self._window_resize_snapshot_supported = False
+        else:
+            self._window_resize_snapshot_dirty = True
+
+        if self._window_resize_snapshot_dirty:
+            self._schedule_window_resize_snapshot_refresh(delay_ms=220)
+
+    def _on_root_window_configure(self, event) -> None:
+        if getattr(event, "widget", None) is not self.root:
+            return
+        size = (
+            max(int(getattr(event, "width", 1)), 1),
+            max(int(getattr(event, "height", 1)), 1),
+        )
+        if size == getattr(self, "_last_root_window_size", None):
+            return
+        self._last_root_window_size = size
+        if (
+            not getattr(self, "_is_alive", True)
+            or not getattr(self, "_window_resize_optimizations_ready", False)
+            or size[0] <= 1
+            or size[1] <= 1
+        ):
+            return
+
+        if getattr(self, "_window_resize_restoring", False):
+            self._resume_window_resize_composite()
+        elif not getattr(self, "_window_resize_active", False):
+            self._begin_window_resize_composite()
+        self._window_resize_overlay_target_size = size
+        self._schedule_window_resize_overlay_render()
+        if not self._window_resize_native_drag:
+            pointer_down = self._primary_pointer_button_down()
+            if pointer_down:
+                self._window_resize_native_drag = True
+                self._schedule_window_resize_pointer_poll()
+        if self._window_resize_native_drag:
+            # A user can hold a corner still while deciding on the final size.
+            # Never remap the expensive native widget tree during that pause;
+            # the platform button-state poll gives us the precise release.
+            self._cancel_window_resize_settle()
+        else:
+            # Programmatic geometry changes and platforms without a reliable
+            # button-state API retain the short inactivity fallback.
+            self._schedule_window_resize_settle()
+
+    def _cancel_window_resize_settle(self) -> None:
+        settle_job = getattr(self, "_window_resize_settle_job", None)
+        self._window_resize_settle_job = None
+        if settle_job is not None:
+            try:
+                self.root.after_cancel(settle_job)
+            except Exception:
+                pass
+
+    def _schedule_window_resize_settle(self) -> None:
+        self._cancel_window_resize_settle()
+        try:
+            self._window_resize_settle_job = self.root.after(
+                WINDOW_RESIZE_SETTLE_MS,
+                self._finish_window_resize_composite,
+            )
+        except Exception:
+            self._window_resize_settle_job = None
+
+    def _begin_window_resize_composite(self) -> None:
+        overlay = getattr(self, "_window_resize_overlay", None)
+        root_frame = getattr(self, "_root_frame", None)
+        if overlay is None or root_frame is None:
+            return
+        self._window_resize_active = True
+        self._window_resize_restoring = False
+        self._window_resize_fast_resample = False
+        self._window_resize_overlay_rendered_size = (0, 0)
+        self._window_resize_overlay_activations += 1
+        try:
+            focused = self.root.focus_get()
+            root_frame_path = str(root_frame)
+            if focused is not None and str(focused).startswith(root_frame_path + "."):
+                self._window_resize_restore_focus = focused
+            else:
+                self._window_resize_restore_focus = None
+        except Exception:
+            self._window_resize_restore_focus = None
+        pointer_down = self._primary_pointer_button_down()
+        self._window_resize_native_drag = bool(pointer_down)
+        self._show_window_resize_preview()
+        try:
+            overlay.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+            # Canvas overrides both lift/tkraise for canvas *items*. Invoke
+            # Tk's window-stacking command directly for the widget itself.
+            overlay.tk.call("raise", overlay._w)
+            root_frame.pack_forget()
+            if self._window_resize_native_drag:
+                self._schedule_window_resize_pointer_poll()
+        except Exception:
+            self._window_resize_active = False
+            self._window_resize_native_drag = False
+            self._window_resize_restore_focus = None
+            try:
+                overlay.place_forget()
+                if root_frame.winfo_manager() != "pack":
+                    root_frame.pack(fill=BOTH, expand=True)
+            except Exception:
+                pass
+
+    def _primary_pointer_button_down(self) -> bool | None:
+        reader = self._window_resize_pointer_state_reader
+        if reader is False:
+            return None
+        if reader is None:
+            try:
+                import ctypes
+
+                if sys.platform.startswith("win"):
+                    user32 = ctypes.windll.user32
+                    get_async_key_state = user32.GetAsyncKeyState
+                    get_async_key_state.argtypes = (ctypes.c_int,)
+                    get_async_key_state.restype = ctypes.c_short
+                    get_system_metrics = user32.GetSystemMetrics
+                    get_system_metrics.argtypes = (ctypes.c_int,)
+                    get_system_metrics.restype = ctypes.c_int
+                    # SM_SWAPBUTTON is present on every supported Windows
+                    # release, including Windows 7.  Respecting it keeps the
+                    # release path exact for left-handed mouse configurations.
+                    primary_button = 0x02 if get_system_metrics(23) else 0x01
+                    reader = lambda: bool(
+                        get_async_key_state(primary_button) & 0x8000
+                    )
+                elif sys.platform == "darwin":
+                    quartz = ctypes.CDLL(
+                        "/System/Library/Frameworks/"
+                        "ApplicationServices.framework/ApplicationServices"
+                    )
+                    button_state = quartz.CGEventSourceButtonState
+                    button_state.argtypes = (ctypes.c_uint32, ctypes.c_uint32)
+                    button_state.restype = ctypes.c_bool
+                    reader = lambda: bool(button_state(0, 0))
+                else:
+                    self._window_resize_pointer_state_reader = False
+                    return None
+                self._window_resize_pointer_state_reader = reader
+            except Exception:
+                self._window_resize_pointer_state_reader = False
+                return None
+        try:
+            return bool(reader())
+        except Exception:
+            self._window_resize_pointer_state_reader = False
+            return None
+
+    def _schedule_window_resize_pointer_poll(self) -> None:
+        if getattr(self, "_window_resize_pointer_poll_job", None) is not None:
+            return
+        try:
+            self._window_resize_pointer_poll_job = self.root.after(
+                WINDOW_RESIZE_FRAME_MS,
+                self._poll_window_resize_pointer,
+            )
+        except Exception:
+            self._window_resize_pointer_poll_job = None
+
+    def _poll_window_resize_pointer(self) -> None:
+        self._window_resize_pointer_poll_job = None
+        if (
+            not getattr(self, "_window_resize_active", False)
+            or not getattr(self, "_window_resize_native_drag", False)
+        ):
+            return
+        pointer_down = self._primary_pointer_button_down()
+        if pointer_down is False:
+            self._finish_window_resize_composite()
+            return
+        if pointer_down is None:
+            self._window_resize_native_drag = False
+            self._schedule_window_resize_settle()
+            return
+        self._schedule_window_resize_pointer_poll()
+
+    def _resume_window_resize_composite(self) -> None:
+        for job_name in ("_window_resize_restore_job", "_window_resize_reveal_job"):
+            job = getattr(self, job_name, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_name, None)
+        self._window_resize_restoring = False
+        try:
+            self._root_frame.pack_forget()
+            overlay = self._window_resize_overlay
+            overlay.tk.call("raise", overlay._w)
+        except Exception:
+            pass
+
+    def _show_window_resize_preview(self) -> None:
+        overlay = self._window_resize_overlay
+        photo = getattr(self, "_window_resize_snapshot_photo", None)
+        if photo is not None:
+            self._window_resize_overlay_photo = photo
+            overlay.itemconfigure(
+                self._window_resize_overlay_image_item,
+                image=photo,
+                state="normal",
+            )
+            for item in self._window_resize_fallback_items:
+                overlay.itemconfigure(item, state="hidden")
+        else:
+            overlay.itemconfigure(
+                self._window_resize_overlay_image_item,
+                image="",
+                state="hidden",
+            )
+            for item in self._window_resize_fallback_items:
+                overlay.itemconfigure(item, state="normal")
+
+    def _schedule_window_resize_overlay_render(self) -> None:
+        if getattr(self, "_window_resize_render_job", None) is not None:
+            return
+        try:
+            # Coalesce all native size messages already queued for this turn,
+            # then render immediately. A fixed 16 ms delay here would combine
+            # with the OS's own 16 ms cadence and cap the preview near 30 fps.
+            self._window_resize_render_job = self.root.after_idle(
+                self._render_window_resize_overlay,
+            )
+        except Exception:
+            self._window_resize_render_job = None
+
+    def _render_window_resize_overlay(self) -> None:
+        self._window_resize_render_job = None
+        if not getattr(self, "_window_resize_active", False):
+            return
+        width, height = self._window_resize_overlay_target_size
+        if width <= 1 or height <= 1:
+            return
+        if (width, height) == self._window_resize_overlay_rendered_size:
+            return
+        self._window_resize_overlay_rendered_size = (width, height)
+        image = getattr(self, "_window_resize_snapshot_image", None)
+        if image is None:
+            self._render_window_resize_fallback(width, height)
+            self._window_resize_overlay_frames += 1
+            return
+
+        started_at = time.perf_counter()
+        try:
+            from PIL import Image, ImageTk
+
+            resampling = getattr(Image, "Resampling", Image)
+            method = (
+                resampling.NEAREST
+                if self._window_resize_fast_resample
+                else resampling.BILINEAR
+            )
+            frame = image.resize((width, height), method)
+            photo = ImageTk.PhotoImage(frame, master=self.root)
+            self._window_resize_overlay.itemconfigure(
+                self._window_resize_overlay_image_item,
+                image=photo,
+                state="normal",
+            )
+            self._window_resize_overlay_photo = photo
+            self._window_resize_overlay_frames += 1
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+            if elapsed_ms > WINDOW_RESIZE_RENDER_BUDGET_MS:
+                # On low-end hardware, preserve pointer cadence over filtering
+                # quality. The final real controls are always rendered normally.
+                self._window_resize_fast_resample = True
+        except Exception:
+            self._window_resize_snapshot_image = None
+            self._window_resize_snapshot_photo = None
+            self._show_window_resize_preview()
+            self._render_window_resize_fallback(width, height)
+
+    def _render_window_resize_fallback(self, width: int, height: int) -> None:
+        sidebar, main_card, accent, lower_left, lower_right = self._window_resize_fallback_items
+        sidebar_width = min(max(self._responsive_sidebar_width(), 150), max(width // 3, 150))
+        content_left = sidebar_width + self._px(28)
+        content_right = max(content_left + 1, width - self._px(28))
+        top = self._px(34)
+        split = content_left + max(1, (content_right - content_left - self._px(14)) // 2)
+        self._window_resize_overlay.coords(sidebar, 0, 0, sidebar_width, height)
+        self._window_resize_overlay.coords(main_card, content_left, top, content_right, min(height - self._px(24), top + self._px(170)))
+        self._window_resize_overlay.coords(accent, self._px(18), self._px(26), max(self._px(80), sidebar_width - self._px(18)), self._px(58))
+        lower_top = min(height - self._px(18), top + self._px(190))
+        self._window_resize_overlay.coords(lower_left, content_left, lower_top, split, max(lower_top + 1, height - self._px(28)))
+        self._window_resize_overlay.coords(lower_right, split + self._px(14), lower_top, content_right, max(lower_top + 1, height - self._px(28)))
+
+    def _finish_window_resize_composite(self) -> None:
+        self._cancel_window_resize_settle()
+        if not getattr(self, "_window_resize_active", False):
+            return
+        pointer_job = getattr(self, "_window_resize_pointer_poll_job", None)
+        if pointer_job is not None:
+            try:
+                self.root.after_cancel(pointer_job)
+            except Exception:
+                pass
+            self._window_resize_pointer_poll_job = None
+        self._window_resize_native_drag = False
+        render_job = getattr(self, "_window_resize_render_job", None)
+        if render_job is not None:
+            try:
+                self.root.after_cancel(render_job)
+            except Exception:
+                pass
+            self._window_resize_render_job = None
+        self._window_resize_restoring = True
+        try:
+            self._root_frame.pack(fill=BOTH, expand=True)
+            overlay = self._window_resize_overlay
+            overlay.tk.call("raise", overlay._w)
+            self._window_resize_restore_job = self.root.after_idle(
+                self._settle_window_resize_layout,
+            )
+        except Exception:
+            self._reveal_window_after_resize()
+
+    def _settle_window_resize_layout(self) -> None:
+        self._window_resize_restore_job = None
+        if not self._window_resize_restoring or not getattr(self, "_is_alive", True):
+            return
+        try:
+            self._on_workspace_area_resize()
+            self._update_form_responsive_layout()
+        except Exception:
+            pass
+        try:
+            # Let pack/grid publish their final requested sizes before syncing
+            # the embedded Canvas window.  Revealing on the same idle turn can
+            # otherwise expose the previous height for one frame.
+            self._window_resize_restore_job = self.root.after_idle(
+                self._finalize_window_resize_layout,
+            )
+        except Exception:
+            self._reveal_window_after_resize()
+
+    def _finalize_window_resize_layout(self) -> None:
+        self._window_resize_restore_job = None
+        if not self._window_resize_restoring or not getattr(self, "_is_alive", True):
+            return
+        try:
+            # The first idle turn maps the packed tree; only now do Canvas and
+            # workspace report their final widths. Re-evaluate breakpoints at
+            # this point so the preview is never removed onto a stale layout.
+            self._on_workspace_area_resize()
+            self._update_form_responsive_layout()
+            self._sync_right_canvas_window_now()
+        except Exception:
+            pass
+        try:
+            self._window_resize_restore_job = self.root.after(
+                WINDOW_RESIZE_FRAME_MS,
+                self._complete_window_resize_layout,
+            )
+        except Exception:
+            self._reveal_window_after_resize()
+
+    def _complete_window_resize_layout(self) -> None:
+        self._window_resize_restore_job = None
+        if not self._window_resize_restoring or not getattr(self, "_is_alive", True):
+            return
+        try:
+            # Setting the embedded Canvas width can itself change the form's
+            # requested height. Measure once on the following frame so the
+            # scrollbar/scrollregion cannot retain that intermediate height.
+            self._on_workspace_area_resize()
+            self._update_form_responsive_layout()
+            self._sync_right_canvas_window_now()
+        except Exception:
+            pass
+        try:
+            self._window_resize_reveal_job = self.root.after_idle(
+                self._reveal_window_after_resize,
+            )
+        except Exception:
+            self._reveal_window_after_resize()
+
+    def _reveal_window_after_resize(self) -> None:
+        self._window_resize_reveal_job = None
+        try:
+            self._window_resize_overlay.place_forget()
+        except Exception:
+            pass
+        self._window_resize_active = False
+        self._window_resize_restoring = False
+        self._window_resize_native_drag = False
+        self._window_resize_overlay_photo = None
+        self._restore_focus_after_window_resize()
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
+
+    def _restore_focus_after_window_resize(self) -> None:
+        focused = self._window_resize_restore_focus
+        self._window_resize_restore_focus = None
+        if focused is None:
+            return
+        try:
+            if focused.winfo_exists() and focused.winfo_viewable():
+                focused.focus_set()
+        except Exception:
+            pass
 
     def _flush_window_resize_composite(self) -> None:
-        pass
+        """Finish a pending resize immediately before a direct UI action."""
 
-    def _schedule_window_resize_snapshot_refresh(self, *args, **kwargs) -> None:
-        pass
+        if not getattr(self, "_window_resize_active", False):
+            return
+        for job_name in (
+            "_window_resize_settle_job",
+            "_window_resize_render_job",
+            "_window_resize_restore_job",
+            "_window_resize_reveal_job",
+            "_window_resize_pointer_poll_job",
+        ):
+            job = getattr(self, job_name, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_name, None)
+        # Mark the gesture complete before mapping the tree so any incidental
+        # Configure notifications cannot hide it again re-entrantly.
+        self._window_resize_active = False
+        self._window_resize_restoring = False
+        self._window_resize_native_drag = False
+        try:
+            if self._root_frame.winfo_manager() != "pack":
+                self._root_frame.pack(fill=BOTH, expand=True)
+            self.root.update_idletasks()
+            self._on_workspace_area_resize()
+            self._update_form_responsive_layout()
+            self.root.update_idletasks()
+            self._sync_right_canvas_window_now()
+            self._window_resize_overlay.place_forget()
+        except Exception:
+            pass
+        self._window_resize_overlay_photo = None
+        self._restore_focus_after_window_resize()
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
+
+    def _shutdown_window_resize_compositor(self) -> None:
+        self._window_resize_snapshot_generation += 1
+        for job_name in (
+            "_window_resize_settle_job",
+            "_window_resize_render_job",
+            "_window_resize_restore_job",
+            "_window_resize_reveal_job",
+            "_window_resize_pointer_poll_job",
+            "_window_resize_snapshot_job",
+            "_window_resize_snapshot_poll_job",
+        ):
+            job = getattr(self, job_name, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, job_name, None)
+        bindtag = getattr(self, "_window_resize_configure_bindtag", None)
+        if bindtag is not None:
+            try:
+                self.root.bindtags(tuple(
+                    tag for tag in self.root.bindtags() if tag != bindtag
+                ))
+                self.root.unbind_class(bindtag, "<Configure>")
+            except Exception:
+                pass
+            self._window_resize_configure_binding = None
+            self._window_resize_configure_bindtag = None
+        overlay = getattr(self, "_window_resize_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
+        self._window_resize_active = False
+        self._window_resize_restoring = False
+        self._window_resize_native_drag = False
+        self._window_resize_snapshot_image = None
+        self._window_resize_snapshot_photo = None
+        self._window_resize_overlay_photo = None
+        self._window_resize_restore_focus = None
 
     def _px(self, value: int | float) -> int:
         return _scale_px(value, self.ui_scale)
@@ -1905,21 +2622,45 @@ class HRToolkitApp:
                 self._right_canvas_sync_running = False
                 self._right_canvas_sync_pending = False
             if self._right_canvas_sync_dirty:
-                _queue_right_canvas_sync()
+                # Updating the embedded window can itself emit Configure.
+                # Treat that as settling work, otherwise it forms an idle-time
+                # feedback loop that reflows on every native resize message.
+                resize_active = (
+                    time.monotonic() - last_canvas_resize_at
+                    < WINDOW_RESIZE_SETTLE_MS / 1000.0
+                )
+                _queue_right_canvas_sync(resize_event=resize_active)
 
         def _queue_right_canvas_sync(*, resize_event: bool = False) -> None:
             if self._right_canvas_sync_running:
                 self._right_canvas_sync_dirty = True
                 return
             if self._right_canvas_sync_pending:
-                return
+                if resize_event and self._right_canvas_sync_is_resize:
+                    try:
+                        self.root.after_cancel(self._right_canvas_sync_job)
+                    except Exception:
+                        pass
+                elif not resize_event and self._right_canvas_sync_is_resize:
+                    try:
+                        self.root.after_cancel(self._right_canvas_sync_job)
+                    except Exception:
+                        pass
+                else:
+                    return
             self._right_canvas_sync_pending = True
             self._right_canvas_sync_is_resize = resize_event
-            try:
+            # Keep the complex child layout stable while the native window
+            # border is moving. The canvas viewport itself follows the mouse;
+            # its embedded form reflows once, immediately after the drag has
+            # paused. This avoids synchronous GDI relayout on every WM_SIZE.
+            if resize_event:
+                self._right_canvas_sync_job = self.root.after(
+                    WINDOW_RESIZE_SETTLE_MS,
+                    _run_right_canvas_sync,
+                )
+            else:
                 self._right_canvas_sync_job = self.root.after_idle(_run_right_canvas_sync)
-            except Exception:
-                self._right_canvas_sync_job = None
-                self._right_canvas_sync_pending = False
 
         def _schedule_right_canvas_sync(_event=None):
             if not getattr(self, "_is_alive", True):
@@ -1944,6 +2685,9 @@ class HRToolkitApp:
                 return
             if not _resize_event_changed(_event):
                 return
+            if not getattr(self, "_window_resize_optimizations_ready", False):
+                _queue_right_canvas_sync()
+                return
             last_canvas_resize_at = time.monotonic()
             _queue_right_canvas_sync(resize_event=True)
 
@@ -1952,7 +2696,14 @@ class HRToolkitApp:
                 return
             if not _resize_event_changed(_event):
                 return
-            _queue_right_canvas_sync(resize_event=False)
+            if not getattr(self, "_window_resize_optimizations_ready", False):
+                _queue_right_canvas_sync()
+                return
+            resize_active = (
+                time.monotonic() - last_canvas_resize_at
+                < WINDOW_RESIZE_SETTLE_MS / 1000.0
+            )
+            _queue_right_canvas_sync(resize_event=resize_active)
 
         self._sync_right_canvas_window = _schedule_right_canvas_sync
         self._sync_right_canvas_window_now = _sync_right_canvas_window
@@ -2215,10 +2966,18 @@ class HRToolkitApp:
                 if event_sizes.get(event_widget) == event_size:
                     return
                 event_sizes[event_widget] = event_size
+            if self._title_wrap_job is not None:
+                return
             try:
-                self._title_wrap_job = self.root.after_idle(
-                    _run_title_text_wraps
-                )
+                if getattr(self, "_window_resize_optimizations_ready", False):
+                    self._title_wrap_job = self.root.after(
+                        WINDOW_RESIZE_FRAME_MS,
+                        _run_title_text_wraps,
+                    )
+                else:
+                    self._title_wrap_job = self.root.after_idle(
+                        _run_title_text_wraps
+                    )
             except Exception:
                 self._title_wrap_job = None
 
@@ -2994,8 +3753,54 @@ class HRToolkitApp:
             self._form_resize_job = None
             if getattr(self, "_is_alive", True):
                 _update_form_responsive_layout()
-                if hasattr(self, "_sync_right_canvas_window"):
+                # The geometry manager publishes the new requested height on
+                # a later idle turn. Sync once more on the next frame so a
+                # breakpoint/padding change cannot leave the scroll region at
+                # the previous height after the user releases the border.
+                if not getattr(self, "_window_resize_optimizations_ready", False):
                     self.root.after_idle(self._sync_right_canvas_window)
+                    return
+                post_layout_job = getattr(self, "_form_post_layout_sync_job", None)
+                if post_layout_job is not None:
+                    try:
+                        self.root.after_cancel(post_layout_job)
+                    except Exception:
+                        pass
+                self._form_post_layout_sync_job = self.root.after(
+                    WINDOW_RESIZE_FRAME_MS,
+                    _run_post_layout_canvas_sync,
+                )
+
+        def _run_post_layout_canvas_sync() -> None:
+            self._form_post_layout_sync_job = None
+            if getattr(self, "_is_alive", True):
+                # This callback already runs one frame after the responsive
+                # grid change, so perform the final measurement directly.
+                # Re-queueing through the generic idle coalescer can merge it
+                # with an older pre-layout size and leave the scroll region
+                # one frame behind after a rapid grow/shrink gesture.
+                sync_now = getattr(self, "_sync_right_canvas_window_now", None)
+                if sync_now is not None:
+                    sync_now()
+                else:
+                    self._sync_right_canvas_window()
+                try:
+                    self._form_post_layout_sync_job = self.root.after(
+                        WINDOW_RESIZE_FRAME_MS,
+                        _run_final_layout_canvas_sync,
+                    )
+                except Exception:
+                    self._form_post_layout_sync_job = None
+
+        def _run_final_layout_canvas_sync() -> None:
+            self._form_post_layout_sync_job = None
+            if not getattr(self, "_is_alive", True):
+                return
+            sync_now = getattr(self, "_sync_right_canvas_window_now", None)
+            if sync_now is not None:
+                sync_now()
+            else:
+                self._sync_right_canvas_window()
 
         def _schedule_form_responsive_layout(_event=None) -> None:
             if not getattr(self, "_is_alive", True):
@@ -3015,9 +3820,15 @@ class HRToolkitApp:
                     pass
                 self._form_resize_job = None
             try:
-                self._form_resize_job = self.root.after_idle(
-                    _run_form_responsive_layout
-                )
+                if getattr(self, "_window_resize_optimizations_ready", False):
+                    self._form_resize_job = self.root.after(
+                        WINDOW_RESIZE_SETTLE_MS,
+                        _run_form_responsive_layout,
+                    )
+                else:
+                    self._form_resize_job = self.root.after_idle(
+                        _run_form_responsive_layout
+                    )
             except Exception:
                 self._form_resize_job = None
 
@@ -3466,9 +4277,15 @@ class HRToolkitApp:
                 except Exception:
                     pass
             try:
-                self._workspace_area_resize_job = self.root.after_idle(
-                    self._on_workspace_area_resize
-                )
+                if getattr(self, "_window_resize_optimizations_ready", False):
+                    self._workspace_area_resize_job = self.root.after(
+                        WINDOW_RESIZE_SETTLE_MS,
+                        self._on_workspace_area_resize,
+                    )
+                else:
+                    self._workspace_area_resize_job = self.root.after_idle(
+                        self._on_workspace_area_resize
+                    )
             except Exception:
                 self._workspace_area_resize_job = None
             return
@@ -6884,8 +7701,12 @@ class HRToolkitApp:
         self._history_view.pack(side=RIGHT, fill=BOTH, expand=True)
         self._refresh_nav_buttons()
         self._refresh_history()
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
 
     def _show_tool_view(self) -> None:
+        self._flush_window_resize_composite()
         if self.current_view == "tool":
             return
         self.current_view = "tool"
@@ -6894,6 +7715,9 @@ class HRToolkitApp:
         self._refresh_nav_buttons()
         if hasattr(self, "_sync_right_canvas_window"):
             self.root.after_idle(self._sync_right_canvas_window)
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
 
     def _apply_history_filters(self) -> None:
         self._history_page = 0
@@ -8010,6 +8834,9 @@ class HRToolkitApp:
         self._write_log(self._initial_log_text())
         if hasattr(self, "workspace_tree") and self.workspace_scope.get() == WORKSPACE_SCOPE_TOOL:
             self._refresh_workspace_tree()
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
 
     def _save_change_form_state(self, mode: str) -> None:
         self.change_form_state[mode] = (self.input_path.get(), self.summary_path.get(), self.change_input_paths)
@@ -8200,6 +9027,9 @@ class HRToolkitApp:
         self._refresh_last_run_status()
         if hasattr(self, "_sync_right_canvas_window"):
             self.root.after_idle(self._sync_right_canvas_window)
+        self._schedule_window_resize_snapshot_refresh(
+            delay_ms=WINDOW_RESIZE_SNAPSHOT_DELAY_MS
+        )
 
     # ---------- 运行状态 ----------
 
