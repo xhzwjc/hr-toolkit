@@ -107,12 +107,15 @@ def run_benchmark(
             heartbeat_lateness: list[float] = []
             last_request = started_at
             expected_heartbeat = started_at + 0.016
+            hidden_tree_samples = 0
 
             def send_resize() -> None:
-                nonlocal sent_requests, last_request
+                nonlocal sent_requests, last_request, hidden_tree_samples
                 now = time.perf_counter()
                 if now >= deadline:
                     return
+                if app._root_frame.winfo_manager() != "place":
+                    hidden_tree_samples += 1
                 request_gaps.append(max(0.0, (now - last_request) * 1000.0))
                 last_request = now
                 phase = (now - started_at) % 1.0
@@ -144,15 +147,17 @@ def run_benchmark(
                 app._right_canvas.winfo_height(),
             )
             frame_size = tuple(app._last_canvas_window_size)
+            root_size = (root.winfo_width(), root.winfo_height())
+            root_frame_size = (
+                app._root_frame.winfo_width(),
+                app._root_frame.winfo_height(),
+            )
             measured_gaps = request_gaps[1:]
             return {
                 "file_count": file_count,
                 "duration_seconds": duration_seconds,
                 "request_interval_ms": request_interval_ms,
                 "prewarm_ms": prewarm_ms,
-                "snapshot_ready": bool(
-                    getattr(app, "_window_resize_snapshot_image", None)
-                ),
                 "resize_requests_sent": sent_requests,
                 "root_configure_events": root_configures,
                 "native_tree_configure_events": native_tree_configures,
@@ -172,15 +177,21 @@ def run_benchmark(
                     2,
                 ),
                 "canvas_window_resizes": canvas_window_resizes,
-                "preview_activations": getattr(
-                    app, "_window_resize_overlay_activations", 0
+                "live_layout_frames": getattr(
+                    app, "_window_resize_layout_frames", 0
                 ),
-                "preview_frames": getattr(app, "_window_resize_overlay_frames", 0),
-                "preview_tree_restored": (
-                    getattr(app, "_root_frame", None) is not None
-                    and app._root_frame.winfo_manager() == "pack"
+                "slow_layout_frames": getattr(
+                    app, "_window_resize_slow_frames", 0
                 ),
-                "canvas_width_settled": frame_size[0] == canvas_size[0],
+                "adaptive_frame_interval_ms": getattr(
+                    app, "_window_resize_frame_interval_ms", 0
+                ),
+                "real_tree_hidden_samples": hidden_tree_samples,
+                "real_tree_visible": app._root_frame.winfo_manager() == "place",
+                "root_frame_size_settled": root_frame_size == root_size,
+                "canvas_width_fits_viewport": frame_size[0] <= canvas_size[0],
+                "canvas_window_centered": app._last_canvas_window_x
+                == max(0, (canvas_size[0] - frame_size[0]) // 2),
                 "canvas_width": canvas_size[0],
                 "canvas_window_width": frame_size[0],
             }
@@ -200,7 +211,7 @@ def main() -> None:
         "--prewarm",
         type=int,
         default=0,
-        help="缩放前保持窗口静止的毫秒数（用于准备后台合成快照）。",
+        help="缩放前保持窗口静止的毫秒数。",
     )
     args = parser.parse_args()
     result = run_benchmark(

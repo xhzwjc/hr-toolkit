@@ -636,11 +636,12 @@ class RoundedCard(Canvas):
         self._shadow_poly: int | None = None
         self._card_poly: int | None = None
         self._syncing = False
+        self._sync_job = None
         self._last_self_event_size = (0, 0)
         self._last_inner_event_size = (0, 0)
         self.set_padding(padding, sync=False)
-        self.inner.bind("<Configure>", self._sync)
-        self.bind("<Configure>", self._sync)
+        self.inner.bind("<Configure>", self._schedule_sync)
+        self.bind("<Configure>", self._schedule_sync)
 
     def set_padding(self, padding: tuple[int, int, int, int], *, sync: bool = True) -> None:
         self._pads = tuple(_scale_px(value, self._scale) for value in padding)
@@ -648,9 +649,7 @@ class RoundedCard(Canvas):
         if sync:
             self._sync()
 
-    def _sync(self, _event=None) -> None:
-        if self._syncing:
-            return
+    def _schedule_sync(self, _event=None) -> None:
         if _event is not None:
             event_size = (
                 max(int(getattr(_event, "width", 1)), 1),
@@ -664,6 +663,20 @@ class RoundedCard(Canvas):
                 if event_size == self._last_self_event_size:
                     return
                 self._last_self_event_size = event_size
+        if self._sync_job is not None:
+            return
+        try:
+            self._sync_job = self.after_idle(self._run_scheduled_sync)
+        except Exception:
+            self._sync_job = None
+
+    def _run_scheduled_sync(self) -> None:
+        self._sync_job = None
+        self._sync()
+
+    def _sync(self, _event=None) -> None:
+        if self._syncing:
+            return
         self._syncing = True
         try:
             left, top, right, bottom = self._pads
@@ -692,6 +705,16 @@ class RoundedCard(Canvas):
                 self._redraw_bg(width, height)
         finally:
             self._syncing = False
+
+    def destroy(self) -> None:
+        job = self._sync_job
+        self._sync_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        super().destroy()
 
     def _redraw_bg(self, width: int, height: int) -> None:
         offset = max(1.0, _scale_float(1.5, self._scale))

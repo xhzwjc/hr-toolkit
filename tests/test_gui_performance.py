@@ -644,11 +644,7 @@ class GuiPerformanceTests(unittest.TestCase):
             # command into the desktop expansion branch, leaving a fixed panel
             # over the narrow tool page.
             app._workspace_small = False
-            app.workspace_collapse_button.event_generate(
-                "<Button-1>",
-                x=max(1, app.workspace_collapse_button.winfo_width() // 2),
-                y=max(1, app.workspace_collapse_button.winfo_height() // 2),
-            )
+            app.workspace_collapse_button._on_click()
             self.root.update()
 
             self.assertTrue(app._workspace_small)
@@ -682,11 +678,6 @@ class GuiPerformanceTests(unittest.TestCase):
                 app = HRToolkitApp(self.root)
             self.root.deiconify()
             self.root.minsize(1, 1)
-            # This case exercises the inactivity-settle path for programmatic
-            # geometry bursts. Do not let the hosted desktop's real mouse
-            # state accidentally turn it into a native-drag test; the native
-            # hold/release path has dedicated deterministic tests below.
-            app._window_resize_pointer_state_reader = lambda: False
             app._dismiss_startup_loading_screen()
             self.root.update()
             right_frame = self.root.nametowidget(
@@ -696,16 +687,23 @@ class GuiPerformanceTests(unittest.TestCase):
             def layout_is_settled(mode: str, workspace_small: bool) -> bool:
                 canvas_width = app._right_canvas.winfo_width()
                 canvas_height = app._right_canvas.winfo_height()
-                expected_window_size = (
+                logical_width = canvas_width / max(app.ui_scale, 1.0)
+                padding = app._responsive_content_padding(logical_width)
+                window_width = min(
                     canvas_width,
+                    app._px(820) + padding[0] + padding[2],
+                )
+                expected_window_size = (
+                    window_width,
                     max(right_frame.winfo_reqheight(), canvas_height),
                 )
                 return (
                     not app._window_resize_active
-                    and not app._window_resize_restoring
                     and app._form_layout_mode == mode
                     and app._workspace_small is workspace_small
                     and app._last_canvas_window_size == expected_window_size
+                    and app._live_root_frame_size
+                    == (self.root.winfo_width(), self.root.winfo_height())
                 )
 
             def expected_layout_for_actual_viewport() -> tuple[str, bool]:
@@ -737,16 +735,16 @@ class GuiPerformanceTests(unittest.TestCase):
             def layout_diagnostics() -> str:
                 canvas_width = app._right_canvas.winfo_width()
                 canvas_height = app._right_canvas.winfo_height()
+                logical_width = canvas_width / max(app.ui_scale, 1.0)
+                padding = app._responsive_content_padding(logical_width)
                 expected_window_size = (
-                    canvas_width,
+                    min(canvas_width, app._px(820) + padding[0] + padding[2]),
                     max(right_frame.winfo_reqheight(), canvas_height),
                 )
                 return repr(
                     {
                         "root": (self.root.winfo_width(), self.root.winfo_height()),
                         "active": app._window_resize_active,
-                        "restoring": app._window_resize_restoring,
-                        "native_drag": app._window_resize_native_drag,
                         "form_mode": app._form_layout_mode,
                         "workspace_small": app._workspace_small,
                         "workspace_width": app._workspace_available_width_units(),
@@ -754,7 +752,7 @@ class GuiPerformanceTests(unittest.TestCase):
                         "canvas_window": app._last_canvas_window_size,
                         "expected_canvas_window": expected_window_size,
                         "root_frame_manager": app._root_frame.winfo_manager(),
-                        "overlay_manager": app._window_resize_overlay.winfo_manager(),
+                        "root_frame_size": app._live_root_frame_size,
                     }
                 )
 
@@ -773,9 +771,8 @@ class GuiPerformanceTests(unittest.TestCase):
 
             self.assertEqual(app._form_layout_mode, "narrow")
             self.assertTrue(app._workspace_small)
-            self.assertEqual(
-                app._last_canvas_window_size[0],
-                app._right_canvas.winfo_width(),
+            self.assertLessEqual(
+                app._last_canvas_window_size[0], app._right_canvas.winfo_width()
             )
             self.assertEqual(
                 app._last_canvas_window_size[1],
@@ -800,9 +797,8 @@ class GuiPerformanceTests(unittest.TestCase):
             )
             self.assertEqual(app._form_layout_mode, expected_mode)
             self.assertIs(app._workspace_small, expected_workspace_small)
-            self.assertEqual(
-                app._last_canvas_window_size[0],
-                app._right_canvas.winfo_width(),
+            self.assertLessEqual(
+                app._last_canvas_window_size[0], app._right_canvas.winfo_width()
             )
             self.assertEqual(
                 app._last_canvas_window_size[1],
@@ -824,7 +820,6 @@ class GuiPerformanceTests(unittest.TestCase):
                 app = HRToolkitApp(self.root)
             self.root.deiconify()
             self.root.minsize(1, 1)
-            app._window_resize_pointer_state_reader = lambda: False
             app._dismiss_startup_loading_screen()
             self.root.geometry("700x650")
             self.root.update()
@@ -880,27 +875,16 @@ class GuiPerformanceTests(unittest.TestCase):
                 except Exception:
                     pass
 
-    def test_live_resize_uses_one_preview_surface_and_restores_widget_tree(self) -> None:
+    def test_live_resize_keeps_real_widget_tree_visible(self) -> None:
         app = None
         try:
             app = HRToolkitApp(self.root)
             self.root.deiconify()
             self.root.minsize(1, 1)
             app._dismiss_startup_loading_screen()
-            # Keep this test independent of desktop screenshot permissions.
-            snapshot_job = app._window_resize_snapshot_job
-            if snapshot_job is not None:
-                self.root.after_cancel(snapshot_job)
-                app._window_resize_snapshot_job = None
-            app._window_resize_snapshot_supported = False
-            app._window_resize_pointer_state_reader = lambda: False
-            observed = {}
-
-            def inspect_during_drag() -> None:
-                observed["active"] = app._window_resize_active
-                observed["manager"] = app._root_frame.winfo_manager()
-                observed["overlay"] = app._window_resize_overlay.winfo_manager()
-                observed["activations"] = app._window_resize_overlay_activations
+            self.root.update()
+            initial_children = tuple(app._root_frame.winfo_children())
+            initial_frames = app._window_resize_layout_frames
 
             for index in range(18):
                 width = 1180 - index * 14
@@ -912,113 +896,100 @@ class GuiPerformanceTests(unittest.TestCase):
             self._run_event_loop_until(
                 lambda: (
                     app._window_resize_active
-                    and app._window_resize_overlay_frames > 0
+                    and app._window_resize_layout_frames > initial_frames
                 ),
-                failure_message="live resize preview did not start",
+                failure_message="live resize layout did not start",
             )
-            inspect_during_drag()
 
-            self.assertTrue(observed["active"])
-            self.assertEqual(observed["manager"], "")
-            self.assertEqual(observed["overlay"], "place")
-            self.assertEqual(observed["activations"], 1)
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+            self.assertTrue(app._root_frame.winfo_viewable())
+            self.assertFalse(hasattr(app, "_window_resize_overlay"))
+            self.assertEqual(tuple(app._root_frame.winfo_children()), initial_children)
+
             self._run_event_loop_until(
                 lambda: (
                     not app._window_resize_active
-                    and not app._window_resize_restoring
-                    and app._root_frame.winfo_manager() == "pack"
-                    and app._window_resize_overlay.winfo_manager() == ""
+                    and app._live_root_frame_size
+                    == (self.root.winfo_width(), self.root.winfo_height())
                 ),
                 stable_polls=2,
-                failure_message="live resize preview did not restore",
+                failure_message="live resize layout did not settle",
             )
-            self.assertFalse(app._window_resize_active)
-            self.assertEqual(app._root_frame.winfo_manager(), "pack")
-            self.assertEqual(app._window_resize_overlay.winfo_manager(), "")
-            self.assertGreater(app._window_resize_overlay_frames, 0)
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+            self.assertEqual(tuple(app._root_frame.winfo_children()), initial_children)
         finally:
             if app is not None:
                 app.destroy()
-            for child in self.root.winfo_children():
-                try:
-                    child.destroy()
-                except Exception:
-                    pass
 
-    def test_live_resize_can_render_cached_ui_snapshot(self) -> None:
-        try:
-            from PIL import Image, ImageTk
-        except ImportError as exc:
-            self.skipTest(f"Pillow is unavailable: {exc}")
-
+    def test_live_resize_coalesces_native_size_burst(self) -> None:
         app = None
         try:
             app = HRToolkitApp(self.root)
-            self.root.deiconify()
             app._dismiss_startup_loading_screen()
             self.root.update()
-            width = max(app.root.winfo_width(), 2)
-            height = max(app.root.winfo_height(), 2)
-            snapshot = Image.new("RGB", (width, height), "#F5F5F4")
-            app._window_resize_snapshot_image = snapshot
-            app._window_resize_snapshot_photo = ImageTk.PhotoImage(
-                snapshot,
-                master=self.root,
+            original_size = app._last_root_window_size
+
+            first = SimpleNamespace(
+                widget=self.root,
+                width=original_size[0] - 10,
+                height=original_size[1] - 5,
             )
+            second = SimpleNamespace(
+                widget=self.root,
+                width=original_size[0] - 20,
+                height=original_size[1] - 10,
+            )
+            app._on_live_window_configure(first)
+            scheduled_job = app._window_resize_frame_job
+            app._on_live_window_configure(second)
 
-            app._begin_window_resize_composite()
-            app._window_resize_overlay_target_size = (width - 20, height - 10)
-            app._render_window_resize_overlay()
-
-            self.assertTrue(app._window_resize_active)
-            self.assertIsNotNone(app._window_resize_overlay_photo)
+            self.assertIsNotNone(scheduled_job)
+            self.assertEqual(app._window_resize_frame_job, scheduled_job)
             self.assertEqual(
-                app._window_resize_overlay.itemcget(
-                    app._window_resize_overlay_image_item,
-                    "state",
-                ),
-                "normal",
+                app._window_resize_pending_size,
+                (second.width, second.height),
             )
-            self.assertGreater(app._window_resize_overlay_frames, 0)
-            app._flush_window_resize_composite()
+            app._flush_live_window_resize()
             self.assertFalse(app._window_resize_active)
+            self.assertIsNone(app._window_resize_frame_job)
+            self.assertEqual(
+                app._live_root_frame_size,
+                (second.width, second.height),
+            )
         finally:
             if app is not None:
                 app.destroy()
 
-    def test_resize_compositor_shutdown_cancels_jobs_and_releases_preview(self) -> None:
+    def test_live_resize_shutdown_cancels_jobs_and_binding(self) -> None:
         app = None
         try:
             app = HRToolkitApp(self.root)
             self.root.deiconify()
             app._dismiss_startup_loading_screen()
-            app._window_resize_pointer_state_reader = lambda: False
             self.root.update()
             target_width = max(640, self.root.winfo_width() - 37)
             target_height = max(480, self.root.winfo_height() - 23)
             self.root.geometry(f"{target_width}x{target_height}")
             self._run_event_loop_until(
                 lambda: app._window_resize_active,
-                failure_message="resize compositor did not start before shutdown",
+                failure_message="live resize did not start before shutdown",
             )
             bindtag = app._window_resize_configure_bindtag
             self.assertIn(bindtag, self.root.bindtags())
             self.assertNotIn(bindtag, app._right_canvas.bindtags())
 
-            overlay = app._window_resize_overlay
             app.destroy()
 
             self.assertFalse(app._window_resize_active)
             self.assertIsNone(app._window_resize_settle_job)
-            self.assertIsNone(app._window_resize_render_job)
-            self.assertIsNone(app._window_resize_snapshot_job)
+            self.assertIsNone(app._window_resize_frame_job)
+            self.assertIsNone(app._window_resize_finalize_job)
             self.assertNotIn(bindtag, self.root.bindtags())
-            self.assertFalse(overlay.winfo_exists())
         finally:
             if app is not None and getattr(app, "_is_alive", False):
                 app.destroy()
 
-    def test_native_resize_release_restores_immediately_and_preserves_focus(self) -> None:
+    def test_live_resize_preserves_focus_and_real_content(self) -> None:
         app = None
         try:
             app = HRToolkitApp(self.root)
@@ -1027,77 +998,53 @@ class GuiPerformanceTests(unittest.TestCase):
             app._select_tool("folder_rename")
             self.root.update()
             app.rename_text_widget.focus_force()
-            pointer = {"down": True}
-            app._window_resize_pointer_state_reader = lambda: pointer["down"]
+            focused_widget = self.root.focus_get()
+            initial_widget = app.rename_text_widget
 
             self.root.geometry("1080x690")
             self._run_event_loop_until(
-                lambda: (
-                    app._window_resize_active
-                    and app._window_resize_native_drag
-                ),
-                failure_message="native resize compositor did not start",
+                lambda: app._window_resize_active,
+                failure_message="live resize did not start",
             )
-            # A confirmed native drag has no inactivity timer. Releasing the
-            # mocked button can therefore complete only through the platform
-            # button-state poll, regardless of Configure delivery latency.
-            self.assertIsNone(app._window_resize_settle_job)
-            pointer["down"] = False
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+            self.assertIs(app.rename_text_widget, initial_widget)
+            if focused_widget is not None:
+                self.assertIs(self.root.focus_get(), focused_widget)
+
             self._run_event_loop_until(
                 lambda: not app._window_resize_active,
-                failure_message="native resize compositor did not restore",
+                failure_message="live resize did not settle",
             )
-
-            self.assertEqual(app._root_frame.winfo_manager(), "pack")
-            self.assertIs(self.root.focus_get(), app.rename_text_widget)
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+            self.assertIs(app.rename_text_widget, initial_widget)
+            if focused_widget is not None:
+                self.assertIs(self.root.focus_get(), focused_widget)
         finally:
             if app is not None:
                 app.destroy()
 
-    def test_native_resize_pause_keeps_single_surface_until_release(self) -> None:
+    def test_live_resize_pause_settles_without_hiding_tree(self) -> None:
         app = None
         try:
             app = HRToolkitApp(self.root)
             self.root.deiconify()
             app._dismiss_startup_loading_screen()
-            pointer = {"down": True}
-            app._window_resize_pointer_state_reader = lambda: pointer["down"]
-
+            self.root.update()
             self.root.geometry("1080x690")
             self._run_event_loop_until(
-                lambda: (
-                    app._window_resize_active
-                    and app._window_resize_native_drag
-                ),
-                failure_message="native resize compositor did not start",
+                lambda: app._window_resize_active,
+                failure_message="live resize did not start",
             )
-
-            # Hold the border motionless beyond the inactivity fallback. The
-            # complex widget tree must remain unmapped until the real release.
-            self.root.after(WINDOW_RESIZE_SETTLE_MS + 60, self.root.quit)
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+            self.root.after(WINDOW_RESIZE_SETTLE_MS + 80, self.root.quit)
             self.root.mainloop()
-            self.assertTrue(app._window_resize_active)
-            self.assertTrue(app._window_resize_native_drag)
-            self.assertEqual(app._root_frame.winfo_manager(), "")
 
-            pointer["down"] = False
-            self._run_event_loop_until(
-                lambda: not app._window_resize_active,
-                timeout_ms=1000,
-                failure_message="native resize compositor did not restore after release",
-                diagnostics=lambda: repr(
-                    {
-                        "active": app._window_resize_active,
-                        "restoring": app._window_resize_restoring,
-                        "native_drag": app._window_resize_native_drag,
-                        "pointer_poll_job": app._window_resize_pointer_poll_job,
-                        "restore_job": app._window_resize_restore_job,
-                        "reveal_job": app._window_resize_reveal_job,
-                        "root_frame_manager": app._root_frame.winfo_manager(),
-                    }
-                ),
+            self.assertFalse(app._window_resize_active)
+            self.assertEqual(app._root_frame.winfo_manager(), "place")
+            self.assertEqual(
+                app._live_root_frame_size,
+                (self.root.winfo_width(), self.root.winfo_height()),
             )
-            self.assertEqual(app._root_frame.winfo_manager(), "pack")
         finally:
             if app is not None:
                 app.destroy()
@@ -1320,19 +1267,15 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.update()
                 self.assertIs(app.upload_body.winfo_children()[0], upload_canvas)
                 self.root.minsize(1, 1)
-                app._window_resize_pointer_state_reader = lambda: False
                 self.root.geometry("900x650")
                 self._run_event_loop_until(
                     lambda: app._window_resize_active,
-                    failure_message="upload-list resize preview did not start",
+                    failure_message="upload-list live resize did not start",
                 )
                 self._run_event_loop_until(
-                    lambda: (
-                        not app._window_resize_active
-                        and not app._window_resize_restoring
-                    ),
+                    lambda: not app._window_resize_active,
                     stable_polls=2,
-                    failure_message="upload-list resize preview did not restore",
+                    failure_message="upload-list live resize did not settle",
                 )
                 self.assertEqual(upload_canvas.find_all(), initial_items)
 
@@ -1345,15 +1288,12 @@ class GuiPerformanceTests(unittest.TestCase):
                 self.root.geometry("1180x760")
                 self._run_event_loop_until(
                     lambda: app._window_resize_active,
-                    failure_message="drop-zone resize preview did not start",
+                    failure_message="drop-zone live resize did not start",
                 )
                 self._run_event_loop_until(
-                    lambda: (
-                        not app._window_resize_active
-                        and not app._window_resize_restoring
-                    ),
+                    lambda: not app._window_resize_active,
                     stable_polls=2,
-                    failure_message="drop-zone resize preview did not restore",
+                    failure_message="drop-zone live resize did not settle",
                 )
                 self.assertEqual(drop_zone.find_all(), initial_drop_items)
         finally:
@@ -1449,7 +1389,7 @@ class GuiPerformanceTests(unittest.TestCase):
         with patch.object(sidebar, "winfo_width", side_effect=AssertionError("sidebar geometry query")):
             sidebar._on_configure(sidebar_event)
         with patch.object(card, "winfo_width", side_effect=AssertionError("card geometry query")):
-            card._sync(card_event)
+            card._schedule_sync(card_event)
 
         button.destroy()
         sidebar.destroy()
