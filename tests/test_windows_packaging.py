@@ -645,6 +645,7 @@ class WindowsPackagingTests(unittest.TestCase):
                     build_windows.os.environ,
                     {
                         build_windows.WIN7_7ZIP_OVERRIDE_ENV: "C:/build-runtime/7z.exe",
+                        "QT_QPA_PLATFORM": "windows",
                         "QT_QUICK_BACKEND": "caller-selected",
                         "QSG_RENDER_LOOP": "threaded",
                     },
@@ -685,6 +686,7 @@ class WindowsPackagingTests(unittest.TestCase):
         modern_qt_env = next(
             env for command, env in modern_calls if "--qt-smoke-test" in command
         )
+        self.assertEqual(modern_qt_env["QT_QPA_PLATFORM"], "windows")
         self.assertEqual(modern_qt_env["QT_QUICK_BACKEND"], "caller-selected")
         self.assertEqual(modern_qt_env["QSG_RENDER_LOOP"], "threaded")
 
@@ -798,9 +800,14 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("constraints/python312-production.txt", ci)
         self.assertIn("constraints/python38-win7.txt", ci)
         self.assertIn('python-version: "3.8.10"', ci)
+        modern_ci = ci.split("\n  windows-test:", 1)[1].split(
+            "\n  windows-win7-compat-test:", 1
+        )[0]
+        self.assertIn("runs-on: windows-latest", modern_ci)
         win7_ci = ci.split("\n  windows-win7-compat-test:", 1)[1]
-        self.assertIn('QT_QUICK_BACKEND: "software"', win7_ci)
-        self.assertIn('QSG_RENDER_LOOP: "basic"', win7_ci)
+        self.assertIn("runs-on: windows-2022", win7_ci)
+        for name, value in build_windows.WIN7_QT_SMOKE_ENV.items():
+            self.assertIn(f'{name}: "{value}"', win7_ci)
 
         win7_constraints = (
             build_windows.REPO_ROOT / "constraints" / "python38-win7.txt"
@@ -822,6 +829,28 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("scripts/release_windows.py", workflow)
         self.assertIn("--target win7", workflow)
         self.assertIn("prepare_win7_runtime.py", workflow)
+        modern_job = workflow.split("\n  build-windows:", 1)[1].split(
+            "\n  build-windows-win7:", 1
+        )[0]
+        self.assertIn("runs-on: windows-latest", modern_job)
+        win7_job = workflow.split("\n  build-windows-win7:", 1)[1].split(
+            "\n  build-macos:", 1
+        )[0]
+        self.assertIn("runs-on: windows-2022", win7_job)
+
+    def test_release_win7_build_uses_stable_windows_2022_runner(self) -> None:
+        workflow = (
+            build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        modern_job = workflow.split("\n  build-windows:", 1)[1].split(
+            "\n  build-windows-win7:", 1
+        )[0]
+        win7_job = workflow.split("\n  build-windows-win7:", 1)[1].split(
+            "\n  build-macos:", 1
+        )[0]
+
+        self.assertIn("runs-on: windows-latest", modern_job)
+        self.assertIn("runs-on: windows-2022", win7_job)
 
     def test_release_and_test_build_use_real_parallel_macos_architectures(self) -> None:
         workflow_dir = build_windows.REPO_ROOT / ".github" / "workflows"

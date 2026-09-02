@@ -8,6 +8,7 @@ while explicit QQuickWindow updates reduce the time until the new frame lands.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Callable
 
@@ -95,6 +96,13 @@ class WindowsResizeBackdrop:
     def install(cls, window) -> "WindowsResizeBackdrop":
         backdrop = cls()
         if not sys.platform.startswith("win"):
+            return backdrop
+        qpa_platform = (
+            os.environ.get("QT_QPA_PLATFORM", "").split(":", 1)[0].casefold()
+        )
+        if qpa_platform in {"minimal", "offscreen"}:
+            # Headless Qt platform plugins do not own a Win32 HWND.  Avoid
+            # treating their synthetic winId as a native window handle.
             return backdrop
 
         try:

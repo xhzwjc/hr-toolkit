@@ -84,6 +84,7 @@ QT5_REQUIRED_RUNTIME_FILES = (
     "PySide2/d3dcompiler_47.dll",
     "PySide2/libEGL.dll",
     "PySide2/libGLESv2.dll",
+    "PySide2/plugins/platforms/qoffscreen.dll",
     "PySide2/plugins/platforms/qwindows.dll",
 )
 
@@ -218,9 +219,11 @@ WINDOWS_TARGET_MODERN = "modern"
 WINDOWS_TARGET_WIN7 = "win7"
 WINDOWS_TARGETS = (WINDOWS_TARGET_MODERN, WINDOWS_TARGET_WIN7)
 WIN7_QT_SMOKE_ENV = {
-    # GitHub's hosted Windows runner does not expose a stable graphics device
-    # to the legacy Qt 5 scene graph.  Keep unattended startup verification
-    # deterministic without changing the renderer selected by the real app.
+    # Exercise the bundled Qt/QML runtime without coupling unattended build
+    # verification to a hosted runner's interactive desktop or graphics stack.
+    # These values are passed only to the smoke subprocess, never embedded in
+    # the installed application.
+    "QT_QPA_PLATFORM": "offscreen",
     "QT_QUICK_BACKEND": "software",
     "QSG_RENDER_LOOP": "basic",
 }

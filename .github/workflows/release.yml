@@ -164,7 +164,9 @@ jobs:
   build-windows-win7:
     name: Build Windows 7 SP1 compatibility EXE and MSI
     needs: validate
-    runs-on: windows-latest
+    # This legacy binary is intentionally built with Python 3.8/PySide2 on the
+    # stable Windows Server 2022 image, not the moving windows-latest image.
+    runs-on: windows-2022
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       PYTHONUTF8: "1"

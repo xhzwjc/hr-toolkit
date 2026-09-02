@@ -148,7 +148,7 @@ jobs:
     name: Build Windows 7 SP1 compatibility package
     needs: prepare
     if: needs.prepare.outputs.target_platform == 'windows-win7' || needs.prepare.outputs.target_platform == 'windows-all' || needs.prepare.outputs.target_platform == 'all'
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}

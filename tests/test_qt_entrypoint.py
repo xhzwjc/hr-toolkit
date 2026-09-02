@@ -146,6 +146,19 @@ class QtEntrypointTests(unittest.TestCase):
         self.assertFalse(backdrop.active)
         self.assertEqual(_windows_colorref(0xF7, 0xF5, 0xF1), 0xF1F5F7)
 
+    def test_windows_resize_backdrop_ignores_headless_qt_platforms(self) -> None:
+        class HeadlessWindow:
+            def winId(self):
+                raise AssertionError("headless window must not be used as an HWND")
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}, clear=True),
+        ):
+            backdrop = WindowsResizeBackdrop.install(HeadlessWindow())
+
+        self.assertFalse(backdrop.active)
+
     def test_macos_keeps_the_benchmarked_basic_render_loop(self) -> None:
         with patch.object(sys, "platform", "darwin"):
             with patch.dict(os.environ, {}, clear=True):

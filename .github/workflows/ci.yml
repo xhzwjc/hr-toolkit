@@ -148,7 +148,8 @@ jobs:
 
   windows-win7-compat-test:
     name: Windows 7 compatibility stack on Python 3.8
-    runs-on: windows-latest
+    # Keep the frozen Python 3.8/PySide2 stack off Windows Server 2025.
+    runs-on: windows-2022
     env:
       PYTHONUTF8: "1"
       HR_TOOLKIT_7ZIP_EXE: ${{ github.workspace }}\build\win7-runtime\7zip\7z.exe
@@ -185,9 +186,9 @@ jobs:
         env:
           HR_TOOLKIT_SKIP_UPDATE: "1"
           HR_TOOLKIT_QT_SMOKE_EXIT_MS: "800"
-          # The hosted runner has no stable legacy Qt 5 graphics device.
-          # Limit this deterministic software renderer to the CI smoke only;
-          # production keeps Qt's normal GPU/backend selection.
+          # Headless smoke verifies the Qt/QML runtime without depending on a
+          # hosted desktop session. Production still uses the native platform.
+          QT_QPA_PLATFORM: "offscreen"
           QT_QUICK_BACKEND: "software"
           QSG_RENDER_LOOP: "basic"
         run: python hr_toolkit_app.py --qt-smoke-test
