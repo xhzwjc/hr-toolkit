@@ -107,6 +107,7 @@ def _child_entry(
     kwargs: dict[str, Any],
 ) -> None:
     started = time.monotonic()
+    terminal_message: tuple[Any, ...]
 
     def progress(current: int, total: int, message: str) -> None:
         record = (int(current), int(total), str(message))
@@ -126,26 +127,35 @@ def _child_entry(
         if "progress_callback" in parameters:
             call_kwargs["progress_callback"] = progress
         result = function(*args, **call_kwargs)
-        connection.send(
-            (
-                "success",
-                _result_payload(result),
-                time.monotonic() - started,
-            )
+        terminal_message = (
+            "success",
+            _result_payload(result),
+            time.monotonic() - started,
         )
     except BaseException as exc:
-        connection.send(
-            (
-                "error",
-                f"{type(exc).__name__}: {exc}",
-                traceback.format_exc(),
-            )
+        terminal_message = (
+            "error",
+            f"{type(exc).__name__}: {exc}",
+            traceback.format_exc(),
         )
     finally:
         try:
-            connection.close()
+            # multiprocessing.Queue.put_nowait() hands records to a feeder
+            # thread.  On Windows the result pipe can otherwise overtake that
+            # feeder, making the parent return before the final progress event
+            # is visible.  Flush the child writer before publishing the
+            # terminal result so both streams have a deterministic boundary.
+            progress_queue.close()
+            progress_queue.join_thread()
         except Exception:
             pass
+        try:
+            connection.send(terminal_message)
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
 
 def run_business_process(
@@ -181,17 +191,24 @@ def run_business_process(
     send_connection.close()
     cancellation_started: float | None = None
     message: tuple[Any, ...] | None = None
+
+    def drain_progress() -> None:
+        while True:
+            try:
+                current, total, text = progress_queue.get_nowait()
+            except queue.Empty:
+                return
+            if on_progress is not None:
+                on_progress(current, total, text)
+
     try:
         while True:
-            while True:
-                try:
-                    current, total, text = progress_queue.get_nowait()
-                except queue.Empty:
-                    break
-                if on_progress is not None:
-                    on_progress(current, total, text)
+            drain_progress()
             if receive_connection.poll(0):
                 message = receive_connection.recv()
+                # The child flushes its queue writer before sending this
+                # terminal message, so this final drain cannot race its feeder.
+                drain_progress()
                 break
             if cancel_event.is_set():
                 process_cancel_event.set()

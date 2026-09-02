@@ -4,7 +4,9 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
+from hr_toolkit import background_process
 from hr_toolkit.background_process import (
     PROCESS_FILE_THRESHOLD_BYTES,
     run_business_process,
@@ -41,6 +43,33 @@ class BackgroundProcessTests(unittest.TestCase):
         self.assertEqual(result.payload["output_dir"], "output")
         self.assertGreaterEqual(result.elapsed_seconds, 0.0)
         self.assertIn((1, 1, "完成"), progress)
+
+    def test_child_flushes_progress_before_sending_terminal_result(self) -> None:
+        progress_queue = Mock()
+        connection = Mock()
+        cancel_event = Mock()
+        cancel_event.is_set.return_value = False
+        terminal_messages = []
+
+        def capture_terminal(message) -> None:
+            progress_queue.close.assert_called_once_with()
+            progress_queue.join_thread.assert_called_once_with()
+            terminal_messages.append(message)
+
+        connection.send.side_effect = capture_terminal
+        background_process._child_entry(
+            connection,
+            progress_queue,
+            cancel_event,
+            "hr_toolkit.background_process",
+            "_process_smoke_probe",
+            (Path("input.xlsx"), Path("output")),
+            {},
+        )
+
+        progress_queue.put_nowait.assert_called_once_with((1, 1, "完成"))
+        self.assertEqual(terminal_messages[0][0], "success")
+        connection.close.assert_called_once_with()
 
 
 if __name__ == "__main__":
