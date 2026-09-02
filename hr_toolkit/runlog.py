@@ -4,7 +4,7 @@
 - 只记录文件名、文件大小、耗时、统计数字和异常堆栈，绝不记录表格内容
   （HR 文件包含身份证号、工资等敏感数据，日志必须可以放心外发）。
 - 日志失败绝不能影响业务，所有写入都是尽力而为。
-- 与更新日志 HRToolkit_update.log 放在同一位置，方便一次性收集。
+- 冻结程序写入用户日志目录，不向只读安装目录或 .app Bundle 写文件。
 - 支持纯文本与结构化 JSON (通过环境变量 HR_TOOLKIT_LOG_JSON=1 开启) 两种模式。
 """
 
@@ -33,6 +33,20 @@ def current_app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path.cwd().resolve()
+
+
+def user_log_dir() -> Path:
+    """Return a writable per-user log directory on every supported desktop."""
+
+    if sys.platform.startswith("win"):
+        base_text = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(base_text) if base_text else Path.home() / "AppData" / "Local"
+        return base / "HRToolkit" / "logs"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "HRToolkit"
+    state_text = os.environ.get("XDG_STATE_HOME", "").strip()
+    base = Path(state_text) if state_text else Path.home() / ".local" / "state"
+    return base / "HRToolkit" / "logs"
 
 
 def trim_log_file(log_file: Path, max_bytes: int = LOG_MAX_BYTES, keep_bytes: int = LOG_KEEP_BYTES) -> None:
@@ -64,8 +78,7 @@ def run_log_path() -> Path:
     if env_path:
         return Path(env_path)
     if getattr(sys, "frozen", False):
-        # 与 HRToolkit_update.log 同级：HRToolkit 程序目录的上一级
-        return current_app_dir().parent / RUN_LOG_FILE
+        return user_log_dir() / RUN_LOG_FILE
     return Path.cwd() / RUN_LOG_FILE
 
 

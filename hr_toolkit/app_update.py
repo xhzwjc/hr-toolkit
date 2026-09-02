@@ -28,7 +28,6 @@ GITHUB_LATEST_MANIFEST_URL = (
 )
 DEFAULT_UPDATE_MANIFEST_URLS = (
     GITEE_LATEST_RELEASE_API_URL,
-    GITHUB_LATEST_MANIFEST_URL,
 )
 # 保留单地址常量，兼容已有调用；默认值现在是国内 Gitee 源。
 DEFAULT_UPDATE_MANIFEST_URL = DEFAULT_UPDATE_MANIFEST_URLS[0]
@@ -117,7 +116,14 @@ class UpdateInfo:
 
     @property
     def download_urls(self) -> tuple[str, ...]:
-        return _dedupe_urls((self.file_url, *self.fallback_urls))
+        # Public desktop builds serve domestic users from Gitee only.  Release
+        # metadata may retain GitHub mirrors for operators, but the application
+        # itself must not probe or download from GitHub.
+        return tuple(
+            url
+            for url in _dedupe_urls((self.file_url, *self.fallback_urls))
+            if not _is_github_url(url)
+        )
 
 
 def create_https_context() -> ssl.SSLContext:
@@ -161,10 +167,16 @@ def update_manifest_url() -> str:
 
 
 def update_manifest_urls() -> tuple[str, ...]:
-    env_urls = _normalize_url_lines(os.environ.get(UPDATE_URL_ENV, ""))
+    env_urls = tuple(
+        url
+        for url in _normalize_url_lines(os.environ.get(UPDATE_URL_ENV, ""))
+        if not _is_github_url(url)
+    )
     if env_urls:
         return env_urls
-    config_urls = _read_update_url_files()
+    config_urls = tuple(
+        url for url in _read_update_url_files() if not _is_github_url(url)
+    )
     if config_urls:
         return config_urls
     return DEFAULT_UPDATE_MANIFEST_URLS
@@ -301,7 +313,10 @@ def download_update_package(
     final_path = dest_dir / filename
     temp_path = dest_dir / f"{filename}.download"
     failures: list[str] = []
-    for download_url in update.download_urls:
+    download_urls = update.download_urls
+    if not download_urls:
+        raise UpdateError("更新配置没有可用的 Gitee 下载地址。")
+    for download_url in download_urls:
         if cancel_event is not None and cancel_event.is_set():
             temp_path.unlink(missing_ok=True)
             final_path.unlink(missing_ok=True)
@@ -354,7 +369,10 @@ def download_update_package(
 def resolve_download_url(update: UpdateInfo, timeout: int = 10) -> str:
     """Return the first reachable package URL without downloading its body."""
     failures: list[str] = []
-    for download_url in update.download_urls:
+    download_urls = update.download_urls
+    if not download_urls:
+        raise UpdateError("更新配置没有可用的 Gitee 下载地址。")
+    for download_url in download_urls:
         request = urllib.request.Request(
             download_url,
             headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"},
@@ -726,6 +744,11 @@ def _dedupe_urls(urls: Iterable[str]) -> tuple[str, ...]:
         if normalized and normalized not in unique:
             unique.append(normalized)
     return tuple(unique)
+
+
+def _is_github_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(str(url)).hostname or "").casefold()
+    return host == "github.com" or host.endswith(".github.com")
 
 
 def _is_release_discovery_url(url: str) -> bool:

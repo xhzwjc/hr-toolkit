@@ -5,6 +5,7 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import traceback
 import zipfile
 import zlib
@@ -184,6 +185,18 @@ def smoke_test() -> None:
         _mark_smoke_stage("archive-7z")
         _smoke_test_archive_runtimes(resolved_temp_root / "archive-runtime")
         if getattr(sys, "frozen", False):
+            _mark_smoke_stage("background-process")
+            from hr_toolkit.background_process import run_business_process
+
+            process_result = run_business_process(
+                module_name="hr_toolkit.background_process",
+                function_name="_process_smoke_probe",
+                args=(resolved_temp_root / "probe-input.xlsx", resolved_temp_root / "probe-output"),
+                kwargs={},
+                cancel_event=threading.Event(),
+            )
+            if process_result.payload.get("output_dir") != str(resolved_temp_root / "probe-output"):
+                raise RuntimeError("打包后台进程没有返回预期结果。")
             ocr_runtime_smoke_test(resolved_temp_root / "ocr-runtime")
         _mark_smoke_stage("project-store")
         project_root = resolved_temp_root / "project"
@@ -234,7 +247,7 @@ def _smoke_test_archive_runtimes(root: Path) -> None:
 
 
 def update_smoke_test() -> str:
-    """Verify secure Gitee-first metadata discovery with GitHub fallback."""
+    """Verify secure Gitee-only metadata discovery for domestic clients."""
     from hr_toolkit.app_update import check_for_update
 
     update = check_for_update("0.0.0")

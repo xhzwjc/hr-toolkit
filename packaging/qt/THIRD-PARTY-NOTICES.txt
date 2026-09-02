@@ -1,0 +1,20 @@
+HRToolkit Qt desktop runtime - third-party notice
+
+The packaged desktop application includes unmodified Qt and Qt for Python
+runtime libraries.  Modern Windows and macOS packages use Qt for Python
+(PySide6 Essentials) 6.6.3.1.  The Windows 7 SP1 compatibility package uses
+Qt for Python (PySide2) 5.15.2.1.
+
+Qt for Python and the included Qt libraries are available under their
+applicable open-source license options, including GNU LGPL version 3, or under
+commercial terms from The Qt Company.  HRToolkit uses the libraries through
+dynamic linking and does not modify the bundled Qt libraries.
+
+License and source information:
+https://www.qt.io/licensing/open-source-lgpl-obligations
+https://doc.qt.io/qtforpython/licenses.html
+https://code.qt.io/cgit/pyside/pyside-setup.git/
+https://code.qt.io/cgit/qt/
+
+Recipients may replace the dynamically linked Qt libraries with compatible
+versions, subject to the application's platform and ABI requirements.

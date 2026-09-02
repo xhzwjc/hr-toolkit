@@ -13,8 +13,28 @@ from typing import Optional, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEMPLATE_DIR = REPO_ROOT / "hr_toolkit" / "templates"
 DEFAULT_README = REPO_ROOT / "README.md"
+DEFAULT_QML_DIR = REPO_ROOT / "hr_toolkit" / "gui_qt" / "qml"
+DEFAULT_QT_NOTICE = REPO_ROOT / "packaging" / "qt" / "THIRD-PARTY-NOTICES.txt"
 EXPECTED_BUNDLE_IDENTIFIER = "com.xhzwjc.hrtoolkit"
 EXPECTED_DMG_FORMAT = "ULMO"
+QT6_REQUIRED_QML_FILES = (
+    "QtCore/qmldir",
+    "QtQml/qmldir",
+    "QtQml/Models/qmldir",
+    "QtQml/WorkerScript/qmldir",
+    "QtQml/WorkerScript/libworkerscriptplugin.dylib",
+    "QtQuick/qmldir",
+    "QtQuick/Layouts/qmldir",
+    "QtQuick/Templates/qmldir",
+    "QtQuick/Window/qmldir",
+    "QtQuick/Controls/qmldir",
+    "QtQuick/Controls/Basic/qmldir",
+    "QtQuick/Controls/Basic/Button.qml",
+)
+QT_TRANSLATION_SUFFIXES = ("_en.qm", "_zh_CN.qm", "_zh_TW.qm")
+QT_IMAGE_FORMAT_PLUGIN_NAMES = frozenset(
+    {"libqgif.dylib", "libqjpeg.dylib", "libqwebp.dylib"}
+)
 ARCHITECTURES = {"universal2", "x86_64", "arm64"}
 SPREADSHEET_SUFFIXES = {".csv", ".tsv", ".xls", ".xlsb", ".xlsm", ".xlsx"}
 PROHIBITED_DATA_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
@@ -175,6 +195,83 @@ def verify_packaged_resources(
 
     if not matching_readmes:
         raise MacBundleVerificationError("Bundle 缺少与仓库一致的 README.md")
+    packaged_qml_root = app_path / "Contents" / "Resources" / "hr_toolkit" / "gui_qt" / "qml"
+    qml_sources = tuple(sorted(path for path in DEFAULT_QML_DIR.rglob("*.qml") if path.is_file()))
+    if not qml_sources:
+        raise MacBundleVerificationError("源码 Qt Quick 资源为空")
+    for source in qml_sources:
+        relative = source.relative_to(DEFAULT_QML_DIR)
+        packaged = packaged_qml_root / relative
+        if not packaged.is_file() or _sha256(packaged) != _sha256(source):
+            raise MacBundleVerificationError(f"Bundle Qt Quick 资源缺失或内容不一致：{relative}")
+    qt_notice = (
+        app_path
+        / "Contents"
+        / "Resources"
+        / "third_party"
+        / "qt"
+        / DEFAULT_QT_NOTICE.name
+    )
+    if not qt_notice.is_file() or _sha256(qt_notice) != _sha256(DEFAULT_QT_NOTICE):
+        raise MacBundleVerificationError("Bundle 缺少正确的 Qt 第三方许可说明")
+    qt_qml_root = (
+        app_path
+        / "Contents"
+        / "Resources"
+        / "PySide6"
+        / "Qt"
+        / "qml"
+    )
+    missing_qt_qml = [
+        relative
+        for relative in QT6_REQUIRED_QML_FILES
+        if not (qt_qml_root / relative).is_file()
+    ]
+    if missing_qt_qml:
+        raise MacBundleVerificationError(
+            f"Bundle 缺少 Qt Quick 运行时资源：{missing_qt_qml}"
+        )
+    translations = app_path / "Contents" / "Resources" / "PySide6" / "Qt" / "translations"
+    unexpected_translations = sorted(
+        path.name
+        for path in translations.glob("*.qm")
+        if not path.name.endswith(QT_TRANSLATION_SUFFIXES)
+    )
+    if unexpected_translations:
+        raise MacBundleVerificationError(
+            f"Bundle 包含未使用的 Qt 翻译：{unexpected_translations}"
+        )
+    qml_tooling = (
+        app_path
+        / "Contents"
+        / "Frameworks"
+        / "PySide6"
+        / "Qt"
+        / "plugins"
+        / "qmltooling"
+    )
+    if qml_tooling.exists():
+        raise MacBundleVerificationError("Bundle 包含仅供调试/分析使用的 Qt QML 开发插件")
+    image_format_dir = qml_tooling.parent / "imageformats"
+    unexpected_image_plugins = sorted(
+        path.name
+        for path in image_format_dir.glob("*.dylib")
+        if path.name not in QT_IMAGE_FORMAT_PLUGIN_NAMES
+    )
+    if unexpected_image_plugins:
+        raise MacBundleVerificationError(
+            f"Bundle 包含业务不使用的 Qt 图片格式插件：{unexpected_image_plugins}"
+        )
+    pillow_root = app_path / "Contents" / "Frameworks" / "PIL"
+    unexpected_avif = sorted(
+        str(path.relative_to(app_path))
+        for path in pillow_root.rglob("*")
+        if path.is_file() and "avif" in path.name.casefold()
+    )
+    if unexpected_avif:
+        raise MacBundleVerificationError(
+            f"Bundle 包含业务不支持的 Pillow AVIF 解码运行库：{unexpected_avif}"
+        )
     packaged_template_names = {path.name for path in packaged_spreadsheets}
     expected_template_names = set(expected_templates)
     if packaged_template_names != expected_template_names:
@@ -220,6 +317,7 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
     # The application writes the same result to this CI-only path, which lets us
     # verify headless commands without weakening the GUI build.
     with tempfile.TemporaryDirectory(prefix="hr_toolkit_smoke_") as temporary:
+        environment["HR_TOOLKIT_APP_LOG"] = str(Path(temporary) / "HRToolkit_app.log")
         version_output = Path(temporary) / "version.txt"
         environment["HR_TOOLKIT_CHECK_OUTPUT"] = str(version_output)
         version_result = subprocess.run(
@@ -289,6 +387,28 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
                 "打包程序 --update-smoke-test 结果不一致："
                 f"文件={update_smoke_output!s}，stdout={fallback!r}"
             )
+
+        qt_smoke_output = Path(temporary) / "qt-smoke.txt"
+        environment["HR_TOOLKIT_CHECK_OUTPUT"] = str(qt_smoke_output)
+        qt_smoke_result = subprocess.run(
+            [str(launcher), "--qt-smoke-test"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=90,
+        )
+        if qt_smoke_result.returncode != 0:
+            raise MacBundleVerificationError(
+                "打包程序 Qt Quick smoke-test 失败"
+                f"（{qt_smoke_result.returncode}）：{qt_smoke_result.stderr.strip()}"
+            )
+        if (
+            not qt_smoke_output.is_file()
+            or qt_smoke_output.read_text(encoding="utf-8").strip() != "HRToolkit Qt smoke-test OK"
+        ):
+            raise MacBundleVerificationError("打包程序 Qt Quick smoke-test 输出不正确")
 
 
 def verify_app_bundle(

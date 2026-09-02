@@ -35,12 +35,64 @@ WIN7_PYINSTALLER_HOOKS_DIR = REPO_ROOT / "packaging" / "windows" / "win7" / "hoo
 WIN7_PYINSTALLER_HOOK = WIN7_PYINSTALLER_HOOKS_DIR / "hook-hr_toolkit.py"
 README_FILE = REPO_ROOT / "README.md"
 TEMPLATES_DIR = REPO_ROOT / "hr_toolkit" / "templates"
+QML_DIR = REPO_ROOT / "hr_toolkit" / "gui_qt" / "qml"
+QT_NOTICE = REPO_ROOT / "packaging" / "qt" / "THIRD-PARTY-NOTICES.txt"
+QT_PYINSTALLER_HOOKS_DIR = REPO_ROOT / "packaging" / "qt" / "hooks"
+
+QT6_REQUIRED_QML_FILES = (
+    "QtCore/qmldir",
+    "QtQml/qmldir",
+    "QtQml/Models/qmldir",
+    "QtQml/WorkerScript/qmldir",
+    "QtQml/WorkerScript/workerscriptplugin.dll",
+    "QtQuick/qmldir",
+    "QtQuick/Layouts/qmldir",
+    "QtQuick/Templates/qmldir",
+    "QtQuick/Window/qmldir",
+    "QtQuick/Controls/qmldir",
+    "QtQuick/Controls/Basic/qmldir",
+    "QtQuick/Controls/Basic/Button.qml",
+)
+QT5_REQUIRED_QML_FILES = (
+    "QtQml/qmldir",
+    "QtQml/Models.2/qmldir",
+    "QtQml/WorkerScript.2/qmldir",
+    "QtQml/WorkerScript.2/workerscriptplugin.dll",
+    "QtQuick.2/qmldir",
+    "QtQuick/Layouts/qmldir",
+    "QtQuick/Templates.2/qmldir",
+    "QtQuick/Window.2/qmldir",
+    "QtQuick/Controls.2/qmldir",
+    "QtQuick/Controls.2/Button.qml",
+)
+QT5_REQUIRED_RUNTIME_FILES = (
+    "PySide2/Qt5Core.dll",
+    "PySide2/Qt5Gui.dll",
+    "PySide2/Qt5Qml.dll",
+    "PySide2/Qt5QmlWorkerScript.dll",
+    "PySide2/Qt5Quick.dll",
+    "PySide2/Qt5QuickControls2.dll",
+    "PySide2/QtCore.pyd",
+    "PySide2/QtGui.pyd",
+    "PySide2/QtQml.pyd",
+    "PySide2/d3dcompiler_47.dll",
+    "PySide2/libEGL.dll",
+    "PySide2/libGLESv2.dll",
+    "PySide2/plugins/platforms/qwindows.dll",
+)
 
 WINDOWS_BUILD_MODULES = {
     "PyInstaller": "pyinstaller",
+    "PySide6.QtQml": "PySide6_Essentials",
+    "PySide6.QtQuick": "PySide6_Essentials",
+    "PySide6.QtQuickControls2": "PySide6_Essentials",
     "certifi": "certifi",
+    "cv2": "opencv-python",
+    "onnxruntime": "onnxruntime",
     "openpyxl": "openpyxl",
+    "PIL.Image": "Pillow",
     "py7zr": "py7zr",
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime",
     "pypdf": "pypdf",
     "unrar.cffi.rarfile": "unrar2-cffi",
     "xlrd": "xlrd",
@@ -51,10 +103,17 @@ WINDOWS_BUILD_MODULES = {
 }
 WINDOWS_WIN7_BUILD_MODULES = {
     "PyInstaller": "pyinstaller",
+    "PySide2.QtQml": "PySide2",
+    "PySide2.QtQuick": "PySide2",
+    "PySide2.QtQuickControls2": "PySide2",
     "certifi": "certifi",
+    "cv2": "opencv-python",
+    "onnxruntime": "onnxruntime",
     "openpyxl": "openpyxl",
+    "PIL.Image": "Pillow",
     "pefile": "pefile",
     "py7zr": "py7zr",
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime",
     "pypdfium2": "pypdfium2",
     "xlrd": "xlrd",
     "pythoncom": "pywin32",
@@ -68,14 +127,16 @@ WIN7_PINNED_DISTRIBUTIONS = {
     "opencv-python": "4.8.1.78",
     "Pillow": "10.4.0",
     "PyInstaller": "6.21.0",
+    "PySide2": "5.15.2.1",
     "py7zr": "0.22.0",
     "pypdfium2": "4.27.0",
     "pywin32": "306",
     "rapidocr-onnxruntime": "1.4.4",
+    "shiboken2": "5.15.2.1",
 }
 HIDDEN_IMPORTS = (
-    "PIL.ImageGrab",
-    "PIL.ImageTk",
+    "PySide6.QtQml",
+    "PySide6.QtWidgets",
     "pythoncom",
     "pywintypes",
     "win32com.client",
@@ -87,8 +148,8 @@ HIDDEN_IMPORTS = (
     "xlrd",
 )
 WIN7_HIDDEN_IMPORTS = (
-    "PIL.ImageGrab",
-    "PIL.ImageTk",
+    "PySide2.QtQml",
+    "PySide2.QtWidgets",
     "pythoncom",
     "pywintypes",
     "win32com.client",
@@ -122,6 +183,20 @@ EXCLUDED_MODULES = (
     "turtle",
     "doctest",
     "lib2to3",
+)
+# Release applications are Qt Quick-only.  Keep the legacy Tk renderer
+# available in source checkouts, while avoiding a second GUI runtime in every
+# installed main application.  The standalone updater still uses Tk and must
+# therefore use EXCLUDED_MODULES rather than this extended tuple.
+MAIN_APP_EXCLUDED_MODULES = (
+    *EXCLUDED_MODULES,
+    "tkinter",
+    "hr_toolkit.gui",
+    "PIL.ImageGrab",
+    "PIL.ImageTk",
+    "PIL._imagingtk",
+    "PIL.AvifImagePlugin",
+    "PIL._avif",
 )
 RELEASE_TEMPLATE_NAMES = (
     "archive_company_template.xlsx",
@@ -257,6 +332,8 @@ FORBIDDEN_DATA_FILENAMES = {
     "project-write.lock",
 }
 OPENCV_VIDEOIO_FFMPEG_PATTERN = "opencv_videoio_ffmpeg*.dll"
+QT_TRANSLATION_SUFFIXES = ("_en.qm", "_zh_CN.qm", "_zh_TW.qm")
+QT_IMAGE_FORMAT_PLUGIN_NAMES = frozenset({"qgif.dll", "qjpeg.dll", "qwebp.dll"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -533,6 +610,18 @@ def build_windows_binaries(
     removed_bytes = remove_unused_opencv_videoio_ffmpeg(app_dir)
     if removed_bytes:
         print(f"已移除未使用的 OpenCV 视频后端：{removed_bytes} 字节")
+    removed_translation_bytes = remove_unused_qt_translations(app_dir, target=target)
+    if removed_translation_bytes:
+        print(f"已移除未使用的 Qt 翻译：{removed_translation_bytes} 字节")
+    removed_development_bytes = remove_qt_development_plugins(app_dir, target=target)
+    if removed_development_bytes:
+        print(f"已移除 Qt QML 开发插件：{removed_development_bytes} 字节")
+    removed_image_plugin_bytes = remove_unused_qt_image_format_plugins(
+        app_dir,
+        target=target,
+    )
+    if removed_image_plugin_bytes:
+        print(f"已移除未使用的 Qt 图片格式插件：{removed_image_plugin_bytes} 字节")
     _run(updater_command)
     if not app_dir.is_dir() or not updater_path.is_file():
         raise RuntimeError("PyInstaller 未生成预期的 HRToolkit onedir 和 Updater。")
@@ -563,6 +652,84 @@ def remove_unused_opencv_videoio_ffmpeg(app_dir: Path) -> int:
     leftovers = sorted(cv2_dir.glob(OPENCV_VIDEOIO_FFMPEG_PATTERN))
     if leftovers:
         raise RuntimeError(f"OpenCV 视频后端未完全移除：{leftovers}")
+    return removed_bytes
+
+
+def remove_unused_qt_translations(
+    app_dir: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> int:
+    """Remove Qt translations outside the English and Chinese release locales."""
+
+    target = validate_windows_target(target)
+    internal = app_dir / "_internal"
+    translations = (
+        internal / "PySide2" / "translations"
+        if target == WINDOWS_TARGET_WIN7
+        else internal / "PySide6" / "Qt" / "translations"
+    )
+    removed_bytes = 0
+    if not translations.is_dir():
+        return removed_bytes
+    for path in sorted(translations.glob("*.qm")):
+        if path.name.endswith(QT_TRANSLATION_SUFFIXES):
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"拒绝移除非普通 Qt 翻译文件：{path}")
+        removed_bytes += path.stat().st_size
+        path.unlink()
+    return removed_bytes
+
+
+def remove_qt_development_plugins(
+    app_dir: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> int:
+    """Remove QML debugger/profiler plugins from production Windows payloads."""
+
+    target = validate_windows_target(target)
+    internal = app_dir / "_internal"
+    plugin_dir = (
+        internal / "PySide2" / "plugins" / "qmltooling"
+        if target == WINDOWS_TARGET_WIN7
+        else internal / "PySide6" / "Qt" / "plugins" / "qmltooling"
+    )
+    if not plugin_dir.exists():
+        return 0
+    if plugin_dir.is_symlink() or not plugin_dir.is_dir():
+        raise RuntimeError(f"拒绝移除异常 Qt 开发插件路径：{plugin_dir}")
+    files = [path for path in plugin_dir.rglob("*") if path.is_file()]
+    removed_bytes = sum(path.stat().st_size for path in files)
+    shutil.rmtree(plugin_dir)
+    return removed_bytes
+
+
+def remove_unused_qt_image_format_plugins(
+    app_dir: Path,
+    *,
+    target: str = WINDOWS_TARGET_MODERN,
+) -> int:
+    """Keep only codecs for image formats accepted by the business tools."""
+
+    target = validate_windows_target(target)
+    internal = app_dir / "_internal"
+    plugin_dir = (
+        internal / "PySide2" / "plugins" / "imageformats"
+        if target == WINDOWS_TARGET_WIN7
+        else internal / "PySide6" / "Qt" / "plugins" / "imageformats"
+    )
+    if not plugin_dir.is_dir():
+        return 0
+    removed_bytes = 0
+    for path in sorted(plugin_dir.glob("*.dll")):
+        if path.name.casefold() in QT_IMAGE_FORMAT_PLUGIN_NAMES:
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"拒绝移除异常 Qt 图片格式插件：{path}")
+        removed_bytes += path.stat().st_size
+        path.unlink()
     return removed_bytes
 
 
@@ -605,6 +772,9 @@ def pyinstaller_commands(
 ) -> tuple[list[str], list[str]]:
     validate_stable_semver(version)
     target = validate_windows_target(target)
+    release_qml_files()
+    if not QT_NOTICE.is_file() or not QT_PYINSTALLER_HOOKS_DIR.is_dir():
+        raise RuntimeError("缺少 Qt 打包许可说明或 PyInstaller 钩子。")
     seven_zip_dir, ucrt_dir, vc_runtime_dir = validate_win7_runtime_sources(
         target=target,
         seven_zip_dir=seven_zip_dir,
@@ -631,6 +801,7 @@ def pyinstaller_commands(
         "--version-file",
         str(version_file),
     ]
+    common.extend(["--additional-hooks-dir", str(QT_PYINSTALLER_HOOKS_DIR)])
     if target == WINDOWS_TARGET_WIN7:
         common.extend(["--additional-hooks-dir", str(WIN7_PYINSTALLER_HOOKS_DIR)])
     main = [
@@ -645,6 +816,10 @@ def pyinstaller_commands(
         str(WINDOWS_WIN7_MANIFEST if target == WINDOWS_TARGET_WIN7 else WINDOWS_MANIFEST),
         "--add-data",
         f"{README_FILE};.",
+        "--add-data",
+        f"{QML_DIR};hr_toolkit/gui_qt/qml",
+        "--add-data",
+        f"{QT_NOTICE};third_party/qt",
         "--copy-metadata",
         "pypdfium2" if target == WINDOWS_TARGET_WIN7 else "pypdf",
     ]
@@ -677,7 +852,7 @@ def pyinstaller_commands(
     )
     for module in hidden_imports:
         main.extend(["--hidden-import", module])
-    for module in EXCLUDED_MODULES:
+    for module in MAIN_APP_EXCLUDED_MODULES:
         main.extend(["--exclude-module", module])
     for module in collect_all_modules:
         main.extend(["--collect-all", module])
@@ -726,6 +901,19 @@ def release_template_files() -> tuple[Path, ...]:
         extra = sorted(discovered - expected)
         raise RuntimeError(f"内置模板白名单不一致，缺少={missing}，多出={extra}")
     return tuple(TEMPLATES_DIR / name for name in RELEASE_TEMPLATE_NAMES)
+
+
+def release_qml_files() -> tuple[Path, ...]:
+    files = tuple(sorted(path for path in QML_DIR.rglob("*.qml") if path.is_file()))
+    required = {
+        QML_DIR / "Main.qml",
+        QML_DIR / "components" / "AppButton.qml",
+        QML_DIR / "components" / "Card.qml",
+    }
+    missing = sorted(str(path) for path in required if path not in files)
+    if missing:
+        raise RuntimeError(f"Qt Quick 资源不完整，缺少={missing}")
+    return files
 
 
 def windows_version_info(
@@ -802,6 +990,8 @@ def verify_windows_payload(
             raise RuntimeError(f"程序包包含非白名单或用户项目数据：{relative}")
         if path.suffix.lower() == ".xlsx" and not _is_template_payload_path(relative):
             raise RuntimeError(f"程序包包含模板目录之外的 Excel：{relative}")
+        if "pil" in lowered_parts and "avif" in path.name.casefold():
+            raise RuntimeError(f"程序包包含业务不支持的 Pillow AVIF 解码运行库：{relative}")
 
     root_files = {path.name for path in app_dir.iterdir() if path.is_file()}
     allowed_root_files = {
@@ -830,9 +1020,72 @@ def verify_windows_payload(
     readmes = [path for path in files if path.name == README_FILE.name]
     if len(readmes) != 1 or readmes[0].read_bytes() != README_FILE.read_bytes():
         raise RuntimeError("程序包必须且只能包含一份与仓库一致的 README.md。")
+    packaged_qml_root = internal / "hr_toolkit" / "gui_qt" / "qml"
+    for source in release_qml_files():
+        relative = source.relative_to(QML_DIR)
+        packaged = packaged_qml_root / relative
+        if not packaged.is_file() or packaged.read_bytes() != source.read_bytes():
+            raise RuntimeError(f"程序包 Qt Quick 资源缺失或内容不一致：{relative}")
+    qt_notice = internal / "third_party" / "qt" / QT_NOTICE.name
+    if not qt_notice.is_file() or qt_notice.read_bytes() != QT_NOTICE.read_bytes():
+        raise RuntimeError("程序包缺少正确的 Qt 第三方许可说明。")
+    verify_packaged_qt_qml(internal, target=target)
     verify_payload_pe_architecture(app_dir)
     if target == WINDOWS_TARGET_WIN7:
         verify_win7_runtime_payload(app_dir)
+
+
+def verify_packaged_qt_qml(internal: Path, *, target: str) -> None:
+    target = validate_windows_target(target)
+    if target == WINDOWS_TARGET_WIN7:
+        qml_root = internal / "PySide2" / "qml"
+        translations = internal / "PySide2" / "translations"
+        required = QT5_REQUIRED_QML_FILES
+    else:
+        qml_root = internal / "PySide6" / "Qt" / "qml"
+        translations = internal / "PySide6" / "Qt" / "translations"
+        required = QT6_REQUIRED_QML_FILES
+    missing = [relative for relative in required if not (qml_root / relative).is_file()]
+    if missing:
+        raise RuntimeError(
+            f"程序包缺少 {target} Qt Quick 运行时资源：{missing}"
+        )
+    unexpected_translations = sorted(
+        path.name
+        for path in translations.glob("*.qm")
+        if not path.name.endswith(QT_TRANSLATION_SUFFIXES)
+    )
+    if unexpected_translations:
+        raise RuntimeError(
+            f"程序包包含未使用的 {target} Qt 翻译：{unexpected_translations}"
+        )
+    plugin_root = (
+        internal / "PySide2" / "plugins"
+        if target == WINDOWS_TARGET_WIN7
+        else internal / "PySide6" / "Qt" / "plugins"
+    )
+    if (plugin_root / "qmltooling").exists():
+        raise RuntimeError(f"程序包包含仅供调试/分析使用的 {target} Qt QML 开发插件")
+    unexpected_image_plugins = sorted(
+        path.name
+        for path in (plugin_root / "imageformats").glob("*.dll")
+        if path.name.casefold() not in QT_IMAGE_FORMAT_PLUGIN_NAMES
+    )
+    if unexpected_image_plugins:
+        raise RuntimeError(
+            f"程序包包含业务不使用的 {target} Qt 图片格式插件："
+            f"{unexpected_image_plugins}"
+        )
+    if target == WINDOWS_TARGET_WIN7:
+        missing_runtime = [
+            relative
+            for relative in QT5_REQUIRED_RUNTIME_FILES
+            if not (internal / relative).is_file()
+        ]
+        if missing_runtime:
+            raise RuntimeError(
+                f"程序包缺少 Windows 7 Qt/ANGLE 运行时：{missing_runtime}"
+            )
 
 
 def verify_win7_runtime_payload(app_dir: Path) -> None:
@@ -1229,6 +1482,19 @@ def run_runtime_smoke(
         if not update_smoke_result.startswith(expected_prefix):
             raise RuntimeError(
                 f"打包程序 update-smoke-test 输出不正确：{update_smoke_result or '空'}"
+            )
+        env["HR_TOOLKIT_SKIP_UPDATE"] = "1"
+        _run_packaged_check(
+            [str(app_executable), "--qt-smoke-test"],
+            output_path=output_path,
+            label="打包程序 Qt Quick smoke-test",
+            timeout=90,
+            env=env,
+        )
+        qt_smoke_result = output_path.read_text(encoding="utf-8").strip()
+        if qt_smoke_result != "HRToolkit Qt smoke-test OK":
+            raise RuntimeError(
+                f"打包程序 Qt Quick smoke-test 输出不正确：{qt_smoke_result or '空'}"
             )
         if target == WINDOWS_TARGET_WIN7:
             updater_smoke_dir = Path(tmp) / "updater"

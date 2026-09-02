@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hr_toolkit import runlog
 
@@ -93,6 +94,28 @@ class RunLogTests(unittest.TestCase):
         self.assertEqual(record["status"], "success")
         self.assertIn("2026-08-19", str(record["started_at"]))
         self.assertIn("timestamp", record)
+
+    def test_frozen_macos_log_uses_writable_user_log_directory(self) -> None:
+        os.environ.pop(runlog.RUN_LOG_ENV, None)
+        user_home = Path(self._tmp.name) / "user"
+        with patch.object(runlog.sys, "frozen", True, create=True), patch.object(
+            runlog.sys, "platform", "darwin"
+        ), patch.object(runlog.Path, "home", return_value=user_home):
+            self.assertEqual(
+                runlog.run_log_path(),
+                user_home / "Library" / "Logs" / "HRToolkit" / runlog.RUN_LOG_FILE,
+            )
+
+    def test_frozen_windows_log_uses_local_app_data(self) -> None:
+        os.environ.pop(runlog.RUN_LOG_ENV, None)
+        local_app_data = Path(self._tmp.name) / "LocalAppData"
+        with patch.object(runlog.sys, "frozen", True, create=True), patch.object(
+            runlog.sys, "platform", "win32"
+        ), patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}):
+            self.assertEqual(
+                runlog.run_log_path(),
+                local_app_data / "HRToolkit" / "logs" / runlog.RUN_LOG_FILE,
+            )
 
 
 if __name__ == "__main__":

@@ -22,11 +22,18 @@ dependencies = [
 [project.scripts]
 hr-toolkit = "hr_toolkit.cli:main"
 
+[project.optional-dependencies]
+gui = [
+    'PySide6_Essentials==6.6.3.1; python_version >= "3.9"',
+    'PySide2==5.15.2.1; python_version < "3.9" and platform_system == "Windows"',
+]
+
 [tool.setuptools.packages.find]
 include = ["hr_toolkit*"]
 
 [tool.setuptools.package-data]
 "hr_toolkit.templates" = ["*.xlsx"]
+"hr_toolkit.gui_qt" = ["qml/*.qml", "qml/components/*.qml"]
 
 [tool.setuptools.dynamic]
 version = { attr = "hr_toolkit.__version__" }

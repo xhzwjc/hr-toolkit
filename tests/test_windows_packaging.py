@@ -18,6 +18,7 @@ from scripts import build_macos
 from scripts import build_windows
 from scripts import build_windows_installers
 from scripts import release_windows
+from scripts import prepare_macos_x64_runtime
 from scripts import prepare_win7_runtime
 from scripts import verify_macos_bundle
 from hr_toolkit.app_update import WIN7_UPDATER_APP_LOCAL_RUNTIME_FILES
@@ -67,7 +68,10 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn(str(build_windows.WINDOWS_WIN7_MANIFEST), main)
         self.assertNotIn("--add-binary", main)
         self.assertNotIn("--add-binary", updater)
-        self.assertNotIn("--additional-hooks-dir", main)
+        self.assertIn(
+            ["--additional-hooks-dir", str(build_windows.QT_PYINSTALLER_HOOKS_DIR)],
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
         self.assertNotIn("--additional-hooks-dir", updater)
         self.assertEqual(main[-1], str(build_windows.APP_ENTRYPOINT))
         self.assertEqual(updater[-1], str(build_windows.UPDATER_ENTRYPOINT))
@@ -88,6 +92,19 @@ class WindowsPackagingTests(unittest.TestCase):
         for excluded in build_windows.EXCLUDED_MODULES:
             self.assertIn(excluded, main)
             self.assertIn(excluded, updater)
+        self.assertIn("tkinter", build_windows.MAIN_APP_EXCLUDED_MODULES)
+        self.assertIn("hr_toolkit.gui", build_windows.MAIN_APP_EXCLUDED_MODULES)
+        self.assertIn("PIL.ImageTk", build_windows.MAIN_APP_EXCLUDED_MODULES)
+        self.assertIn("PIL.AvifImagePlugin", build_windows.MAIN_APP_EXCLUDED_MODULES)
+        self.assertIn("PIL._avif", build_windows.MAIN_APP_EXCLUDED_MODULES)
+        self.assertIn(
+            ["--exclude-module", "tkinter"],
+            [main[index : index + 2] for index in range(len(main) - 1)],
+        )
+        self.assertNotIn(
+            ["--exclude-module", "tkinter"],
+            [updater[index : index + 2] for index in range(len(updater) - 1)],
+        )
         for hidden_import in build_windows.HIDDEN_IMPORTS:
             self.assertIn(["--hidden-import", hidden_import], [main[index : index + 2] for index in range(len(main) - 1)])
         for module in build_windows.COLLECT_ALL_MODULES:
@@ -99,8 +116,16 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertNotIn("pypdfium2", main)
 
         data_values = [main[index + 1] for index, value in enumerate(main[:-1]) if value == "--add-data"]
-        self.assertEqual(len(data_values), 1 + len(build_windows.release_template_files()))
+        self.assertEqual(len(data_values), 3 + len(build_windows.release_template_files()))
         self.assertTrue(any(value.startswith(str(build_windows.README_FILE) + ";") for value in data_values))
+        self.assertIn(
+            f"{build_windows.QML_DIR};hr_toolkit/gui_qt/qml",
+            data_values,
+        )
+        self.assertIn(
+            f"{build_windows.QT_NOTICE};third_party/qt",
+            data_values,
+        )
         template_sources = {
             value.split(";", 1)[0]
             for value in data_values
@@ -256,6 +281,11 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("_sevenzip_binaries + _rar_binaries", spec)
         self.assertIn("_sevenzip_hidden + _rar_hidden", spec)
         self.assertNotIn('"distutils"', spec)
+        self.assertIn('"tkinter"', spec)
+        self.assertIn('"hr_toolkit.gui"', spec)
+        self.assertIn('"PIL.ImageTk"', spec)
+        self.assertIn('"PIL.AvifImagePlugin"', spec)
+        self.assertIn('"PIL._avif"', spec)
 
     def test_macos_dmg_uses_two_stage_ulmo_compression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -370,6 +400,161 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertEqual(retained.read_bytes(), retained_payload)
             build_windows.verify_windows_payload(app_dir)
 
+    def test_packaging_prunes_only_unused_qt_translations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_dir, _updater = self._fake_app(root / "windows")
+            translations = app_dir / "_internal" / "PySide6" / "Qt" / "translations"
+            translations.mkdir(parents=True)
+            retained = {
+                "qt_en.qm": b"english",
+                "qtbase_zh_CN.qm": b"simplified",
+                "qtbase_zh_TW.qm": b"traditional",
+            }
+            for name, payload in retained.items():
+                (translations / name).write_bytes(payload)
+            removed = translations / "qtbase_de.qm"
+            removed.write_bytes(b"unused-german")
+
+            with self.assertRaisesRegex(RuntimeError, "未使用的 modern Qt 翻译"):
+                build_windows.verify_windows_payload(app_dir)
+            removed_bytes = build_windows.remove_unused_qt_translations(app_dir)
+            self.assertEqual(removed_bytes, len(b"unused-german"))
+            self.assertFalse(removed.exists())
+            for name, payload in retained.items():
+                self.assertEqual((translations / name).read_bytes(), payload)
+            build_windows.verify_windows_payload(app_dir)
+
+            mac_app = root / "HRToolkit.app"
+            mac_translations = (
+                mac_app
+                / "Contents"
+                / "Resources"
+                / "PySide6"
+                / "Qt"
+                / "translations"
+            )
+            mac_translations.mkdir(parents=True)
+            for name, payload in retained.items():
+                (mac_translations / name).write_bytes(payload)
+            mac_removed = mac_translations / "qtbase_fr.qm"
+            mac_removed.write_bytes(b"unused-french")
+            self.assertEqual(
+                build_macos.remove_unused_qt_translations(mac_app),
+                len(b"unused-french"),
+            )
+            self.assertFalse(mac_removed.exists())
+            for name, payload in retained.items():
+                self.assertEqual((mac_translations / name).read_bytes(), payload)
+
+            windows_tooling = (
+                app_dir / "_internal" / "PySide6" / "Qt" / "plugins" / "qmltooling"
+            )
+            windows_tooling.mkdir(parents=True)
+            (windows_tooling / "qmldbg.dll").write_bytes(b"development-plugin")
+            with self.assertRaisesRegex(RuntimeError, "Qt QML 开发插件"):
+                build_windows.verify_windows_payload(app_dir)
+            self.assertEqual(
+                build_windows.remove_qt_development_plugins(app_dir),
+                len(b"development-plugin"),
+            )
+            self.assertFalse(windows_tooling.exists())
+            build_windows.verify_windows_payload(app_dir)
+
+            mac_tooling = (
+                mac_app
+                / "Contents"
+                / "Frameworks"
+                / "PySide6"
+                / "Qt"
+                / "plugins"
+                / "qmltooling"
+            )
+            mac_tooling.mkdir(parents=True)
+            (mac_tooling / "libqmldbg.dylib").write_bytes(b"development-plugin-mac")
+            self.assertEqual(
+                build_macos.remove_qt_development_plugins(mac_app),
+                len(b"development-plugin-mac"),
+            )
+            self.assertFalse(mac_tooling.exists())
+
+            windows_images = (
+                app_dir / "_internal" / "PySide6" / "Qt" / "plugins" / "imageformats"
+            )
+            windows_images.mkdir(parents=True)
+            windows_retained = windows_images / "qjpeg.dll"
+            windows_removed = windows_images / "qtiff.dll"
+            self._write_fake_pe(windows_retained, build_windows.PE_MACHINE_AMD64)
+            self._write_fake_pe(windows_removed, build_windows.PE_MACHINE_AMD64)
+            retained_payload = windows_retained.read_bytes()
+            removed_size = windows_removed.stat().st_size
+            with self.assertRaisesRegex(RuntimeError, "Qt 图片格式插件"):
+                build_windows.verify_windows_payload(app_dir)
+            self.assertEqual(
+                build_windows.remove_unused_qt_image_format_plugins(app_dir),
+                removed_size,
+            )
+            self.assertEqual(windows_retained.read_bytes(), retained_payload)
+            self.assertFalse(windows_removed.exists())
+            build_windows.verify_windows_payload(app_dir)
+
+            pillow_dir = app_dir / "_internal" / "PIL"
+            pillow_dir.mkdir(parents=True)
+            avif_runtime = pillow_dir / "libavif.dll"
+            avif_runtime.write_bytes(b"unsupported-avif")
+            with self.assertRaisesRegex(RuntimeError, "Pillow AVIF"):
+                build_windows.verify_windows_payload(app_dir)
+            avif_runtime.unlink()
+            build_windows.verify_windows_payload(app_dir)
+
+            mac_images = mac_tooling.parent / "imageformats"
+            mac_images.mkdir(parents=True)
+            mac_retained = mac_images / "libqwebp.dylib"
+            mac_removed = mac_images / "libqtiff.dylib"
+            mac_retained.write_bytes(b"retained-webp")
+            mac_removed.write_bytes(b"unused-tiff")
+            self.assertEqual(
+                build_macos.remove_unused_qt_image_format_plugins(mac_app),
+                len(b"unused-tiff"),
+            )
+            self.assertEqual(mac_retained.read_bytes(), b"retained-webp")
+            self.assertFalse(mac_removed.exists())
+
+    def test_compact_intel_macos_numpy_runtime_is_strictly_gated(self) -> None:
+        compact_configuration = {
+            "Build Dependencies": {
+                "blas": {"name": "none"},
+                "lapack": {"detection method": "internal"},
+            }
+        }
+        self.assertTrue(
+            prepare_macos_x64_runtime.configuration_uses_internal_fallback(
+                compact_configuration
+            )
+        )
+        external_configuration = {
+            "Build Dependencies": {
+                "blas": {"name": "openblas"},
+                "lapack": {"detection method": "pkgconfig"},
+            }
+        }
+        self.assertFalse(
+            prepare_macos_x64_runtime.configuration_uses_internal_fallback(
+                external_configuration
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel = Path(tmp) / prepare_macos_x64_runtime.EXPECTED_WHEEL_NAME
+            wheel.write_bytes(b"compact-wheel")
+            prepare_macos_x64_runtime.validate_compact_wheel(wheel)
+            invalid = Path(tmp) / "numpy-1.26.4-cp312-cp312-macosx_12_0_x86_64.whl"
+            invalid.write_bytes(b"wrong-floor")
+            with self.assertRaisesRegex(
+                prepare_macos_x64_runtime.MacX64RuntimeError,
+                "最低 macOS 版本",
+            ):
+                prepare_macos_x64_runtime.validate_compact_wheel(invalid)
+
     def test_win7_frozen_smoke_forces_bundled_7zip_without_changing_modern(self) -> None:
         observed_environments: list[dict[str, str]] = []
 
@@ -396,6 +581,8 @@ class WindowsPackagingTests(unittest.TestCase):
                     f"HRToolkit {self.version} smoke-test OK",
                     encoding="utf-8",
                 )
+            elif "--qt-smoke-test" in command:
+                output_path.write_text("HRToolkit Qt smoke-test OK", encoding="utf-8")
             else:
                 output_path.write_text(
                     f"HRToolkit {self.version} update-smoke-test OK; latest={self.version}",
@@ -429,14 +616,14 @@ class WindowsPackagingTests(unittest.TestCase):
                 build_windows.run_runtime_smoke(app, updater)
                 modern_environments = list(observed_environments)
 
-        self.assertEqual(len(win7_environments), 4)
+        self.assertEqual(len(win7_environments), 5)
         self.assertTrue(
             all(
                 build_windows.WIN7_7ZIP_OVERRIDE_ENV not in env
                 for env in win7_environments
             )
         )
-        self.assertEqual(len(modern_environments), 3)
+        self.assertEqual(len(modern_environments), 4)
         self.assertTrue(
             all(
                 env[build_windows.WIN7_7ZIP_OVERRIDE_ENV]
@@ -529,11 +716,19 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("pypdf==6.16.1", constraints)
         self.assertIn("pyinstaller==6.21.0", constraints)
         self.assertIn(
-            'onnxruntime==1.23.2; platform_system == "Darwin" and platform_machine == "x86_64"',
+            'onnxruntime==1.17.3; platform_system == "Darwin" and platform_machine == "x86_64"',
             constraints,
         )
         self.assertIn(
             'onnxruntime==1.29.0; platform_system != "Darwin" or platform_machine != "x86_64"',
+            constraints,
+        )
+        self.assertIn(
+            'opencv-python==4.5.5.64; platform_system == "Darwin" and platform_machine == "x86_64"',
+            constraints,
+        )
+        self.assertIn(
+            'opencv-python==4.10.0.84; platform_system != "Darwin" or platform_machine != "x86_64"',
             constraints,
         )
         for constraint in constraints:
@@ -581,6 +776,8 @@ class WindowsPackagingTests(unittest.TestCase):
                 self.assertIn("runner: macos-15", workflow)
                 self.assertIn("architecture: arm64", workflow)
                 self.assertIn('test "$(uname -m)" = "${{ matrix.architecture }}"', workflow)
+                self.assertIn("if: matrix.architecture == 'x86_64'", workflow)
+                self.assertIn("python scripts/prepare_macos_x64_runtime.py", workflow)
 
         self.assertIn("needs.build-macos.result == 'success'", release)
         self.assertNotIn("build-macos-universal", release)
@@ -669,6 +866,19 @@ class WindowsPackagingTests(unittest.TestCase):
             for template in verify_macos_bundle.DEFAULT_TEMPLATE_DIR.glob("*.xlsx"):
                 (templates / template.name).write_bytes(template.read_bytes())
             (resources / "README.md").write_bytes(verify_macos_bundle.DEFAULT_README.read_bytes())
+            qml_root = resources / "hr_toolkit" / "gui_qt" / "qml"
+            for source in verify_macos_bundle.DEFAULT_QML_DIR.rglob("*.qml"):
+                target = qml_root / source.relative_to(verify_macos_bundle.DEFAULT_QML_DIR)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            qt_notice = resources / "third_party" / "qt" / verify_macos_bundle.DEFAULT_QT_NOTICE.name
+            qt_notice.parent.mkdir(parents=True, exist_ok=True)
+            qt_notice.write_bytes(verify_macos_bundle.DEFAULT_QT_NOTICE.read_bytes())
+            qt_qml_root = resources / "PySide6" / "Qt" / "qml"
+            for relative in verify_macos_bundle.QT6_REQUIRED_QML_FILES:
+                path = qt_qml_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"qt-qml")
 
             dependency_manifest = resources / "dependency" / "records" / "trash" / "manifest.json"
             dependency_manifest.parent.mkdir(parents=True)
@@ -1580,6 +1790,36 @@ class WindowsPackagingTests(unittest.TestCase):
         )
         for source in build_windows.release_template_files():
             (templates / source.name).write_bytes(b"template:" + source.name.encode("utf-8"))
+        qml_root = app_dir / "_internal" / "hr_toolkit" / "gui_qt" / "qml"
+        for source in build_windows.release_qml_files():
+            target = qml_root / source.relative_to(build_windows.QML_DIR)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+        qt_notice = app_dir / "_internal" / "third_party" / "qt" / build_windows.QT_NOTICE.name
+        qt_notice.parent.mkdir(parents=True, exist_ok=True)
+        qt_notice.write_bytes(build_windows.QT_NOTICE.read_bytes())
+        for qml_root, required in (
+            (
+                app_dir / "_internal" / "PySide6" / "Qt" / "qml",
+                build_windows.QT6_REQUIRED_QML_FILES,
+            ),
+            (
+                app_dir / "_internal" / "PySide2" / "qml",
+                build_windows.QT5_REQUIRED_QML_FILES,
+            ),
+        ):
+            for relative in required:
+                path = qml_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.suffix.lower() == ".dll":
+                    self._write_fake_pe(path, build_windows.PE_MACHINE_AMD64)
+                else:
+                    path.write_bytes(b"qt-qml")
+        for relative in build_windows.QT5_REQUIRED_RUNTIME_FILES:
+            self._write_fake_pe(
+                app_dir / "_internal" / relative,
+                build_windows.PE_MACHINE_AMD64,
+            )
         updater = root / "HRToolkitUpdater.exe"
         self._write_fake_pe(updater, build_windows.PE_MACHINE_AMD64)
         return app_dir, updater

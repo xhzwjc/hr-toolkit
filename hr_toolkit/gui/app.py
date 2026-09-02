@@ -47,6 +47,15 @@ from hr_toolkit.history_store import (
     TaskDetail,
 )
 from hr_toolkit.material_preferences import MaterialPreferences
+from hr_toolkit.project_run import (
+    call_with_project_inputs,
+    context_from_call as project_context_from_call,
+    import_project_run_sources,
+    project_batch_is_closed,
+    project_source_replacement,
+    rebase_project_replacements,
+    serializable as project_serializable,
+)
 from hr_toolkit.tools.folder_rename import (
     MODE_APPEND,
     MODE_EXCEL_BATCH,
@@ -8049,10 +8058,10 @@ class HRToolkitApp:
             )
 
     def _open_manual_update(self, update: UpdateInfo) -> None:
-        self._write_log("正在选择可用的 DMG 下载地址，优先使用 Gitee 国内源...")
+        self._write_log("正在连接 Gitee 国内下载源...")
         self._show_update_progress_window(
             title=f"准备下载 v{update.version}",
-            detail="正在连接国内下载源；不可用时会自动尝试 GitHub 备用源。",
+            detail="正在连接 Gitee 国内下载源。",
             indeterminate=True,
             close_command=self._close_update_window,
         )
@@ -11902,66 +11911,10 @@ class HRToolkitApp:
 
     @staticmethod
     def _history_serializable(value):
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, (date, datetime)):
-            return value.isoformat()
-        if isinstance(value, (list, tuple)):
-            return [HRToolkitApp._history_serializable(item) for item in value]
-        if isinstance(value, dict):
-            return {str(key): HRToolkitApp._history_serializable(item) for key, item in value.items()}
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        return str(value)
+        return project_serializable(value)
 
     def _history_context_from_call(self, tool_func, args, kwargs):
-        bound = inspect.signature(tool_func).bind_partial(*args, **kwargs)
-        bound.apply_defaults()
-        parameters: dict[str, object] = {}
-        sources: list[SourceSpec] = []
-        output_dir: Path | None = None
-        for name, value in bound.arguments.items():
-            if name in {"progress_callback", "cancelled"}:
-                continue
-            if name == "output_dir" and value is not None:
-                output_dir = Path(value).expanduser()
-                parameters[name] = output_dir.name
-                continue
-            if name == "root_dir" and value is not None:
-                root_dir = Path(value).expanduser()
-                parameters[name] = root_dir.name
-                if root_dir.exists():
-                    sources.append(
-                        SourceSpec(
-                            path=root_dir,
-                            role="input_path",
-                            suffixes=None,
-                            preserve_directories=True,
-                        )
-                    )
-                    output_dir = root_dir
-                continue
-            if name == "library_dir" and value is not None:
-                parameters[name] = str(value)
-                continue
-            if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
-                parameters[name] = self._history_serializable(value)
-                continue
-            if name not in HISTORY_PATH_ARGUMENTS or value is None:
-                parameters[name] = self._history_serializable(value)
-                continue
-            raw_paths = value if isinstance(value, (list, tuple)) else [value]
-            parameters[name] = [Path(item).name for item in raw_paths if item is not None]
-            if not isinstance(value, (list, tuple)):
-                parameters[name] = parameters[name][0] if parameters[name] else None
-            role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS else name
-            for raw_path in raw_paths:
-                if raw_path is None:
-                    continue
-                path = Path(raw_path).expanduser()
-                if path.exists():
-                    sources.append(SourceSpec(path=path, role=role))
-        return sources, parameters, output_dir
+        return project_context_from_call(tool_func, args, kwargs)
 
     @classmethod
     def _history_result_for_storage(cls, value, *, key: str = ""):
@@ -12085,26 +12038,13 @@ class HRToolkitApp:
     ) -> Path:
         """Resolve one imported source back to the file/folder shape expected by a tool."""
 
-        if not records:
-            raise RuntimeError(f"没有可留存的资料：{source.path.name}")
-        paths = [record.path(store.workspace) for record in records]
-        if source_was_file:
-            if len(paths) != 1:
-                raise RuntimeError(f"资料快照不完整：{source.path.name}")
-            return paths[0]
-        detail = store.get_batch(batch_id)
-        if detail is None:
-            raise RuntimeError("本次处理批次无法读取。")
-        upload_root = detail.directories["uploads"]
-        top_names: set[str] = set()
-        for path in paths:
-            relative = path.relative_to(upload_root)
-            if not relative.parts:
-                raise RuntimeError(f"资料快照位置无效：{source.path.name}")
-            top_names.add(relative.parts[0])
-        if len(top_names) != 1:
-            raise RuntimeError(f"文件夹快照不完整：{source.path.name}")
-        return upload_root / next(iter(top_names))
+        return project_source_replacement(
+            store,
+            batch_id,
+            source,
+            records,
+            source_was_file=source_was_file,
+        )
 
     def _import_project_run_sources(
         self,
@@ -12115,63 +12055,13 @@ class HRToolkitApp:
         *,
         on_progress=None,
     ) -> dict[str, list[Path]]:
-        replacements: dict[str, list[Path]] = {}
-        project_root = Path(store.root).absolute()
-        for source in sources:
-            # 保留用户实际选择的词法路径，不能先 resolve；否则文件/目录链接会
-            # 被替换成目标路径，绕过 ProjectStore 的链接与越界检查。
-            source_path = Path(source.path).expanduser().absolute()
-            source_was_file = source_path.is_file()
-            try:
-                source_path.relative_to(project_root)
-                is_project_source = True
-            except ValueError:
-                is_project_source = False
-            if source.preserve_directories:
-                if source_was_file:
-                    raise RuntimeError(f"需要文件夹资料：{source.path.name}")
-                method_name = (
-                    "copy_project_directory_snapshot"
-                    if is_project_source
-                    else "import_directory_snapshot"
-                )
-                snapshotter = getattr(store, method_name, None)
-                if not callable(snapshotter):
-                    raise RuntimeError("当前版本无法安全留存文件夹结构。")
-                replacement = snapshotter(
-                    batch_id,
-                    source_path,
-                    category="uploads",
-                    role=source.role,
-                    cancelled=cancel_event.is_set,
-                    on_progress=on_progress,
-                )
-            else:
-                if is_project_source:
-                    copier = getattr(store, "copy_project_sources", None)
-                    if not callable(copier):
-                        raise RuntimeError(
-                            "当前版本暂时不能复用项目内资料，请从原文件位置重新选择。"
-                        )
-                else:
-                    copier = store.import_sources
-                records = copier(
-                    batch_id,
-                    [source_path],
-                    category="uploads",
-                    role=source.role,
-                    cancelled=cancel_event.is_set,
-                    on_progress=on_progress,
-                )
-                replacement = self._project_source_replacement(
-                    store,
-                    batch_id,
-                    source,
-                    records,
-                    source_was_file=source_was_file,
-                )
-            replacements.setdefault(source.role, []).append(replacement)
-        return replacements
+        return import_project_run_sources(
+            store,
+            batch_id,
+            sources,
+            cancel_event,
+            on_progress=on_progress,
+        )
 
     @staticmethod
     def _copy_project_directory_for_result(store, batch_id: str, source: Path) -> Path:
@@ -12186,10 +12076,11 @@ class HRToolkitApp:
         old_upload_root: Path,
         new_upload_root: Path,
     ) -> dict[str, list[Path]]:
-        return {
-            role: [new_upload_root / path.relative_to(old_upload_root) for path in paths]
-            for role, paths in replacements.items()
-        }
+        return rebase_project_replacements(
+            replacements,
+            old_upload_root,
+            new_upload_root,
+        )
 
     def _call_with_project_inputs(
         self,
@@ -12201,44 +12092,19 @@ class HRToolkitApp:
         store,
         batch_id: str,
     ):
-        bound = inspect.signature(tool_func).bind_partial(*args, **kwargs)
-        bound.apply_defaults()
-        for name, value in tuple(bound.arguments.items()):
-            if name == "output_dir":
-                bound.arguments[name] = result_dir
-                continue
-            if name == "library_dir":
-                continue
-            if name == "roster_source" and not (isinstance(value, Path) or (isinstance(value, str) and Path(value).expanduser().is_file())):
-                continue
-            if value is None or name not in HISTORY_PATH_ARGUMENTS | {"root_dir"}:
-                continue
-            role = "input_path" if name in HISTORY_PRIMARY_PATH_ARGUMENTS or name == "root_dir" else name
-            copied_paths = replacements.get(role, [])
-            if not copied_paths:
-                raise RuntimeError(f"没有完整保存 {name} 对应的原始资料。")
-            original_values = value if isinstance(value, (list, tuple)) else [value]
-            original_paths = [Path(item).expanduser() for item in original_values if item is not None]
-            original_was_directory = len(original_paths) == 1 and original_paths[0].is_dir()
-            if name == "root_dir":
-                if len(copied_paths) != 1 or not copied_paths[0].is_dir():
-                    raise RuntimeError("人员资料文件夹快照不完整。")
-                replacement = self._copy_project_directory_for_result(store, batch_id, copied_paths[0])
-            elif name == "template_path" and original_was_directory:
-                replacement = copied_paths[0]
-            elif isinstance(value, (list, tuple)) or original_was_directory:
-                replacement = copied_paths
-            else:
-                replacement = copied_paths[0]
-            bound.arguments[name] = replacement
-        return bound.args, bound.kwargs
+        return call_with_project_inputs(
+            tool_func,
+            args,
+            kwargs,
+            replacements,
+            result_dir,
+            store,
+            batch_id,
+        )
 
     @staticmethod
     def _project_batch_is_closed(store, batch_id: str) -> bool:
-        detail = store.get_batch(batch_id)
-        if detail is not None:
-            return detail.summary.status in {"success", "failed", "stopped"}
-        return any(summary.id == batch_id for summary in store.list_trash())
+        return project_batch_is_closed(store, batch_id)
 
     def _start_tool_worker(self, tool_func, /, *args, **kwargs) -> None:
         token = self._tool_run_token

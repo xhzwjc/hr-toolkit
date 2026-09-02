@@ -57,7 +57,7 @@ _PDF_LOCK = threading.RLock()
 
 
 def _ocr_runtime_options() -> dict[str, int]:
-    """Reserve one CPU for Tk on low-core machines supported by Win7 builds."""
+    """Reserve one CPU for the desktop event loop on supported low-core machines."""
 
     cpu_count = max(1, int(os.cpu_count() or 1))
     if cpu_count > 4:

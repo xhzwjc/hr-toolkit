@@ -91,6 +91,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-build.txt
+            requirements-gui.txt
             constraints/python312-production.txt
 
       - name: Install Python build dependencies
@@ -166,6 +167,7 @@ jobs:
           cache-dependency-path: |
             requirements-win7.txt
             requirements-build.txt
+            requirements-gui.txt
             constraints/python38-win7.txt
 
       - name: Install frozen Win7 build dependencies
@@ -205,6 +207,11 @@ jobs:
           tests.test_tool_registry
           tests.test_paths
           tests.test_release_metadata
+          tests.test_background_process
+          tests.test_qt_controller
+          tests.test_qt_entrypoint
+          tests.test_qt_form_specs
+          tests.test_run_coordinator
 
       - name: Build Win7 application and installers
         run: >-
@@ -266,6 +273,7 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-build.txt
+            requirements-gui.txt
             constraints/python312-production.txt
 
       - name: Confirm native runner architecture
@@ -279,6 +287,10 @@ jobs:
           python -m pip install --disable-pip-version-check --upgrade -c constraints/python312-production.txt pip
           python -m pip install --disable-pip-version-check -r requirements.txt -r requirements-build.txt -c constraints/python312-production.txt
           python -m pip check
+
+      - name: Prepare compact Intel macOS runtime
+        if: matrix.architecture == 'x86_64'
+        run: python scripts/prepare_macos_x64_runtime.py
 
       - name: Exercise local OCR models and inference
         run: >-

@@ -7,6 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from hr_toolkit.desktop_helpers import (
+    default_workspace_project_name,
+    workspace_project_create_error_message,
+    workspace_project_creation_target,
+    workspace_project_name_error,
+)
 from hr_toolkit.gui import (
     HRToolkitApp,
     _default_workspace_project_name,
@@ -50,6 +56,34 @@ class ProjectCreationValidationTests(unittest.TestCase):
                     _workspace_project_name_error(value),
                     self._backend_name_error(value),
                 )
+
+    def test_qt_neutral_helpers_match_legacy_project_rules(self) -> None:
+        self.assertEqual(
+            default_workspace_project_name(date(2026, 8, 10)),
+            _default_workspace_project_name(date(2026, 8, 10)),
+        )
+        for value in ("", ".", "CON", "工资/社保", "华东人事项目"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    workspace_project_name_error(value),
+                    _workspace_project_name_error(value),
+                )
+        for exc in (
+            PermissionError(),
+            FileNotFoundError(),
+            OSError(28, "full"),
+            RuntimeError("共享盘不能作为活动项目位置"),
+        ):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(
+                    workspace_project_create_error_message(exc),
+                    _workspace_project_create_error_message(exc),
+                )
+        with tempfile.TemporaryDirectory() as temp_root:
+            self.assertEqual(
+                workspace_project_creation_target(temp_root, "八月人事"),
+                _workspace_project_creation_target(temp_root, "八月人事"),
+            )
 
     def test_gui_name_validation_matches_backend_for_all_portability_rules(self) -> None:
         invalid_names = [
