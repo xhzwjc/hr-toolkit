@@ -218,12 +218,20 @@ PE_MACHINE_AMD64 = 0x8664
 WINDOWS_TARGET_MODERN = "modern"
 WINDOWS_TARGET_WIN7 = "win7"
 WINDOWS_TARGETS = (WINDOWS_TARGET_MODERN, WINDOWS_TARGET_WIN7)
-WIN7_QT_SMOKE_ENV = {
+WIN7_SOURCE_QT_SMOKE_ENV = {
     # Exercise the bundled Qt/QML runtime without coupling unattended build
     # verification to a hosted runner's interactive desktop or graphics stack.
     # These values are passed only to the smoke subprocess, never embedded in
     # the installed application.
     "QT_QPA_PLATFORM": "offscreen",
+    "QT_QUICK_BACKEND": "software",
+    "QSG_RENDER_LOOP": "basic",
+}
+WIN7_PACKAGED_QT_SMOKE_ENV = {
+    # The installed application uses Qt's native Windows platform plugin.
+    # PySide2's qoffscreen plugin can crash with 0xC0000005 only after it has
+    # been frozen, so the packaged gate must exercise the production path.
+    "QT_QPA_PLATFORM": "windows",
     "QT_QUICK_BACKEND": "software",
     "QSG_RENDER_LOOP": "basic",
 }
@@ -279,6 +287,30 @@ WIN7_REQUIRED_VC_RUNTIME_FILES = (
     "msvcp140.dll",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
+)
+MODERN_REQUIRED_VC_RUNTIME_FILES = (
+    # PySide6 6.6.3.1 bundles an older VS 2019 runtime while current
+    # ONNX Runtime is built with a newer compatible v14 toolset. Keep one
+    # coherent, runner-validated runtime set beside the launcher so Windows
+    # cannot select PySide's older private copies first.
+    "concrt140.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "msvcp140_codecvt_ids.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+)
+MODERN_OPTIONAL_VC_RUNTIME_FILES = (
+    "msvcp140_atomic_wait.dll",
+    "vcamp140.dll",
+    "vccorlib140.dll",
+    "vcomp140.dll",
+    "vcruntime140_threads.dll",
+)
+MODERN_VC_RUNTIME_FILES = (
+    *MODERN_REQUIRED_VC_RUNTIME_FILES,
+    *MODERN_OPTIONAL_VC_RUNTIME_FILES,
 )
 WIN7_REQUIRED_PYTHON_RUNTIME_FILES = (
     "python38.dll",
@@ -623,6 +655,8 @@ def build_windows_binaries(
             ucrt_dir=ucrt_dir,
             vc_runtime_dir=vc_runtime_dir,
         )
+    else:
+        stage_modern_app_local_vc_runtimes(app_dir=app_dir)
     removed_bytes = remove_unused_opencv_videoio_ffmpeg(app_dir)
     if removed_bytes:
         print(f"已移除未使用的 OpenCV 视频后端：{removed_bytes} 字节")
@@ -772,6 +806,80 @@ def stage_win7_app_local_runtimes(
                     raise RuntimeError(f"拒绝替换非普通 Win7 运行库文件：{path}")
                 path.unlink()
             shutil.copy2(source_dir / name, app_dir / name)
+
+
+def stage_modern_app_local_vc_runtimes(
+    *,
+    app_dir: Path,
+    runtime_dir: Path | None = None,
+) -> tuple[str, ...]:
+    """Normalize the modern payload to one mutually compatible VC runtime set."""
+    if runtime_dir is None:
+        runtime_dir = resolve_modern_vc_runtime_dir()
+    runtime_dir = runtime_dir.resolve()
+    _require_files(
+        runtime_dir,
+        MODERN_REQUIRED_VC_RUNTIME_FILES,
+        label="modern Visual C++ app-local runtime",
+    )
+    available_names = tuple(
+        name for name in MODERN_VC_RUNTIME_FILES if (runtime_dir / name).is_file()
+    )
+    for name in available_names:
+        matches = sorted(
+            path
+            for path in app_dir.rglob("*")
+            if path.name.casefold() == name.casefold()
+        )
+        for path in matches:
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError(f"拒绝替换非普通 modern VC 运行库文件：{path}")
+            path.unlink()
+        shutil.copy2(runtime_dir / name, app_dir / name)
+    verify_modern_vc_runtime_payload(app_dir)
+    return available_names
+
+
+def resolve_modern_vc_runtime_dir() -> Path:
+    """Return the Windows runtime set proven to load ONNX and Qt together."""
+    if sys.platform != "win32":
+        raise RuntimeError("modern Visual C++ 运行库只能在 Windows 构建机上解析。")
+    runtime_dir = _windows_system_directory()
+    _require_files(
+        runtime_dir,
+        MODERN_REQUIRED_VC_RUNTIME_FILES,
+        label="Windows central Visual C++ runtime",
+    )
+    try:
+        import ctypes
+
+        # Preload the exact files that will be copied before either extension
+        # can add a wheel-private directory to Windows DLL search paths.
+        loaded_runtimes = tuple(
+            ctypes.WinDLL(str(runtime_dir / name))
+            for name in MODERN_REQUIRED_VC_RUNTIME_FILES
+        )
+        import onnxruntime  # noqa: F401
+        from PySide6 import QtCore, QtGui, QtQml, QtQuick, QtQuickControls2  # noqa: F401
+        del loaded_runtimes
+    except Exception as exc:
+        raise RuntimeError(
+            "构建机的 ONNX Runtime 与 PySide6 无法共享 Visual C++ 运行库。"
+        ) from exc
+    return runtime_dir
+
+
+def _windows_system_directory() -> Path:
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if length <= 0 or length >= len(buffer):
+        raise RuntimeError("无法解析 Windows System32 目录。")
+    directory = Path(buffer.value)
+    if not directory.is_dir():
+        raise RuntimeError(f"Windows System32 目录不存在：{directory}")
+    return directory
 
 
 def pyinstaller_commands(
@@ -1018,6 +1126,8 @@ def verify_windows_payload(
     if target == WINDOWS_TARGET_WIN7:
         allowed_root_files.update(WIN7_REQUIRED_UCRT_FILES)
         allowed_root_files.update(WIN7_REQUIRED_VC_RUNTIME_FILES)
+    else:
+        allowed_root_files.update(MODERN_VC_RUNTIME_FILES)
     unexpected_root_files = root_files - allowed_root_files
     if unexpected_root_files:
         raise RuntimeError(f"程序包根目录包含非白名单文件：{sorted(unexpected_root_files)}")
@@ -1049,6 +1159,8 @@ def verify_windows_payload(
     verify_payload_pe_architecture(app_dir)
     if target == WINDOWS_TARGET_WIN7:
         verify_win7_runtime_payload(app_dir)
+    else:
+        verify_modern_vc_runtime_payload(app_dir)
 
 
 def verify_packaged_qt_qml(internal: Path, *, target: str) -> None:
@@ -1150,6 +1262,29 @@ def verify_win7_runtime_payload(app_dir: Path) -> None:
     notice = seven_zip_dir / WIN7_THIRD_PARTY_NOTICE.name
     if not notice.is_file() or notice.read_bytes() != WIN7_THIRD_PARTY_NOTICE.read_bytes():
         raise RuntimeError("Windows 7 程序包缺少正确的 7-Zip 第三方许可说明。")
+
+
+def verify_modern_vc_runtime_payload(app_dir: Path) -> None:
+    _require_files(
+        app_dir,
+        MODERN_REQUIRED_VC_RUNTIME_FILES,
+        label="modern payload Visual C++ runtime",
+    )
+    for name in MODERN_VC_RUNTIME_FILES:
+        root_runtime = app_dir / name
+        matches = sorted(
+            path
+            for path in app_dir.rglob("*")
+            if path.name.casefold() == name.casefold()
+        )
+        if root_runtime.is_file():
+            if matches != [root_runtime]:
+                raise RuntimeError(
+                    "modern payload Visual C++ 运行库存在重复副本："
+                    f"{name}={matches}"
+                )
+        elif name in MODERN_REQUIRED_VC_RUNTIME_FILES:
+            raise RuntimeError(f"modern payload Visual C++ runtime 缺少文件：{name}")
 
 
 def verify_win7_runtime_source_integrity(
@@ -1498,7 +1633,7 @@ def run_runtime_smoke(
         qt_env = dict(env)
         qt_env["HR_TOOLKIT_SKIP_UPDATE"] = "1"
         if target == WINDOWS_TARGET_WIN7:
-            qt_env.update(WIN7_QT_SMOKE_ENV)
+            qt_env.update(WIN7_PACKAGED_QT_SMOKE_ENV)
         _run_packaged_check(
             [str(app_executable), "--qt-smoke-test"],
             output_path=output_path,

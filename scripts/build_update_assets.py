@@ -19,6 +19,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from build_windows import (
     APP_NAME,
+    MODERN_VC_RUNTIME_FILES,
     UPDATER_NAME,
     WIN7_REQUIRED_UCRT_FILES,
     WIN7_REQUIRED_VC_RUNTIME_FILES,
@@ -196,6 +197,10 @@ def verify_staged_payload(
     if target == WINDOWS_TARGET_WIN7:
         expected_root_files.update(WIN7_REQUIRED_UCRT_FILES)
         expected_root_files.update(WIN7_REQUIRED_VC_RUNTIME_FILES)
+    else:
+        expected_root_files.update(
+            name for name in MODERN_VC_RUNTIME_FILES if (payload_dir / name).is_file()
+        )
     if root_files != expected_root_files:
         raise RuntimeError(
             f"Windows 更新 payload 根文件不符合白名单，实际={sorted(root_files)}"

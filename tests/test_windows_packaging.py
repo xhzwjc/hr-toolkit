@@ -271,6 +271,46 @@ class WindowsPackagingTests(unittest.TestCase):
                     self.assertEqual((app_dir / name).read_bytes(), (source_dir / name).read_bytes())
                     self.assertFalse((internal / name).exists())
 
+    def test_modern_vc_runtimes_replace_private_qt_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            app_dir = tmp_dir / "HRToolkit"
+            pyside_dir = app_dir / "_internal" / "PySide6"
+            shiboken_dir = app_dir / "_internal" / "shiboken6"
+            runtime_dir = tmp_dir / "system32"
+            pyside_dir.mkdir(parents=True)
+            shiboken_dir.mkdir(parents=True)
+            runtime_dir.mkdir()
+            available = (
+                *build_windows.MODERN_REQUIRED_VC_RUNTIME_FILES,
+                *build_windows.MODERN_OPTIONAL_VC_RUNTIME_FILES[:2],
+            )
+            for name in available:
+                payload = b"current-vc:" + name.encode("ascii")
+                (runtime_dir / name).write_bytes(payload)
+                (pyside_dir / name).write_bytes(b"old-pyside-vc")
+                (shiboken_dir / name).write_bytes(b"old-shiboken-vc")
+
+            staged = build_windows.stage_modern_app_local_vc_runtimes(
+                app_dir=app_dir,
+                runtime_dir=runtime_dir,
+            )
+
+            self.assertEqual(staged, available)
+            for name in available:
+                self.assertEqual(
+                    (app_dir / name).read_bytes(),
+                    (runtime_dir / name).read_bytes(),
+                )
+                self.assertFalse((pyside_dir / name).exists())
+                self.assertFalse((shiboken_dir / name).exists())
+            build_windows.verify_modern_vc_runtime_payload(app_dir)
+
+            duplicate = pyside_dir / available[0]
+            duplicate.write_bytes(b"stale-copy")
+            with self.assertRaisesRegex(RuntimeError, "存在重复副本"):
+                build_windows.verify_modern_vc_runtime_payload(app_dir)
+
     def test_win7_pyinstaller_hook_rejects_recursive_host_api_sets(self) -> None:
         fake_dylib = SimpleNamespace(include_library=lambda _name: True)
         with patch.dict(
@@ -672,7 +712,7 @@ class WindowsPackagingTests(unittest.TestCase):
         win7_qt_env = next(
             env for command, env in win7_calls if "--qt-smoke-test" in command
         )
-        for name, value in build_windows.WIN7_QT_SMOKE_ENV.items():
+        for name, value in build_windows.WIN7_PACKAGED_QT_SMOKE_ENV.items():
             self.assertEqual(win7_qt_env[name], value)
 
         self.assertEqual(len(modern_calls), 4)
@@ -806,7 +846,7 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", modern_ci)
         win7_ci = ci.split("\n  windows-win7-compat-test:", 1)[1]
         self.assertIn("runs-on: windows-2022", win7_ci)
-        for name, value in build_windows.WIN7_QT_SMOKE_ENV.items():
+        for name, value in build_windows.WIN7_SOURCE_QT_SMOKE_ENV.items():
             self.assertIn(f'{name}: "{value}"', win7_ci)
 
         win7_constraints = (
@@ -945,6 +985,16 @@ class WindowsPackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "禁止目录或缓存"):
                 build_windows.verify_windows_payload(app_dir)
 
+    def test_modern_payload_requires_one_root_vc_runtime_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir, _updater = self._fake_app(Path(tmp))
+            build_windows.verify_windows_payload(app_dir)
+
+            missing = app_dir / build_windows.MODERN_REQUIRED_VC_RUNTIME_FILES[0]
+            missing.unlink()
+            with self.assertRaisesRegex(RuntimeError, r"Visual C\+\+ runtime"):
+                build_windows.verify_windows_payload(app_dir)
+
     def test_macos_resource_verifier_rejects_project_metadata_without_blocking_generic_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app_dir = Path(tmp) / "HRToolkit.app"
@@ -1000,7 +1050,10 @@ class WindowsPackagingTests(unittest.TestCase):
 
     def test_win7_payload_requires_python38_ucrt_and_bundled_7zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            app_dir, _updater = self._fake_app(Path(tmp))
+            app_dir, _updater = self._fake_app(
+                Path(tmp),
+                target=build_windows.WINDOWS_TARGET_WIN7,
+            )
             internal = app_dir / "_internal"
             self._write_fake_pe(internal / "python38.dll", build_windows.PE_MACHINE_AMD64)
             self._write_fake_pe(internal / "python3.dll", build_windows.PE_MACHINE_AMD64)
@@ -1866,7 +1919,12 @@ class WindowsPackagingTests(unittest.TestCase):
         )
         self.assertTrue(Path(output_argument.split("=", 1)[1]).is_absolute())
 
-    def _fake_app(self, root: Path) -> tuple[Path, Path]:
+    def _fake_app(
+        self,
+        root: Path,
+        *,
+        target: str = build_windows.WINDOWS_TARGET_MODERN,
+    ) -> tuple[Path, Path]:
         app_dir = root / "HRToolkit"
         templates = app_dir / "_internal" / "hr_toolkit" / "templates"
         templates.mkdir(parents=True)
@@ -1876,6 +1934,12 @@ class WindowsPackagingTests(unittest.TestCase):
             app_dir / "_internal" / "runtime.dll",
             build_windows.PE_MACHINE_AMD64,
         )
+        if target == build_windows.WINDOWS_TARGET_MODERN:
+            for name in build_windows.MODERN_REQUIRED_VC_RUNTIME_FILES:
+                self._write_fake_pe(
+                    app_dir / name,
+                    build_windows.PE_MACHINE_AMD64,
+                )
         for source in build_windows.release_template_files():
             (templates / source.name).write_bytes(b"template:" + source.name.encode("utf-8"))
         qml_root = app_dir / "_internal" / "hr_toolkit" / "gui_qt" / "qml"
