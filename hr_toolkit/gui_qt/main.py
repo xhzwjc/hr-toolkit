@@ -11,8 +11,13 @@ from hr_toolkit.desktop_helpers import install_crash_logging, set_windows_app_id
 
 
 def _prepare_environment() -> None:
-    # Keep native GPU selection.  Qt/ANGLE can choose the supported backend on
-    # Win7 while Qt 6 can use the modern RHI backend on Win11 and macOS.
+    # Business work runs outside the GUI thread.  Using Qt Quick's basic render
+    # loop therefore avoids the GUI/render-thread synchronization stalls that
+    # otherwise become visible while native windows are resized on Windows and
+    # macOS.  Keep the graphics backend native (D3D/ANGLE/Metal); only the
+    # scheduling model is made deterministic.  An explicit environment value
+    # remains available as a diagnostics escape hatch.
+    os.environ.setdefault("QSG_RENDER_LOOP", "basic")
     os.environ.setdefault("QML_DISABLE_DISK_CACHE", "0")
 
 
@@ -71,7 +76,8 @@ def main() -> int:
         controller.close()
         return 1
     runlog.log_line(
-        f"HR Workbench v{__version__} Qt Quick 启动（{sys.platform}，{QT_API}）"
+        f"HR Workbench v{__version__} Qt Quick 启动（{sys.platform}，{QT_API}，"
+        f"渲染循环 {os.environ.get('QSG_RENDER_LOOP', 'auto')}）"
     )
     smoke_tool = str(os.environ.get("HR_TOOLKIT_QT_SMOKE_TOOL", "")).strip()
     if smoke_tool:
@@ -93,11 +99,27 @@ def main() -> int:
             runlog.log_line(f"忽略无效 Qt smoke 尺寸：{smoke_size}")
     if smoke_screenshot:
         def capture_and_quit() -> None:
-            roots = engine.rootObjects()
-            if roots:
-                image = roots[0].grabWindow()
-                image.save(smoke_screenshot)
-            app.quit()
+            try:
+                roots = engine.rootObjects()
+                if roots:
+                    root_window = roots[0]
+                    direct_grab = getattr(root_window, "grabWindow", None)
+                    if callable(direct_grab):
+                        image = direct_grab()
+                    else:
+                        # PySide6 may expose ApplicationWindow as QWindow rather
+                        # than QQuickWindow. QScreen works for both Qt 5 and 6.
+                        image = root_window.screen().grabWindow(
+                            int(root_window.winId())
+                        )
+                    if not image.save(smoke_screenshot):
+                        runlog.log_line(
+                            f"Qt smoke 截图保存失败：{smoke_screenshot}"
+                        )
+            except Exception as exc:
+                runlog.log_line(f"Qt smoke 截图失败：{exc}")
+            finally:
+                app.quit()
 
         QTimer.singleShot(max(250, int(smoke_exit or "600")), capture_and_quit)
     elif smoke_exit.isdigit():

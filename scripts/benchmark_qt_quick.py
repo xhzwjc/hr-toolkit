@@ -34,15 +34,23 @@ def _cpu_worker(stop_event) -> None:
 def run_benchmark(
     *,
     file_count: int,
+    workspace_file_count: int,
     duration_seconds: float,
     request_interval_ms: int,
     mode: str,
+    resize_axis: str,
+    render_loop: str,
     processing_load: bool,
     cache_buffer: int | None = None,
     scroll_step_px: int | None = None,
 ) -> dict[str, object]:
     os.environ.setdefault("HR_TOOLKIT_SKIP_UPDATE", "1")
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
+    if render_loop != "production":
+        os.environ["QSG_RENDER_LOOP"] = render_loop
+    from hr_toolkit.gui_qt.main import _prepare_environment
+
+    _prepare_environment()
 
     from hr_toolkit.gui_qt.compat import (
         QApplication,
@@ -87,12 +95,37 @@ def run_benchmark(
         controller._input_model.set_items(items)
         model_load_ms = (time.perf_counter() - model_started) * 1000.0
 
+        workspace_model_load_ms = 0.0
+        if workspace_file_count:
+            workspace_items = [
+                {
+                    "name": f"项目资料_{index + 1:05d}.xlsx",
+                    "path": str(temp_root / "项目文件" / f"项目资料_{index + 1:05d}.xlsx"),
+                    "isDir": False,
+                    "depth": index % 3,
+                    "expanded": False,
+                    "hasChildren": False,
+                    "detail": "XLSX · 性能测试资料",
+                }
+                for index in range(workspace_file_count)
+            ]
+            workspace_started = time.perf_counter()
+            controller._workspace_model.set_items(workspace_items)
+            workspace_model_load_ms = (time.perf_counter() - workspace_started) * 1000.0
+
         main_scroll = window.findChild(QObject, "mainScroll")
         input_list = window.findChild(QObject, "inputList")
+        workspace_drawer = window.findChild(QObject, "workspaceDrawer")
+        workspace_list = window.findChild(QObject, "workspaceList")
+        workspace_button = window.findChild(QObject, "workspaceButton")
         if main_scroll is None or input_list is None:
             raise RuntimeError("Qt Quick benchmark targets are missing")
+        if workspace_drawer is None or workspace_list is None or workspace_button is None:
+            raise RuntimeError("Qt Quick workspace benchmark targets are missing")
         if cache_buffer is not None:
             input_list.setProperty("cacheBuffer", max(0, cache_buffer))
+        if workspace_file_count:
+            workspace_drawer.open()
 
         frame_times: list[float] = []
         heartbeat_lateness: list[float] = []
@@ -165,8 +198,15 @@ def run_benchmark(
             if mode in {"resize", "both"}:
                 cycle = value % 120
                 progress = cycle / 60.0 if cycle <= 60 else (120 - cycle) / 60.0
-                window.setWidth(round(1180 - 360 * progress))
-                window.setHeight(round(760 - 140 * progress))
+                next_width = round(1180 - 360 * progress)
+                next_height = round(760 - 140 * progress)
+                if resize_axis == "width":
+                    window.setWidth(next_width)
+                elif resize_axis == "height":
+                    window.setHeight(next_height)
+                else:
+                    window.setWidth(next_width)
+                    window.setHeight(next_height)
                 resize_requests += 1
             if mode in {"scroll", "both"}:
                 content_height = float(input_list.property("contentHeight") or 0.0)
@@ -246,11 +286,17 @@ def run_benchmark(
             if current <= deadline
         ]
         delegate_count = int(input_list.property("activeDelegateCount") or 0)
+        workspace_delegate_count = (
+            int(workspace_list.property("activeDelegateCount") or 0)
+        )
         result = {
             "renderer": "Qt Quick",
+            "render_loop": os.environ.get("QSG_RENDER_LOOP", "auto"),
             "qt_major": QT_MAJOR,
             "mode": mode,
+            "resize_axis": resize_axis,
             "file_count": file_count,
+            "workspace_file_count": workspace_file_count,
             "duration_seconds": duration_seconds,
             "request_interval_ms": request_interval_ms,
             "processing_load": processing_load,
@@ -258,19 +304,37 @@ def run_benchmark(
             "scroll_step_px": scroll_step_px or 0,
             "qml_startup_ms": round(startup_ms, 2),
             "model_load_ms": round(model_load_ms, 2),
+            "workspace_model_load_ms": round(workspace_model_load_ms, 2),
             "resize_requests_sent": resize_requests,
             "scroll_requests_sent": scroll_requests,
-            "request_gap_median_ms": round(statistics.median(request_gaps) if request_gaps else 0.0, 2),
+            "request_gap_median_ms": round(
+                statistics.median(request_gaps) if request_gaps else 0.0,
+                2,
+            ),
             "request_gap_p95_ms": round(_percentile(request_gaps, 0.95), 2),
             "request_gap_max_ms": round(max(request_gaps, default=0.0), 2),
             "heartbeat_count": len(heartbeat_lateness),
             "heartbeat_lateness_p95_ms": round(_percentile(heartbeat_lateness, 0.95), 2),
             "heartbeat_lateness_max_ms": round(max(heartbeat_lateness, default=0.0), 2),
             "rendered_frames": len(frame_intervals),
-            "frame_interval_median_ms": round(statistics.median(frame_intervals) if frame_intervals else 0.0, 2),
+            "frame_interval_median_ms": round(
+                statistics.median(frame_intervals) if frame_intervals else 0.0,
+                2,
+            ),
             "frame_interval_p95_ms": round(_percentile(frame_intervals, 0.95), 2),
             "frame_interval_max_ms": round(max(frame_intervals, default=0.0), 2),
             "visible_delegate_objects": delegate_count,
+            "visible_workspace_delegate_objects": workspace_delegate_count,
+            "workspace_popup_opened": bool(workspace_drawer.property("opened")),
+            "workspace_popup_visible": bool(workspace_drawer.property("visible")),
+            "workspace_popup_x": round(float(workspace_drawer.property("x") or 0.0), 2),
+            "workspace_popup_width": round(float(workspace_drawer.property("width") or 0.0), 2),
+            "workspace_button_x": round(float(workspace_button.property("x") or 0.0), 2),
+            "workspace_button_width": round(float(workspace_button.property("width") or 0.0), 2),
+            "workspace_button_implicit_width": round(
+                float(workspace_button.property("implicitWidth") or 0.0),
+                2,
+            ),
             "progress_messages": progress_messages,
             "log_rows_retained": len(controller._log_model),
             "peak_rss_mb": round(peak_rss / 1024 / 1024, 2) if peak_rss else 0.0,
@@ -282,11 +346,24 @@ def run_benchmark(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="量化 Qt Quick 缩放、虚拟列表滚动和主线程响应。")
+    parser = argparse.ArgumentParser(
+        description="量化 Qt Quick 缩放、虚拟列表滚动和主线程响应。"
+    )
     parser.add_argument("--files", type=int, default=10000)
+    parser.add_argument("--workspace-files", type=int, default=0)
     parser.add_argument("--duration", type=float, default=2.0)
     parser.add_argument("--interval", type=int, default=8)
     parser.add_argument("--mode", choices=("resize", "scroll", "both"), default="both")
+    parser.add_argument(
+        "--resize-axis",
+        choices=("both", "width", "height"),
+        default="both",
+    )
+    parser.add_argument(
+        "--render-loop",
+        choices=("production", "basic", "threaded"),
+        default="production",
+    )
     parser.add_argument("--processing", action="store_true")
     parser.add_argument(
         "--cache-buffer",
@@ -296,14 +373,19 @@ def main() -> None:
     parser.add_argument(
         "--scroll-step",
         type=int,
-        help="按固定像素模拟滚轮；不设置时模拟跨越整个列表的滚动条拖动。",
+        help=(
+            "按固定像素模拟滚轮；不设置时模拟跨越整个列表的滚动条拖动。"
+        ),
     )
     args = parser.parse_args()
     payload = run_benchmark(
         file_count=max(1, args.files),
+        workspace_file_count=max(0, args.workspace_files),
         duration_seconds=max(0.25, args.duration),
         request_interval_ms=max(1, args.interval),
         mode=args.mode,
+        resize_axis=args.resize_axis,
+        render_loop=args.render_loop,
         processing_load=args.processing,
         cache_buffer=args.cache_buffer,
         scroll_step_px=max(1, args.scroll_step) if args.scroll_step else None,

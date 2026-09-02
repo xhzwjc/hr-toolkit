@@ -18,12 +18,28 @@ ApplicationWindow {
     readonly property color textMain: "#222826"
     readonly property color textMuted: "#727875"
     readonly property color border: "#E6E3DD"
-    readonly property bool compactSidebar: width < 940
+    // Keep the navigation geometry stable while the native window is dragged.
+    // Hysteresis makes the responsive mode switch at most once in either
+    // direction instead of repeatedly rebuilding both sides of the layout
+    // around one breakpoint.
+    property bool compactSidebar: false
+
+    function updateResponsiveMode() {
+        if (!compactSidebar && width <= 860)
+            compactSidebar = true
+        else if (compactSidebar && width >= 980)
+            compactSidebar = false
+    }
+
+    onWidthChanged: updateResponsiveMode()
 
     onClosing: function(closeEvent) {
         closeEvent.accepted = controller.requestClose()
     }
-    Component.onCompleted: controller.start()
+    Component.onCompleted: {
+        updateResponsiveMode()
+        controller.start()
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -31,15 +47,12 @@ ApplicationWindow {
 
         Rectangle {
             id: sidebar
+            objectName: "sidebar"
             Layout.fillHeight: true
             Layout.preferredWidth: root.compactSidebar ? 76 : 248
             Layout.minimumWidth: Layout.preferredWidth
             color: "#F2F0EB"
             border.color: root.border
-
-            Behavior on Layout.preferredWidth {
-                NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
-            }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -196,7 +209,7 @@ ApplicationWindow {
                     }
                 }
 
-                Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
+                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.border }
                 AppButton {
                     Layout.fillWidth: true
                     text: root.compactSidebar ? "记" : "旧版记录"
@@ -230,13 +243,17 @@ ApplicationWindow {
         }
 
         Item {
+            id: mainPane
+            objectName: "mainPane"
             Layout.fillWidth: true
             Layout.fillHeight: true
 
             ColumnLayout {
+                id: mainLayout
+                objectName: "mainLayout"
                 anchors.fill: parent
-                anchors.leftMargin: root.width < 920 ? 20 : 38
-                anchors.rightMargin: root.width < 920 ? 20 : 38
+                anchors.leftMargin: 28
+                anchors.rightMargin: 28
                 anchors.topMargin: 24
                 anchors.bottomMargin: 14
                 spacing: 14
@@ -252,7 +269,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             text: controller.toolTitle
                             color: root.textMain
-                            font.pixelSize: root.width < 900 ? 23 : 27
+                            font.pixelSize: 27
                             font.weight: Font.Bold
                             wrapMode: Text.Wrap
                         }
@@ -265,6 +282,8 @@ ApplicationWindow {
                         }
                     }
                     AppButton {
+                        id: workspaceButton
+                        objectName: "workspaceButton"
                         text: "项目文件"
                         enabled: controller.hasProject
                         onClicked: {
@@ -453,7 +472,7 @@ ApplicationWindow {
                                     }
                                 }
 
-                                Rectangle { Layout.fillWidth: true; height: 1; color: root.border }
+                                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: root.border }
                                 RowLayout {
                                     Layout.fillWidth: true
                                     visible: controller.currentTool !== "folder_rename"
@@ -735,15 +754,20 @@ ApplicationWindow {
         }
     }
 
-    Drawer {
+    Popup {
         id: workspaceDrawer
-        edge: Qt.RightEdge
-        width: Math.min(470, Math.max(360, root.width * 0.38))
+        objectName: "workspaceDrawer"
+        x: root.width - width
+        y: 0
+        width: Math.min(440, root.width - 24)
         height: root.height
-        modal: root.width < 1180
-        interactive: true
+        modal: false
+        dim: false
+        padding: 0
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         onClosed: controller.setWorkspaceExpanded(false)
+        enter: Transition {}
+        exit: Transition {}
 
         background: Rectangle { color: "#FBFAF7"; border.color: root.border }
         ColumnLayout {
@@ -783,6 +807,7 @@ ApplicationWindow {
             }
             ListView {
                 id: workspaceList
+                objectName: "workspaceList"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
@@ -790,8 +815,11 @@ ApplicationWindow {
                 reuseItems: true
                 cacheBuffer: 168
                 currentIndex: -1
+                property int activeDelegateCount: 0
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                 delegate: Rectangle {
+                    Component.onCompleted: workspaceList.activeDelegateCount += 1
+                    Component.onDestruction: workspaceList.activeDelegateCount -= 1
                     width: workspaceList.width
                     height: 42
                     radius: 7
