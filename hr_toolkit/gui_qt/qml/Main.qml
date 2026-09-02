@@ -24,14 +24,35 @@ ApplicationWindow {
     // around one breakpoint.
     property bool compactSidebar: false
 
+    // During a live native resize on Windows the DWM compositor can stall if
+    // QML re-evaluates every binding that depends on root.width/height on
+    // each pixel change.  We therefore sample the size through a timer and
+    // let the rest of the UI bind to the *settled* values instead of the raw
+    // window geometry.  This mirrors what Electron (Codex / Claude / GitHub
+    // Desktop) does internally: defer layout until WM_SIZE stops firing.
+    property int settledWidth: width
+    property int settledHeight: height
+    Timer {
+        id: settleTimer
+        interval: 32   // ~2 frames; fast enough to feel instant
+        running: false
+        repeat: false
+        onTriggered: {
+            root.settledWidth = root.width
+            root.settledHeight = root.height
+        }
+    }
+    onWidthChanged: settleTimer.restart()
+    onHeightChanged: settleTimer.restart()
+
     function updateResponsiveMode() {
-        if (!compactSidebar && width <= 860)
+        if (!compactSidebar && settledWidth <= 860)
             compactSidebar = true
-        else if (compactSidebar && width >= 980)
+        else if (compactSidebar && settledWidth >= 980)
             compactSidebar = false
     }
 
-    onWidthChanged: updateResponsiveMode()
+    onSettledWidthChanged: updateResponsiveMode()
 
     onClosing: function(closeEvent) {
         closeEvent.accepted = controller.requestClose()
@@ -540,7 +561,7 @@ ApplicationWindow {
 
     Popup {
         id: projectMenu
-        x: Math.min(root.width - width - 12, sidebar.width + 8)
+        x: Math.min(root.settledWidth - width - 12, sidebar.width + 8)
         y: 112
         width: 250
         padding: 9
@@ -757,10 +778,12 @@ ApplicationWindow {
     Popup {
         id: workspaceDrawer
         objectName: "workspaceDrawer"
-        x: root.width - width
+        // Bind position/size to the *settled* dimensions so the popup does
+        // not chase the cursor pixel-by-pixel during a live native resize.
+        x: root.settledWidth - width
         y: 0
-        width: Math.min(440, root.width - 24)
-        height: root.height
+        width: Math.min(440, root.settledWidth - 24)
+        height: root.settledHeight
         modal: false
         dim: false
         padding: 0
@@ -868,8 +891,8 @@ ApplicationWindow {
     Drawer {
         id: historyDrawer
         edge: Qt.RightEdge
-        width: Math.min(900, Math.max(650, root.width * 0.82))
-        height: root.height
+        width: Math.min(900, Math.max(650, root.settledWidth * 0.82))
+        height: root.settledHeight
         modal: true
         interactive: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -983,8 +1006,8 @@ ApplicationWindow {
         id: trashDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(780, root.width - 42)
-        height: Math.min(610, root.height - 42)
+        width: Math.min(780, root.settledWidth - 42)
+        height: Math.min(610, root.settledHeight - 42)
         title: "项目回收站"
         closePolicy: controller.trashBusy ? Popup.NoAutoClose : Popup.CloseOnEscape
         standardButtons: Dialog.Close
@@ -1039,8 +1062,8 @@ ApplicationWindow {
         id: helpDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(650, root.width - 48)
-        height: Math.min(560, root.height - 48)
+        width: Math.min(650, root.settledWidth - 48)
+        height: Math.min(560, root.settledHeight - 48)
         title: "使用教程"
         standardButtons: Dialog.Close
         contentItem: ScrollView {
@@ -1061,7 +1084,7 @@ ApplicationWindow {
         id: textInputDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(500, root.width - 48)
+        width: Math.min(500, root.settledWidth - 48)
         property string promptText: ""
         property string actionToken: ""
         title: "输入"
@@ -1087,7 +1110,7 @@ ApplicationWindow {
         id: updateProgressDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(520, root.width - 48)
+        width: Math.min(520, root.settledWidth - 48)
         title: "正在更新"
         closePolicy: Popup.NoAutoClose
         standardButtons: Dialog.NoButton
@@ -1107,7 +1130,7 @@ ApplicationWindow {
         id: notificationDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(520, root.width - 48)
+        width: Math.min(520, root.settledWidth - 48)
         property string bodyText: ""
         property string level: "info"
         title: "提示"
@@ -1125,7 +1148,7 @@ ApplicationWindow {
         id: confirmationDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(540, root.width - 48)
+        width: Math.min(540, root.settledWidth - 48)
         property string bodyText: ""
         property string actionToken: ""
         title: "确认"
@@ -1139,7 +1162,7 @@ ApplicationWindow {
         id: createProjectDialog
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: Math.min(590, root.width - 48)
+        width: Math.min(590, root.settledWidth - 48)
         title: "新建工作项目"
         standardButtons: Dialog.Ok | Dialog.Cancel
         property alias projectName: projectNameField.text

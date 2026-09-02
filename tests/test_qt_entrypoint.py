@@ -36,14 +36,19 @@ class QtEntrypointTests(unittest.TestCase):
         )
         source = qml_path.read_text(encoding="utf-8")
 
-        self.assertIn("width <= 860", source)
-        self.assertIn("width >= 980", source)
+        # Responsive breakpoints use settled width to avoid layout churn
+        self.assertIn("settledWidth <= 860", source)
+        self.assertIn("settledWidth >= 980", source)
         self.assertNotIn("Behavior on Layout.preferredWidth", source)
         self.assertIn("anchors.leftMargin: 28", source)
-        self.assertIn("width: Math.min(440, root.width - 24)", source)
+        # Popups/dialogs bind to settled dimensions for resize stability
+        self.assertIn("width: Math.min(440, root.settledWidth - 24)", source)
         self.assertNotIn("Math.max(360, root.width * 0.38)", source)
         self.assertIn("enter: Transition {}", source)
         self.assertIn("exit: Transition {}", source)
+        # Settled-width timer defers layout during native resize
+        self.assertIn("settledWidth", source)
+        self.assertIn("settleTimer", source)
 
     def test_qt_is_the_default_desktop_renderer(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
