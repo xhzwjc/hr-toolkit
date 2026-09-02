@@ -185,6 +185,11 @@ jobs:
         env:
           HR_TOOLKIT_SKIP_UPDATE: "1"
           HR_TOOLKIT_QT_SMOKE_EXIT_MS: "800"
+          # The hosted runner has no stable legacy Qt 5 graphics device.
+          # Limit this deterministic software renderer to the CI smoke only;
+          # production keeps Qt's normal GPU/backend selection.
+          QT_QUICK_BACKEND: "software"
+          QSG_RENDER_LOOP: "basic"
         run: python hr_toolkit_app.py --qt-smoke-test
 
       - name: Run Python 3.8-compatible core tests

@@ -217,6 +217,13 @@ PE_MACHINE_AMD64 = 0x8664
 WINDOWS_TARGET_MODERN = "modern"
 WINDOWS_TARGET_WIN7 = "win7"
 WINDOWS_TARGETS = (WINDOWS_TARGET_MODERN, WINDOWS_TARGET_WIN7)
+WIN7_QT_SMOKE_ENV = {
+    # GitHub's hosted Windows runner does not expose a stable graphics device
+    # to the legacy Qt 5 scene graph.  Keep unattended startup verification
+    # deterministic without changing the renderer selected by the real app.
+    "QT_QUICK_BACKEND": "software",
+    "QSG_RENDER_LOOP": "basic",
+}
 WIN7_REQUIRED_UCRT_FILES = (
     "api-ms-win-core-console-l1-1-0.dll",
     "api-ms-win-core-datetime-l1-1-0.dll",
@@ -1485,13 +1492,16 @@ def run_runtime_smoke(
             raise RuntimeError(
                 f"打包程序 update-smoke-test 输出不正确：{update_smoke_result or '空'}"
             )
-        env["HR_TOOLKIT_SKIP_UPDATE"] = "1"
+        qt_env = dict(env)
+        qt_env["HR_TOOLKIT_SKIP_UPDATE"] = "1"
+        if target == WINDOWS_TARGET_WIN7:
+            qt_env.update(WIN7_QT_SMOKE_ENV)
         _run_packaged_check(
             [str(app_executable), "--qt-smoke-test"],
             output_path=output_path,
             label="打包程序 Qt Quick smoke-test",
             timeout=90,
-            env=env,
+            env=qt_env,
         )
         qt_smoke_result = output_path.read_text(encoding="utf-8").strip()
         if qt_smoke_result != "HRToolkit Qt smoke-test OK":

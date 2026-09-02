@@ -597,13 +597,13 @@ class WindowsPackagingTests(unittest.TestCase):
                 prepare_macos_x64_runtime.validate_compact_wheel(invalid)
 
     def test_win7_frozen_smoke_forces_bundled_7zip_without_changing_modern(self) -> None:
-        observed_environments: list[dict[str, str]] = []
+        observed_calls: list[tuple[list[str], dict[str, str]]] = []
 
         def fake_run(command: list[str], *, timeout=None, env=None) -> None:
             del timeout
             self.assertIsNotNone(env)
             assert env is not None
-            observed_environments.append(dict(env))
+            observed_calls.append((list(command), dict(env)))
             output_path = Path(env["HR_TOOLKIT_CHECK_OUTPUT"])
             if "--version" in command:
                 output_path.write_text(self.version, encoding="utf-8")
@@ -643,7 +643,11 @@ class WindowsPackagingTests(unittest.TestCase):
             with (
                 patch.dict(
                     build_windows.os.environ,
-                    {build_windows.WIN7_7ZIP_OVERRIDE_ENV: "C:/build-runtime/7z.exe"},
+                    {
+                        build_windows.WIN7_7ZIP_OVERRIDE_ENV: "C:/build-runtime/7z.exe",
+                        "QT_QUICK_BACKEND": "caller-selected",
+                        "QSG_RENDER_LOOP": "threaded",
+                    },
                 ),
                 patch.object(build_windows, "_run", side_effect=fake_run),
             ):
@@ -652,26 +656,37 @@ class WindowsPackagingTests(unittest.TestCase):
                     updater,
                     target=build_windows.WINDOWS_TARGET_WIN7,
                 )
-                win7_environments = list(observed_environments)
-                observed_environments.clear()
+                win7_calls = list(observed_calls)
+                observed_calls.clear()
                 build_windows.run_runtime_smoke(app, updater)
-                modern_environments = list(observed_environments)
+                modern_calls = list(observed_calls)
 
-        self.assertEqual(len(win7_environments), 5)
+        self.assertEqual(len(win7_calls), 5)
         self.assertTrue(
             all(
                 build_windows.WIN7_7ZIP_OVERRIDE_ENV not in env
-                for env in win7_environments
+                for _, env in win7_calls
             )
         )
-        self.assertEqual(len(modern_environments), 4)
+        win7_qt_env = next(
+            env for command, env in win7_calls if "--qt-smoke-test" in command
+        )
+        for name, value in build_windows.WIN7_QT_SMOKE_ENV.items():
+            self.assertEqual(win7_qt_env[name], value)
+
+        self.assertEqual(len(modern_calls), 4)
         self.assertTrue(
             all(
                 env[build_windows.WIN7_7ZIP_OVERRIDE_ENV]
                 == "C:/build-runtime/7z.exe"
-                for env in modern_environments
+                for _, env in modern_calls
             )
         )
+        modern_qt_env = next(
+            env for command, env in modern_calls if "--qt-smoke-test" in command
+        )
+        self.assertEqual(modern_qt_env["QT_QUICK_BACKEND"], "caller-selected")
+        self.assertEqual(modern_qt_env["QSG_RENDER_LOOP"], "threaded")
 
     def test_windows_version_metadata_uses_requested_version(self) -> None:
         payload = build_windows.windows_version_info("0.2.1")
@@ -783,6 +798,9 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("constraints/python312-production.txt", ci)
         self.assertIn("constraints/python38-win7.txt", ci)
         self.assertIn('python-version: "3.8.10"', ci)
+        win7_ci = ci.split("\n  windows-win7-compat-test:", 1)[1]
+        self.assertIn('QT_QUICK_BACKEND: "software"', win7_ci)
+        self.assertIn('QSG_RENDER_LOOP: "basic"', win7_ci)
 
         win7_constraints = (
             build_windows.REPO_ROOT / "constraints" / "python38-win7.txt"
