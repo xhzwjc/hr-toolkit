@@ -10,6 +10,7 @@ from hr_toolkit import __version__, runlog
 from hr_toolkit.desktop_helpers import install_crash_logging, set_windows_app_identity
 
 from .live_resize import LiveResizeUpdater, WindowsResizeBackdrop
+from .smoke import mark_stage
 
 
 def _prepare_environment() -> None:
@@ -62,6 +63,7 @@ def main() -> int:
     # "Basic".  Both avoid native-widget relayout during a live resize.
     controls_style = "Default" if QT_MAJOR == 5 else "Basic"
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", controls_style)
+    mark_stage("qt-application")
     app = QApplication(sys.argv)
     app.setApplicationName("HRToolkit")
     app.setApplicationDisplayName("HR Workbench")
@@ -86,11 +88,14 @@ def main() -> int:
         )
     app.setFont(application_font)
 
+    mark_stage("qt-controller")
     controller = AppController()
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("controller", controller)
     qml_path = Path(__file__).resolve().parent / "qml" / "Main.qml"
+    mark_stage("qt-qml-load")
     engine.load(QUrl.fromLocalFile(str(qml_path)))
+    mark_stage("qt-qml-loaded")
     if not engine.rootObjects():
         runlog.log_line(f"Qt Quick 主界面加载失败：{qml_path}")
         controller.close()
@@ -162,13 +167,16 @@ def main() -> int:
     app.aboutToQuit.connect(controller.close)
     app.aboutToQuit.connect(close_resize_helpers)
     execute = getattr(app, "exec", None) or app.exec_
+    mark_stage("qt-event-loop")
     exit_code = int(execute())
+    mark_stage("qt-cleanup")
     close_resize_helpers()
     # Destroy QML roots before their context is cleared.  Besides avoiding
     # noisy null-binding warnings, this deterministically releases scene-graph
     # textures and GPU resources during repeated packaged-app smoke tests.
     for root_object in engine.rootObjects():
         delete_qobject(root_object)
+    mark_stage("qt-cleanup-complete")
     return exit_code
 
 

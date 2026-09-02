@@ -740,7 +740,11 @@ class WindowsPackagingTests(unittest.TestCase):
                 build_windows.run_runtime_smoke(app, updater)
                 modern_calls = list(observed_calls)
 
-        self.assertEqual(len(win7_calls), 5)
+        self.assertEqual(len(win7_calls), 7)
+        self.assertEqual(
+            sum("--qt-smoke-test" in command for command, _ in win7_calls),
+            3,
+        )
         self.assertTrue(
             all(
                 build_windows.WIN7_7ZIP_OVERRIDE_ENV not in env
@@ -795,6 +799,45 @@ class WindowsPackagingTests(unittest.TestCase):
             with patch.object(build_windows, "_run", side_effect=fake_run):
                 with self.assertRaisesRegex(RuntimeError, "ocr-inference"):
                     build_windows.run_runtime_smoke(app, updater)
+
+    def test_packaged_qt_crash_preserves_native_traceback_and_does_not_retry(self) -> None:
+        qt_launches = []
+
+        def fake_run(command, *, timeout=None, env=None):
+            output = Path(env["HR_TOOLKIT_CHECK_OUTPUT"])
+            if "--version" in command:
+                output.write_text(self.version, encoding="utf-8")
+            elif "--smoke-test" in command:
+                output.write_text(
+                    f"HRToolkit {self.version} smoke-test OK", encoding="utf-8"
+                )
+            elif "--update-smoke-test" in command:
+                output.write_text(
+                    f"HRToolkit {self.version} update-smoke-test OK; latest={self.version}",
+                    encoding="utf-8",
+                )
+            else:
+                qt_launches.append(command)
+                output.write_text(
+                    "HRToolkit Qt smoke-test RUNNING: qt-qml-load", encoding="utf-8"
+                )
+                Path(str(output) + ".native.log").write_text(
+                    "Windows fatal exception: access violation\nmain.py: engine.load",
+                    encoding="utf-8",
+                )
+                raise subprocess.CalledProcessError(0xC0000005, command)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "HRToolkit.exe"
+            updater = Path(tmp) / "HRToolkitUpdater.exe"
+            self._write_fake_pe(updater, build_windows.PE_MACHINE_AMD64)
+            with patch.object(build_windows, "_run", side_effect=fake_run):
+                with self.assertRaises(RuntimeError) as raised:
+                    build_windows.run_runtime_smoke(app, updater, target="win7")
+        self.assertEqual(len(qt_launches), 1)
+        self.assertIn("qt-qml-load", str(raised.exception))
+        self.assertIn("access violation", str(raised.exception))
+        self.assertIn("engine.load", str(raised.exception))
 
     def test_wix_xml_indentation_has_a_python38_fallback(self) -> None:
         root = ET.Element("root")

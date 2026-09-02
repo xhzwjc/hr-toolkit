@@ -186,12 +186,20 @@ jobs:
         env:
           HR_TOOLKIT_SKIP_UPDATE: "1"
           HR_TOOLKIT_QT_SMOKE_EXIT_MS: "800"
-          # Match the packaged production path. PySide2 qoffscreen is not used
-          # by customers and is intermittently unstable on hosted runners.
+          # Use the native window path without requiring a hosted runner GPU.
+          # The production QML and signal connections are still exercised.
           QT_QPA_PLATFORM: "windows"
           QT_QUICK_BACKEND: "software"
           QSG_RENDER_LOOP: "basic"
-        run: python hr_toolkit_app.py --qt-smoke-test
+        shell: pwsh
+        run: |
+          # Require all three launches to succeed; do not retry a crash.
+          for ($launch = 1; $launch -le 3; $launch++) {
+            python hr_toolkit_app.py --qt-smoke-test
+            if ($LASTEXITCODE -ne 0) {
+              throw "Win7 Qt startup $launch/3 failed with exit code $LASTEXITCODE"
+            }
+          }
 
       - name: Run Python 3.8-compatible core tests
         env:

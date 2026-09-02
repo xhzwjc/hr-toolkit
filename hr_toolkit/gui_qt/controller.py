@@ -106,10 +106,16 @@ class AppController(QObject):
     trashChanged = Signal()
     materialChanged = Signal()
     updateChanged = Signal()
-    notificationRequested = Signal(str, str, str)
-    confirmationRequested = Signal(str, str, str)
-    projectCreationRequested = Signal(str, str)
-    textInputRequested = Signal(str, str, str, str)
+    # Qt 5.15.2 rebuilds Connections handlers' argument tables from signal
+    # metadata. Unnamed PySide2 arguments can crash QQmlBoundSignalExpression
+    # during QML loading. Keep these names aligned with Main.qml; argument
+    # types, order, emitters and business payloads remain unchanged.
+    notificationRequested = Signal(str, str, str, arguments=["title", "message", "level"])
+    confirmationRequested = Signal(str, str, str, arguments=["title", "message", "token"])
+    projectCreationRequested = Signal(str, str, arguments=["name", "parent"])
+    textInputRequested = Signal(
+        str, str, str, str, arguments=["title", "prompt", "initialValue", "token"]
+    )
     resizeSample = Signal(float)
 
     _projectOpened = Signal(int, object, str)

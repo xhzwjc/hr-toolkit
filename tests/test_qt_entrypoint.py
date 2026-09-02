@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import ExitStack
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -14,6 +17,7 @@ from hr_toolkit.gui_qt.live_resize import (
     _windows_colorref,
 )
 from hr_toolkit.gui_qt.main import _prepare_environment
+from hr_toolkit.gui_qt import smoke as qt_smoke
 
 
 class QtEntrypointTests(unittest.TestCase):
@@ -23,6 +27,82 @@ class QtEntrypointTests(unittest.TestCase):
         except ImportError as exc:
             self.skipTest(f"Qt runtime is not installed in this CI lane: {exc}")
         return qt_compat
+
+    def test_production_qml_connections_preserve_every_signal_argument(self) -> None:
+        self._qt_compat_or_skip()
+        probe = Path(__file__).with_name("qt_connections_probe.py")
+        completed = subprocess.run(
+            [sys.executable, "-X", "faulthandler", str(probe)],
+            cwd=str(probe.resolve().parents[1]),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"Native QML connection failure: {completed.stdout}\n{completed.stderr}",
+        )
+        self.assertIn("20/20 passed", completed.stdout)
+
+    def test_qml_dialog_signals_have_named_parameters_on_both_qt_versions(self) -> None:
+        self._qt_compat_or_skip()
+        from hr_toolkit.gui_qt.controller import AppController
+
+        expected = {
+            "notificationRequested": ["title", "message", "level"],
+            "confirmationRequested": ["title", "message", "token"],
+            "projectCreationRequested": ["name", "parent"],
+            "textInputRequested": ["title", "prompt", "initialValue", "token"],
+        }
+        meta = AppController.staticMetaObject
+        for name, parameters in expected.items():
+            with self.subTest(signal=name):
+                signature = f"{name}({','.join(['QString'] * len(parameters))})"
+                index = meta.indexOfSignal(signature)
+                self.assertGreaterEqual(index, 0)
+                self.assertEqual(
+                    [bytes(value).decode("utf-8") for value in meta.method(index).parameterNames()],
+                    parameters,
+                )
+
+    def test_qt_smoke_records_python_failure_and_keeps_native_log_open(self) -> None:
+        self._qt_compat_or_skip()
+        stages = []
+
+        def install_fault_handler(*, file, all_threads):
+            self.assertTrue(all_threads)
+            self.assertFalse(file.closed)
+            stages.append(file)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "qt-result.txt"
+            with ExitStack() as patches:
+                patches.enter_context(patch.dict(os.environ, {"HR_TOOLKIT_CHECK_OUTPUT": str(output)}))
+                patches.enter_context(patch.object(sys, "argv", ["HRToolkit.exe", "--qt-smoke-test"]))
+                patches.enter_context(patch.object(qt_smoke.faulthandler, "is_enabled", return_value=False))
+                patches.enter_context(patch.object(qt_smoke.faulthandler, "enable", side_effect=install_fault_handler))
+                disable = patches.enter_context(patch.object(qt_smoke.faulthandler, "disable"))
+                patches.enter_context(patch("hr_toolkit.gui_qt.main.main", side_effect=RuntimeError("QML load failure")))
+                patches.enter_context(patch.object(qt_smoke.sys, "stdout", None))
+                result = qt_smoke.run()
+            self.assertEqual(result, 1)
+            self.assertEqual(len(stages), 1)
+            self.assertTrue(stages[0].closed)
+            disable.assert_called_once_with()
+            self.assertTrue(Path(str(output) + ".native.log").is_file())
+            detail = output.read_text(encoding="utf-8")
+            self.assertIn("Traceback", detail)
+            self.assertIn("QML load failure", detail)
+
+    def test_qt_stage_diagnostics_do_not_run_in_normal_desktop_sessions(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(qt_smoke, "_emit") as emit:
+                qt_smoke.mark_stage("qt-qml-load")
+        emit.assert_not_called()
 
     def test_constant_property_avoids_pyside2_descriptor_copy(self) -> None:
         qt_compat = self._qt_compat_or_skip()

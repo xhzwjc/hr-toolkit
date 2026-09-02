@@ -3,7 +3,6 @@ from __future__ import annotations
 import multiprocessing
 import os
 import sys
-from pathlib import Path
 
 from hr_toolkit.runtime_checks import run_headless_command
 
@@ -69,24 +68,9 @@ def _run_desktop() -> int:
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     if sys.argv[1:] == ["--qt-smoke-test"]:
-        os.environ.setdefault("HR_TOOLKIT_SKIP_UPDATE", "1")
-        os.environ.setdefault("HR_TOOLKIT_QT_SMOKE_EXIT_MS", "800")
-        sys.argv = [sys.argv[0]]
-        try:
-            from hr_toolkit.gui_qt import main as qt_main
+        from hr_toolkit.gui_qt.smoke import run as run_qt_smoke
 
-            result = int(qt_main())
-        except Exception as exc:
-            message = f"HRToolkit Qt smoke-test FAILED: {exc}"
-            result = 1
-        else:
-            message = "HRToolkit Qt smoke-test OK" if result == 0 else f"HRToolkit Qt smoke-test FAILED: exit={result}"
-        if sys.stdout is not None:
-            print(message, flush=True)
-        output = os.environ.get("HR_TOOLKIT_CHECK_OUTPUT", "").strip()
-        if output:
-            Path(output).write_text(message + "\n", encoding="utf-8")
-        raise SystemExit(result)
+        raise SystemExit(run_qt_smoke())
     headless_result = run_headless_command(sys.argv[1:])
     if headless_result is not None:
         raise SystemExit(headless_result)

@@ -220,8 +220,8 @@ WINDOWS_TARGET_WIN7 = "win7"
 WINDOWS_TARGETS = (WINDOWS_TARGET_MODERN, WINDOWS_TARGET_WIN7)
 WIN7_QT_SMOKE_ENV = {
     # Exercise the same native platform path used by the installed application.
-    # PySide2's qoffscreen plugin is not a production dependency and can exit
-    # intermittently (or crash after freezing) on hosted Windows runners.
+    # Software rendering avoids depending on a hosted runner's GPU. It does
+    # not bypass QML loading, signal connections, or native window creation.
     # These values are passed only to smoke subprocesses, never embedded in the
     # installed application.
     "QT_QPA_PLATFORM": "windows",
@@ -1620,18 +1620,22 @@ def run_runtime_smoke(
         qt_env["HR_TOOLKIT_SKIP_UPDATE"] = "1"
         if target == WINDOWS_TARGET_WIN7:
             qt_env.update(WIN7_PACKAGED_QT_SMOKE_ENV)
-        _run_packaged_check(
-            [str(app_executable), "--qt-smoke-test"],
-            output_path=output_path,
-            label="打包程序 Qt Quick smoke-test",
-            timeout=90,
-            env=qt_env,
-        )
-        qt_smoke_result = output_path.read_text(encoding="utf-8").strip()
-        if qt_smoke_result != "HRToolkit Qt smoke-test OK":
-            raise RuntimeError(
-                f"打包程序 Qt Quick smoke-test 输出不正确：{qt_smoke_result or '空'}"
+        # These are required consecutive successes, not retries: a single
+        # native crash immediately fails the release gate.
+        qt_launches = 3 if target == WINDOWS_TARGET_WIN7 else 1
+        for launch in range(qt_launches):
+            _run_packaged_check(
+                [str(app_executable), "--qt-smoke-test"],
+                output_path=output_path,
+                label=f"打包程序 Qt Quick smoke-test {launch + 1}/{qt_launches}",
+                timeout=90,
+                env=qt_env,
             )
+            qt_smoke_result = output_path.read_text(encoding="utf-8").strip()
+            if qt_smoke_result != "HRToolkit Qt smoke-test OK":
+                raise RuntimeError(
+                    f"打包程序 Qt Quick smoke-test 输出不正确：{qt_smoke_result or '空'}"
+                )
         if target == WINDOWS_TARGET_WIN7:
             updater_smoke_dir = Path(tmp) / "updater"
             updater_smoke_dir.mkdir()
@@ -1672,6 +1676,8 @@ def _run_packaged_check(
     env: dict[str, str],
 ) -> None:
     output_path.unlink(missing_ok=True)
+    native_log = Path(str(output_path) + ".native.log")
+    native_log.unlink(missing_ok=True)
     try:
         _run(command, timeout=timeout, env=env)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -1679,6 +1685,12 @@ def _run_packaged_check(
             detail = output_path.read_text(encoding="utf-8").strip()
         except OSError:
             detail = ""
+        try:
+            native_detail = native_log.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            native_detail = ""
+        if native_detail:
+            detail += "\n原生崩溃堆栈：\n" + native_detail
         suffix = f"；程序记录：{detail}" if detail else ""
         raise RuntimeError(f"{label}失败：{exc}{suffix}") from exc
 
