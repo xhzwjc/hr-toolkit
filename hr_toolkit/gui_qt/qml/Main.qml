@@ -24,12 +24,11 @@ ApplicationWindow {
     // around one breakpoint.
     property bool compactSidebar: false
 
-    // During a live native resize on Windows the DWM compositor can stall if
-    // QML re-evaluates every binding that depends on root.width/height on
-    // each pixel change.  We therefore sample the size through a timer and
-    // let the rest of the UI bind to the *settled* values instead of the raw
-    // window geometry.  This mirrors what Electron (Codex / Claude / GitHub
-    // Desktop) does internally: defer layout until WM_SIZE stops firing.
+    // Keep breakpoint-only geometry stable during a live native resize.  The
+    // window and its main content still resize through Qt on every frame; only
+    // expensive responsive-mode changes and overlay geometry wait until the
+    // size has been stable briefly.  This is an application-level debounce,
+    // independent of Qt's platform render loop.
     property int settledWidth: width
     property int settledHeight: height
     Timer {

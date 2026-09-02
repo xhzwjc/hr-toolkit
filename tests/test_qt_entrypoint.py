@@ -1,30 +1,60 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import hr_toolkit_app
 from hr_toolkit.gui_qt.main import _prepare_environment
 
 
 class QtEntrypointTests(unittest.TestCase):
-    def test_qt_environment_uses_basic_render_loop_by_default(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            _prepare_environment()
-            self.assertEqual(os.environ["QSG_RENDER_LOOP"], "basic")
-            self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "0")
+    def test_windows_qt_environment_keeps_platform_render_defaults(self) -> None:
+        with patch.object(sys, "platform", "win32"):
+            with patch.dict(os.environ, {}, clear=True):
+                _prepare_environment()
+                self.assertNotIn("QSG_RENDER_LOOP", os.environ)
+                self.assertNotIn("QSG_RHI_BACKEND", os.environ)
+                self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "0")
 
-    def test_qt_environment_preserves_explicit_render_loop_override(self) -> None:
+    def test_macos_keeps_the_benchmarked_basic_render_loop(self) -> None:
+        with patch.object(sys, "platform", "darwin"):
+            with patch.dict(os.environ, {}, clear=True):
+                _prepare_environment()
+                self.assertEqual(os.environ["QSG_RENDER_LOOP"], "basic")
+                self.assertNotIn("QSG_RHI_BACKEND", os.environ)
+
+    def test_qt_environment_preserves_explicit_graphics_overrides(self) -> None:
         with patch.dict(
             os.environ,
-            {"QSG_RENDER_LOOP": "threaded", "QML_DISABLE_DISK_CACHE": "1"},
+            {
+                "QSG_RENDER_LOOP": "threaded",
+                "QSG_RHI_BACKEND": "opengl",
+                "QML_DISABLE_DISK_CACHE": "1",
+            },
             clear=True,
         ):
-            _prepare_environment()
-            self.assertEqual(os.environ["QSG_RENDER_LOOP"], "threaded")
-            self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "1")
+            with patch.object(sys, "platform", "darwin"):
+                _prepare_environment()
+                self.assertEqual(os.environ["QSG_RENDER_LOOP"], "threaded")
+                self.assertEqual(os.environ["QSG_RHI_BACKEND"], "opengl")
+                self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "1")
+
+    def test_qt_entrypoint_does_not_subclass_the_native_window(self) -> None:
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "hr_toolkit"
+            / "gui_qt"
+            / "main.py"
+        )
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("_WindowsSizingHook", source)
+        self.assertNotIn("SetWindowLongPtrW", source)
+        self.assertNotIn("WM_PAINT", source)
 
     def test_live_resize_keeps_layout_breakpoints_and_workspace_stable(self) -> None:
         qml_path = (
@@ -58,10 +88,51 @@ class QtEntrypointTests(unittest.TestCase):
         qt_main.assert_called_once_with()
 
     def test_legacy_renderer_remains_an_explicit_recovery_option(self) -> None:
+        legacy_main = Mock()
+        legacy_module = types.ModuleType("hr_toolkit.gui")
+        legacy_module.main = legacy_main
         with patch.dict(os.environ, {"HR_TOOLKIT_RENDERER": "legacy-tk"}):
-            with patch("hr_toolkit.gui.main", return_value=None) as legacy_main:
+            with patch.dict(sys.modules, {"hr_toolkit.gui": legacy_module}):
                 self.assertEqual(hr_toolkit_app._run_desktop(), 0)
         legacy_main.assert_called_once_with()
+
+    def test_missing_qt_runtime_never_silently_starts_legacy_renderer(self) -> None:
+        legacy_main = Mock()
+        legacy_module = types.ModuleType("hr_toolkit.gui")
+        legacy_module.main = legacy_main
+        missing_qt = ImportError("No module named 'shiboken6'", name="shiboken6")
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HR_TOOLKIT_RENDERER", None)
+            with patch.dict(sys.modules, {"hr_toolkit.gui": legacy_module}):
+                with patch("hr_toolkit.gui_qt.main", side_effect=missing_qt):
+                    with self.assertRaises(
+                        hr_toolkit_app.DesktopRuntimeUnavailable
+                    ) as raised:
+                        hr_toolkit_app._run_desktop()
+
+        self.assertIn("shiboken6", str(raised.exception))
+        self.assertIn("requirements-gui.txt", str(raised.exception))
+        legacy_main.assert_not_called()
+
+    def test_non_qt_import_failure_is_not_misreported_as_missing_qt(self) -> None:
+        missing_core = ImportError("No module named 'openpyxl'", name="openpyxl")
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HR_TOOLKIT_RENDERER", None)
+            with patch("hr_toolkit.gui_qt.main", side_effect=missing_core):
+                with self.assertRaises(ImportError) as raised:
+                    hr_toolkit_app._run_desktop()
+
+        self.assertIs(raised.exception, missing_core)
+
+    def test_win7_source_install_uses_the_locked_qt5_constraints(self) -> None:
+        with patch.object(hr_toolkit_app.sys, "platform", "win32"):
+            with patch.object(hr_toolkit_app.sys, "version_info", (3, 8, 10)):
+                command = hr_toolkit_app._qt_install_command()
+
+        self.assertIn("requirements-gui.txt", command)
+        self.assertIn("constraints/python38-win7.txt", command)
 
 
 if __name__ == "__main__":

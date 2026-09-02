@@ -268,6 +268,18 @@ python3.12 -m pip install \
   -c constraints/python312-production.txt
 ```
 
+从源码运行桌面界面还必须安装 Qt 依赖；只安装 `requirements.txt` 仅支持 CLI，不会再静默打开性能较低的旧版 Tk 界面：
+
+```bash
+python3.12 -m pip install \
+  -r requirements.txt \
+  -r requirements-gui.txt \
+  -c constraints/python312-production.txt
+python3.12 hr_toolkit_app.py
+```
+
+Windows 7 SP1 x64 源码环境必须使用 Python 3.8，并把约束文件替换为 `constraints/python38-win7.txt`。正式安装包已内置对应 Qt 运行库，终端用户无需安装 Python 或执行上述命令。
+
 ### 1. 社保明细与汇总：
 ```bash
 python3 -m hr_toolkit social-security \
