@@ -15,9 +15,13 @@ VERSION_FILE = REPO_ROOT / "hr_toolkit" / "__init__.py"
 SEMVER_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 VERSION_ASSIGNMENT_PATTERN = re.compile(r'^__version__\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
-MAX_RELEASE_ASSET_BYTES = 100_000_000
-# Backward-compatible public name used by the Gitee release scripts.
-GITEE_ATTACHMENT_SAFE_MAX_BYTES = MAX_RELEASE_ASSET_BYTES
+# GitHub Release accepts individual assets below 2 GiB.  Installer generation
+# and unified metadata target GitHub, so they must not inherit Gitee's much
+# smaller attachment ceiling.
+MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024
+# Gitee publishing remains independently constrained and currently mirrors
+# only source metadata/checksums; retain its conservative decimal 100 MB cap.
+GITEE_ATTACHMENT_SAFE_MAX_BYTES = 100_000_000
 
 
 class ReleaseMetadataError(RuntimeError):

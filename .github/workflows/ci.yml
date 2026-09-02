@@ -186,9 +186,9 @@ jobs:
         env:
           HR_TOOLKIT_SKIP_UPDATE: "1"
           HR_TOOLKIT_QT_SMOKE_EXIT_MS: "800"
-          # Headless smoke verifies the Qt/QML runtime without depending on a
-          # hosted desktop session. Production still uses the native platform.
-          QT_QPA_PLATFORM: "offscreen"
+          # Match the packaged production path. PySide2 qoffscreen is not used
+          # by customers and is intermittently unstable on hosted runners.
+          QT_QPA_PLATFORM: "windows"
           QT_QUICK_BACKEND: "software"
           QSG_RENDER_LOOP: "basic"
         run: python hr_toolkit_app.py --qt-smoke-test

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import copy
 import hashlib
 import json
@@ -310,6 +311,43 @@ class WindowsPackagingTests(unittest.TestCase):
             duplicate.write_bytes(b"stale-copy")
             with self.assertRaisesRegex(RuntimeError, "存在重复副本"):
                 build_windows.verify_modern_vc_runtime_payload(app_dir)
+
+    def test_modern_runtime_resolution_does_not_import_onnx_or_qt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            for name in build_windows.MODERN_REQUIRED_VC_RUNTIME_FILES:
+                (runtime_dir / name).write_bytes(b"runtime")
+
+            original_import = builtins.__import__
+
+            def guarded_import(name, *args, **kwargs):
+                if name == "onnxruntime" or name.startswith("PySide6"):
+                    raise AssertionError(f"构建进程不应导入扩展模块：{name}")
+                return original_import(name, *args, **kwargs)
+
+            with (
+                patch.object(build_windows.sys, "platform", "win32"),
+                patch.object(
+                    build_windows,
+                    "_windows_system_directory",
+                    return_value=runtime_dir,
+                ),
+                patch.object(builtins, "__import__", side_effect=guarded_import),
+            ):
+                self.assertEqual(
+                    build_windows.resolve_modern_vc_runtime_dir(),
+                    runtime_dir,
+                )
+
+    def test_win7_qt_smoke_uses_one_native_windows_configuration(self) -> None:
+        self.assertIs(
+            build_windows.WIN7_SOURCE_QT_SMOKE_ENV,
+            build_windows.WIN7_PACKAGED_QT_SMOKE_ENV,
+        )
+        self.assertEqual(
+            build_windows.WIN7_SOURCE_QT_SMOKE_ENV["QT_QPA_PLATFORM"],
+            "windows",
+        )
 
     def test_win7_pyinstaller_hook_rejects_recursive_host_api_sets(self) -> None:
         fake_dylib = SimpleNamespace(include_library=lambda _name: True)

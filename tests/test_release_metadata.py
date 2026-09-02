@@ -30,7 +30,7 @@ class ReleaseMetadataTests(unittest.TestCase):
                 with self.assertRaises(release_metadata.ReleaseMetadataError):
                     release_metadata.validate_version(version)
 
-    def test_release_asset_size_gate_is_strict_at_decimal_100_mb(self) -> None:
+    def test_github_and_gitee_release_asset_limits_are_independent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             asset = Path(temporary) / "asset.bin"
             asset.write_bytes(b"small")
@@ -39,13 +39,30 @@ class ReleaseMetadataTests(unittest.TestCase):
                 len(b"small"),
             )
 
+            failed_win7_msi_bytes = 108_515_868
             with asset.open("r+b") as handle:
-                handle.truncate(release_metadata.MAX_RELEASE_ASSET_BYTES)
+                handle.truncate(failed_win7_msi_bytes)
+            self.assertEqual(
+                release_metadata.require_release_asset_under_limit(asset),
+                failed_win7_msi_bytes,
+            )
             with self.assertRaisesRegex(
                 release_metadata.ReleaseMetadataError,
                 "必须严格小于 100000000 字节",
             ):
-                release_metadata.require_release_asset_under_limit(asset)
+                release_metadata.require_release_asset_under_limit(
+                    asset,
+                    max_bytes=release_metadata.GITEE_ATTACHMENT_SAFE_MAX_BYTES,
+                )
+
+        self.assertEqual(
+            release_metadata.MAX_RELEASE_ASSET_BYTES,
+            2 * 1024 * 1024 * 1024,
+        )
+        self.assertEqual(
+            release_metadata.GITEE_ATTACHMENT_SAFE_MAX_BYTES,
+            100_000_000,
+        )
 
     def test_release_identity_requires_exact_tag_and_project_version(self) -> None:
         release_metadata.validate_release_identity(self.VERSION, self.TAG, self.VERSION)

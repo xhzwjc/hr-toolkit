@@ -218,23 +218,20 @@ PE_MACHINE_AMD64 = 0x8664
 WINDOWS_TARGET_MODERN = "modern"
 WINDOWS_TARGET_WIN7 = "win7"
 WINDOWS_TARGETS = (WINDOWS_TARGET_MODERN, WINDOWS_TARGET_WIN7)
-WIN7_SOURCE_QT_SMOKE_ENV = {
-    # Exercise the bundled Qt/QML runtime without coupling unattended build
-    # verification to a hosted runner's interactive desktop or graphics stack.
-    # These values are passed only to the smoke subprocess, never embedded in
-    # the installed application.
-    "QT_QPA_PLATFORM": "offscreen",
-    "QT_QUICK_BACKEND": "software",
-    "QSG_RENDER_LOOP": "basic",
-}
-WIN7_PACKAGED_QT_SMOKE_ENV = {
-    # The installed application uses Qt's native Windows platform plugin.
-    # PySide2's qoffscreen plugin can crash with 0xC0000005 only after it has
-    # been frozen, so the packaged gate must exercise the production path.
+WIN7_QT_SMOKE_ENV = {
+    # Exercise the same native platform path used by the installed application.
+    # PySide2's qoffscreen plugin is not a production dependency and can exit
+    # intermittently (or crash after freezing) on hosted Windows runners.
+    # These values are passed only to smoke subprocesses, never embedded in the
+    # installed application.
     "QT_QPA_PLATFORM": "windows",
     "QT_QUICK_BACKEND": "software",
     "QSG_RENDER_LOOP": "basic",
 }
+# Keep source and packaged checks on one immutable-by-convention source of
+# truth so a CI-only platform override cannot drift from the released binary.
+WIN7_SOURCE_QT_SMOKE_ENV = WIN7_QT_SMOKE_ENV
+WIN7_PACKAGED_QT_SMOKE_ENV = WIN7_QT_SMOKE_ENV
 WIN7_REQUIRED_UCRT_FILES = (
     "api-ms-win-core-console-l1-1-0.dll",
     "api-ms-win-core-datetime-l1-1-0.dll",
@@ -841,7 +838,7 @@ def stage_modern_app_local_vc_runtimes(
 
 
 def resolve_modern_vc_runtime_dir() -> Path:
-    """Return the Windows runtime set proven to load ONNX and Qt together."""
+    """Return the complete central Windows VC runtime without loading it."""
     if sys.platform != "win32":
         raise RuntimeError("modern Visual C++ 运行库只能在 Windows 构建机上解析。")
     runtime_dir = _windows_system_directory()
@@ -850,22 +847,11 @@ def resolve_modern_vc_runtime_dir() -> Path:
         MODERN_REQUIRED_VC_RUNTIME_FILES,
         label="Windows central Visual C++ runtime",
     )
-    try:
-        import ctypes
-
-        # Preload the exact files that will be copied before either extension
-        # can add a wheel-private directory to Windows DLL search paths.
-        loaded_runtimes = tuple(
-            ctypes.WinDLL(str(runtime_dir / name))
-            for name in MODERN_REQUIRED_VC_RUNTIME_FILES
-        )
-        import onnxruntime  # noqa: F401
-        from PySide6 import QtCore, QtGui, QtQml, QtQuick, QtQuickControls2  # noqa: F401
-        del loaded_runtimes
-    except Exception as exc:
-        raise RuntimeError(
-            "构建机的 ONNX Runtime 与 PySide6 无法共享 Visual C++ 运行库。"
-        ) from exc
+    # Do not preload these DLLs in the already-running build interpreter.
+    # Python has loaded part of its own runtime by this point, so forcing a
+    # second set into that process can itself make ONNX initialization fail.
+    # The files are copied as one app-local set below; run_runtime_smoke then
+    # validates ONNX and Qt in clean packaged subprocesses.
     return runtime_dir
 
 
