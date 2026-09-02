@@ -6,6 +6,7 @@ import json
 import runpy
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -37,6 +38,23 @@ class WindowsPackagingTests(unittest.TestCase):
                 build_windows.validate_stable_semver(invalid)
         with self.assertRaises(ValueError):
             build_windows.validate_build_version("99.99.99")
+
+    def test_packaged_tutorial_contract_does_not_load_legacy_gui(self) -> None:
+        command = (
+            "import sys; "
+            "from hr_toolkit.tutorial_content import tutorial_groups; "
+            "assert tutorial_groups(); "
+            "assert 'hr_toolkit.gui' not in sys.modules"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", command],
+            cwd=build_windows.REPO_ROOT,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_pyinstaller_commands_are_onedir_onefile_and_resource_whitelisted(self) -> None:
         self.assertEqual(build_windows.RELEASE_TEMPLATE_NAMES, TEMPLATE_NAMES)
@@ -105,6 +123,16 @@ class WindowsPackagingTests(unittest.TestCase):
             ["--exclude-module", "tkinter"],
             [updater[index : index + 2] for index in range(len(updater) - 1)],
         )
+        self.assertEqual(build_windows.QT6_WINDOWS_RUNTIME_ROOT, Path("PySide6"))
+        self.assertEqual(build_windows.QT5_WINDOWS_RUNTIME_ROOT, Path("PySide2"))
+        controller_source = (
+            build_windows.REPO_ROOT / "hr_toolkit" / "gui_qt" / "controller.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "from hr_toolkit.tutorial_content import tutorial_groups",
+            controller_source,
+        )
+        self.assertNotIn("from hr_toolkit.gui", controller_source)
         for hidden_import in build_windows.HIDDEN_IMPORTS:
             self.assertIn(["--hidden-import", hidden_import], [main[index : index + 2] for index in range(len(main) - 1)])
         for module in build_windows.COLLECT_ALL_MODULES:
@@ -404,7 +432,12 @@ class WindowsPackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             app_dir, _updater = self._fake_app(root / "windows")
-            translations = app_dir / "_internal" / "PySide6" / "Qt" / "translations"
+            translations = (
+                app_dir
+                / "_internal"
+                / build_windows.QT6_WINDOWS_RUNTIME_ROOT
+                / "translations"
+            )
             translations.mkdir(parents=True)
             retained = {
                 "qt_en.qm": b"english",
@@ -448,7 +481,11 @@ class WindowsPackagingTests(unittest.TestCase):
                 self.assertEqual((mac_translations / name).read_bytes(), payload)
 
             windows_tooling = (
-                app_dir / "_internal" / "PySide6" / "Qt" / "plugins" / "qmltooling"
+                app_dir
+                / "_internal"
+                / build_windows.QT6_WINDOWS_RUNTIME_ROOT
+                / "plugins"
+                / "qmltooling"
             )
             windows_tooling.mkdir(parents=True)
             (windows_tooling / "qmldbg.dll").write_bytes(b"development-plugin")
@@ -479,7 +516,11 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertFalse(mac_tooling.exists())
 
             windows_images = (
-                app_dir / "_internal" / "PySide6" / "Qt" / "plugins" / "imageformats"
+                app_dir
+                / "_internal"
+                / build_windows.QT6_WINDOWS_RUNTIME_ROOT
+                / "plugins"
+                / "imageformats"
             )
             windows_images.mkdir(parents=True)
             windows_retained = windows_images / "qjpeg.dll"
@@ -1800,7 +1841,10 @@ class WindowsPackagingTests(unittest.TestCase):
         qt_notice.write_bytes(build_windows.QT_NOTICE.read_bytes())
         for qml_root, required in (
             (
-                app_dir / "_internal" / "PySide6" / "Qt" / "qml",
+                app_dir
+                / "_internal"
+                / build_windows.QT6_WINDOWS_RUNTIME_ROOT
+                / "qml",
                 build_windows.QT6_REQUIRED_QML_FILES,
             ),
             (

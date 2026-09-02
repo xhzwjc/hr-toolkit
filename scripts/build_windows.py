@@ -38,6 +38,12 @@ TEMPLATES_DIR = REPO_ROOT / "hr_toolkit" / "templates"
 QML_DIR = REPO_ROOT / "hr_toolkit" / "gui_qt" / "qml"
 QT_NOTICE = REPO_ROOT / "packaging" / "qt" / "THIRD-PARTY-NOTICES.txt"
 QT_PYINSTALLER_HOOKS_DIR = REPO_ROOT / "packaging" / "qt" / "hooks"
+# PyInstaller deliberately freezes PySide beside its Windows wheel layout:
+# ``PySide6/...`` and ``PySide2/...``.  The extra ``Qt`` directory is used by
+# PySide wheels on macOS/Linux only; assuming that layout on Windows makes a
+# valid Qt Quick payload look empty and skips production pruning.
+QT6_WINDOWS_RUNTIME_ROOT = Path("PySide6")
+QT5_WINDOWS_RUNTIME_ROOT = Path("PySide2")
 
 QT6_REQUIRED_QML_FILES = (
     "QtCore/qmldir",
@@ -665,9 +671,9 @@ def remove_unused_qt_translations(
     target = validate_windows_target(target)
     internal = app_dir / "_internal"
     translations = (
-        internal / "PySide2" / "translations"
+        internal / QT5_WINDOWS_RUNTIME_ROOT / "translations"
         if target == WINDOWS_TARGET_WIN7
-        else internal / "PySide6" / "Qt" / "translations"
+        else internal / QT6_WINDOWS_RUNTIME_ROOT / "translations"
     )
     removed_bytes = 0
     if not translations.is_dir():
@@ -692,9 +698,9 @@ def remove_qt_development_plugins(
     target = validate_windows_target(target)
     internal = app_dir / "_internal"
     plugin_dir = (
-        internal / "PySide2" / "plugins" / "qmltooling"
+        internal / QT5_WINDOWS_RUNTIME_ROOT / "plugins" / "qmltooling"
         if target == WINDOWS_TARGET_WIN7
-        else internal / "PySide6" / "Qt" / "plugins" / "qmltooling"
+        else internal / QT6_WINDOWS_RUNTIME_ROOT / "plugins" / "qmltooling"
     )
     if not plugin_dir.exists():
         return 0
@@ -716,9 +722,9 @@ def remove_unused_qt_image_format_plugins(
     target = validate_windows_target(target)
     internal = app_dir / "_internal"
     plugin_dir = (
-        internal / "PySide2" / "plugins" / "imageformats"
+        internal / QT5_WINDOWS_RUNTIME_ROOT / "plugins" / "imageformats"
         if target == WINDOWS_TARGET_WIN7
-        else internal / "PySide6" / "Qt" / "plugins" / "imageformats"
+        else internal / QT6_WINDOWS_RUNTIME_ROOT / "plugins" / "imageformats"
     )
     if not plugin_dir.is_dir():
         return 0
@@ -1038,13 +1044,13 @@ def verify_windows_payload(
 def verify_packaged_qt_qml(internal: Path, *, target: str) -> None:
     target = validate_windows_target(target)
     if target == WINDOWS_TARGET_WIN7:
-        qml_root = internal / "PySide2" / "qml"
-        translations = internal / "PySide2" / "translations"
+        qt_root = internal / QT5_WINDOWS_RUNTIME_ROOT
         required = QT5_REQUIRED_QML_FILES
     else:
-        qml_root = internal / "PySide6" / "Qt" / "qml"
-        translations = internal / "PySide6" / "Qt" / "translations"
+        qt_root = internal / QT6_WINDOWS_RUNTIME_ROOT
         required = QT6_REQUIRED_QML_FILES
+    qml_root = qt_root / "qml"
+    translations = qt_root / "translations"
     missing = [relative for relative in required if not (qml_root / relative).is_file()]
     if missing:
         raise RuntimeError(
@@ -1059,11 +1065,7 @@ def verify_packaged_qt_qml(internal: Path, *, target: str) -> None:
         raise RuntimeError(
             f"程序包包含未使用的 {target} Qt 翻译：{unexpected_translations}"
         )
-    plugin_root = (
-        internal / "PySide2" / "plugins"
-        if target == WINDOWS_TARGET_WIN7
-        else internal / "PySide6" / "Qt" / "plugins"
-    )
+    plugin_root = qt_root / "plugins"
     if (plugin_root / "qmltooling").exists():
         raise RuntimeError(f"程序包包含仅供调试/分析使用的 {target} Qt QML 开发插件")
     unexpected_image_plugins = sorted(

@@ -13,6 +13,7 @@ from hr_toolkit.tools.folder_rename import (
     FILE_TYPE_IMAGE,
     FILE_TYPE_DOCUMENT,
 )
+from hr_toolkit.desktop_contract import NAV_GROUPS, TOOL_NAV_ITEMS
 
 RENAME_MODE_LABELS = {
     "追加文字": MODE_APPEND,
@@ -30,17 +31,6 @@ RENAME_FILE_TYPE_LABELS = {
 }
 RENAME_FILE_TYPE_LABELS_REVERSE = {v: k for k, v in RENAME_FILE_TYPE_LABELS.items()}
 
-TOOL_NAV_ITEMS = (
-    ("social_security", "社保明细与汇总"),
-    ("insurance_ledger", "保险台账与预警"),
-    ("data_statistics", "考勤与周月报"),
-    ("salary_split", "工资表拆分"),
-    ("salary_merge", "多月工资合并"),
-    ("personnel_change_merge", "异动汇总"),
-    ("archive_import", "档案入库"),
-    ("material_collector", "员工资料打包"),
-    ("folder_rename", "资料文件夹改名"),
-)
 TOOL_NAV_LABELS = dict(TOOL_NAV_ITEMS)
 
 TOOL_LOG_LABELS = {
@@ -55,12 +45,6 @@ TOOL_LOG_LABELS = {
     "folder_rename": "文件夹改名",
 }
 
-NAV_GROUPS = (
-    ("社保与保险", ("social_security", "insurance_ledger")),
-    ("考勤与统计", ("data_statistics",)),
-    ("薪酬管理", ("salary_split", "salary_merge")),
-    ("人员与档案", ("personnel_change_merge", "archive_import", "material_collector", "folder_rename")),
-)
 TOOL_GROUP_LABELS = {tool_id: group for group, tools in NAV_GROUPS for tool_id in tools}
 
 MULTI_INPUT_TOOLS = {

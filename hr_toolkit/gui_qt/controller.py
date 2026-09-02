@@ -30,7 +30,6 @@ from hr_toolkit.desktop_helpers import (
     workspace_project_creation_target,
 )
 from hr_toolkit.history_store import HISTORY_PAGE_SIZE, HistoryStore, TaskDetail
-from hr_toolkit.gui.tutorial_content import tutorial_groups
 from hr_toolkit.material_preferences import MaterialPreferences
 from hr_toolkit.project_store import ImportCancelled, ProjectStore
 from hr_toolkit.run_coordinator import (
@@ -38,6 +37,7 @@ from hr_toolkit.run_coordinator import (
     RunCallbacks,
     RunRequest,
 )
+from hr_toolkit.tutorial_content import tutorial_groups
 
 from .compat import (
     Property,
