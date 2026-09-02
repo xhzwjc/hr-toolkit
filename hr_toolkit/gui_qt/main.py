@@ -65,7 +65,18 @@ def main() -> int:
         if system_font_enum is not None
         else QFontDatabase.GeneralFont
     )
-    app.setFont(QFontDatabase.systemFont(general_font))
+    application_font = QFontDatabase.systemFont(general_font)
+    # Match the original Tk interface's platform typography.  The locked
+    # Win7/PySide2 lane uses the font shipped with Windows 7, while modern
+    # Windows uses the UI-tuned family.  Missing families still fall back
+    # through Qt normally, so this does not add a font dependency.
+    if sys.platform == "darwin":
+        application_font.setFamily("PingFang SC")
+    elif sys.platform.startswith("win"):
+        application_font.setFamily(
+            "Microsoft YaHei" if QT_MAJOR == 5 else "Microsoft YaHei UI"
+        )
+    app.setFont(application_font)
 
     controller = AppController()
     engine = QQmlApplicationEngine()

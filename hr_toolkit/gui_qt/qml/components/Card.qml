@@ -2,7 +2,7 @@ import QtQuick 2.15
 
 Rectangle {
     color: "#FFFFFF"
-    radius: 15
-    border.color: "#ECEAE5"
+    radius: 14
+    border.color: "#ECEAE4"
     border.width: 1
 }

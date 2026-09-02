@@ -43,6 +43,8 @@ def run_benchmark(
     processing_load: bool,
     cache_buffer: int | None = None,
     scroll_step_px: int | None = None,
+    scroll_target: str = "upload",
+    tool_id: str = "",
 ) -> dict[str, object]:
     os.environ.setdefault("HR_TOOLKIT_SKIP_UPDATE", "1")
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
@@ -71,6 +73,8 @@ def run_benchmark(
         temp_root = Path(temporary)
         AppController._settings_path = staticmethod(lambda: temp_root / "workspace-ui.json")
         controller = AppController()
+        if tool_id:
+            controller.selectTool(tool_id)
         engine = QQmlApplicationEngine()
         engine.rootContext().setContextProperty("controller", controller)
         qml_path = REPO_ROOT / "hr_toolkit" / "gui_qt" / "qml" / "Main.qml"
@@ -126,12 +130,19 @@ def run_benchmark(
             input_list.setProperty("cacheBuffer", max(0, cache_buffer))
         if workspace_file_count:
             workspace_drawer.open()
+        scroll_view = {
+            "main": main_scroll,
+            "workspace": workspace_list,
+        }.get(scroll_target, input_list)
 
         frame_times: list[float] = []
         heartbeat_lateness: list[float] = []
         request_gaps: list[float] = []
         resize_requests = 0
         scroll_requests = 0
+        scroll_mutations = 0
+        workspace_anchor_errors: list[float] = []
+        workspace_height_errors: list[float] = []
         progress_messages = 0
         action_started = 0.0
         deadline = 0.0
@@ -184,12 +195,30 @@ def run_benchmark(
         action_timer.setInterval(max(1, request_interval_ms))
         phase = {"value": 0, "scrollDirection": 1}
 
+        def sample_workspace_geometry() -> None:
+            # Sample on the next event-loop turn after the preceding resize.
+            # QML bindings are evaluated between turns, so this measures what
+            # can actually be presented rather than transient values inside
+            # the same Python setWidth()/setHeight() callback.
+            if not bool(workspace_drawer.property("opened")):
+                return
+            drawer_width = float(workspace_drawer.property("width") or 0.0)
+            drawer_x = float(workspace_drawer.property("x") or 0.0)
+            drawer_height = float(workspace_drawer.property("height") or 0.0)
+            workspace_anchor_errors.append(
+                abs(float(window.width()) - drawer_width - drawer_x)
+            )
+            workspace_height_errors.append(
+                abs(float(window.height()) - drawer_height)
+            )
+
         def perform_action() -> None:
-            nonlocal resize_requests, scroll_requests, last_request
+            nonlocal resize_requests, scroll_requests, scroll_mutations, last_request
             now = time.perf_counter()
             if now >= deadline:
                 action_timer.stop()
                 return
+            sample_workspace_geometry()
             if last_request:
                 request_gaps.append(max(0.0, (now - last_request) * 1000.0))
             last_request = now
@@ -209,12 +238,13 @@ def run_benchmark(
                     window.setHeight(next_height)
                 resize_requests += 1
             if mode in {"scroll", "both"}:
-                content_height = float(input_list.property("contentHeight") or 0.0)
-                height = float(input_list.property("height") or 0.0)
+                content_height = float(scroll_view.property("contentHeight") or 0.0)
+                height = float(scroll_view.property("height") or 0.0)
                 maximum = max(0.0, content_height - height)
                 if maximum:
+                    scroll_mutations += 1
                     if scroll_step_px is not None:
-                        current = float(input_list.property("contentY") or 0.0)
+                        current = float(scroll_view.property("contentY") or 0.0)
                         next_value = current + phase["scrollDirection"] * scroll_step_px
                         if next_value >= maximum:
                             next_value = maximum
@@ -222,12 +252,12 @@ def run_benchmark(
                         elif next_value <= 0.0:
                             next_value = 0.0
                             phase["scrollDirection"] = 1
-                        input_list.setProperty("contentY", next_value)
+                        scroll_view.setProperty("contentY", next_value)
                     else:
                         scroll_phase = (value % 200) / 199.0
                         if (value // 200) % 2:
                             scroll_phase = 1.0 - scroll_phase
-                        input_list.setProperty("contentY", maximum * scroll_phase)
+                        scroll_view.setProperty("contentY", maximum * scroll_phase)
                 scroll_requests += 1
 
         action_timer.timeout.connect(perform_action)
@@ -302,11 +332,20 @@ def run_benchmark(
             "processing_load": processing_load,
             "cache_buffer": int(input_list.property("cacheBuffer") or 0),
             "scroll_step_px": scroll_step_px or 0,
+            "scroll_target": scroll_target,
+            "tool_id": tool_id or "default",
             "qml_startup_ms": round(startup_ms, 2),
             "model_load_ms": round(model_load_ms, 2),
             "workspace_model_load_ms": round(workspace_model_load_ms, 2),
             "resize_requests_sent": resize_requests,
             "scroll_requests_sent": scroll_requests,
+            "scroll_mutations_applied": scroll_mutations,
+            "scroll_content_height": round(
+                float(scroll_view.property("contentHeight") or 0.0), 2
+            ),
+            "scroll_view_height": round(
+                float(scroll_view.property("height") or 0.0), 2
+            ),
             "request_gap_median_ms": round(
                 statistics.median(request_gaps) if request_gaps else 0.0,
                 2,
@@ -329,6 +368,12 @@ def run_benchmark(
             "workspace_popup_visible": bool(workspace_drawer.property("visible")),
             "workspace_popup_x": round(float(workspace_drawer.property("x") or 0.0), 2),
             "workspace_popup_width": round(float(workspace_drawer.property("width") or 0.0), 2),
+            "workspace_anchor_error_max_px": round(
+                max(workspace_anchor_errors, default=0.0), 2
+            ),
+            "workspace_height_error_max_px": round(
+                max(workspace_height_errors, default=0.0), 2
+            ),
             "workspace_button_x": round(float(workspace_button.property("x") or 0.0), 2),
             "workspace_button_width": round(float(workspace_button.property("width") or 0.0), 2),
             "workspace_button_implicit_width": round(
@@ -377,6 +422,17 @@ def main() -> None:
             "按固定像素模拟滚轮；不设置时模拟跨越整个列表的滚动条拖动。"
         ),
     )
+    parser.add_argument(
+        "--scroll-target",
+        choices=("upload", "main", "workspace"),
+        default="upload",
+        help="选择上传列表、主内容区或项目文件列表作为滚动目标。",
+    )
+    parser.add_argument(
+        "--tool",
+        default="",
+        help="启动基准前切换到指定工具，例如 material_collector。",
+    )
     args = parser.parse_args()
     payload = run_benchmark(
         file_count=max(1, args.files),
@@ -389,6 +445,8 @@ def main() -> None:
         processing_load=args.processing,
         cache_buffer=args.cache_buffer,
         scroll_step_px=max(1, args.scroll_step) if args.scroll_step else None,
+        scroll_target=args.scroll_target,
+        tool_id=args.tool.strip(),
     )
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 

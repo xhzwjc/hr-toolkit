@@ -71,6 +71,43 @@ class ObjectListModel(QAbstractListModel):
         self.endRemoveRows()
         return True
 
+    def update_at(self, row: int, item: Mapping[str, Any]) -> bool:
+        """Update one row without resetting the consuming ``ListView``."""
+
+        if row < 0 or row >= len(self._items):
+            return False
+        self._items[row] = {role: item.get(role) for role in self._roles}
+        model_index = self.index(row, 0)
+        self.dataChanged.emit(
+            model_index,
+            model_index,
+            list(self._role_numbers),
+        )
+        return True
+
+    def splice(
+        self,
+        row: int,
+        remove_count: int = 0,
+        items: Iterable[Mapping[str, Any]] = (),
+    ) -> None:
+        """Replace a contiguous range while preserving view scroll state."""
+
+        start = max(0, min(int(row), len(self._items)))
+        removable = max(0, min(int(remove_count), len(self._items) - start))
+        if removable:
+            self.beginRemoveRows(QModelIndex(), start, start + removable - 1)
+            del self._items[start : start + removable]
+            self.endRemoveRows()
+        normalized = [
+            {role: item.get(role) for role in self._roles}
+            for item in items
+        ]
+        if normalized:
+            self.beginInsertRows(QModelIndex(), start, start + len(normalized) - 1)
+            self._items[start:start] = normalized
+            self.endInsertRows()
+
     def clear(self) -> None:
         if not self._items:
             return

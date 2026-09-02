@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import unittest
 from datetime import date
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -67,6 +69,159 @@ class QtControllerTests(unittest.TestCase):
                 controller.reuseHistory()
                 self.assertEqual(controller.currentTool, tool_id)
                 controller.close()
+
+    def test_run_button_text_tracks_tool_switches(self) -> None:
+        controller = self.controller()
+        changes = []
+        controller.runButtonTextChanged.connect(lambda: changes.append(controller.runButtonText))
+
+        self.assertEqual(controller.runButtonText, "生成报表")
+        controller.selectTool("material_collector")
+
+        self.assertEqual(controller.runButtonText, "开始打包")
+        self.assertIn("开始打包", changes)
+        controller.close()
+
+    def test_run_without_project_reports_required_next_step(self) -> None:
+        controller = self.controller()
+        notifications = []
+        controller.notificationRequested.connect(
+            lambda *args: notifications.append(args)
+        )
+
+        controller.runOrCancel()
+
+        self.assertFalse(controller.busy)
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0][0], "请先打开工作项目")
+        self.assertIn("新建或打开", notifications[0][1])
+        controller.close()
+
+    def test_workspace_selection_details_follow_model_refresh(self) -> None:
+        controller = self.controller()
+        selected = {
+            "name": "名单.xlsx",
+            "path": str(Path.cwd() / "名单.xlsx"),
+            "isDir": False,
+            "detail": "XLSX",
+        }
+        controller._workspace_items = [selected]
+        controller.selectWorkspaceRow(0)
+
+        self.assertTrue(controller.workspaceSelectionAvailable)
+        self.assertEqual(controller.workspaceSelectedName, "名单.xlsx")
+        self.assertEqual(controller.workspaceSelectedDetail, "XLSX")
+
+        controller._workspace_generation = 2
+        controller._apply_workspace_items(2, [])
+        self.assertFalse(controller.workspaceSelectionAvailable)
+        controller.close()
+
+    def test_workspace_folder_toggle_updates_rows_without_model_reset(self) -> None:
+        controller = self.controller()
+        root_path = Path.cwd() / "共用资料"
+        child_path = root_path / "名单.xlsx"
+        sibling_path = Path.cwd() / "处理结果"
+        controller._workspace_generation = 7
+        controller._workspace_items = [
+            {
+                "name": "共用资料",
+                "path": str(root_path),
+                "isDir": True,
+                "depth": 0,
+                "expanded": True,
+                "hasChildren": True,
+                "detail": "文件夹",
+            },
+            {
+                "name": "名单.xlsx",
+                "path": str(child_path),
+                "isDir": False,
+                "depth": 1,
+                "expanded": False,
+                "hasChildren": False,
+                "detail": "XLSX",
+            },
+            {
+                "name": "处理结果",
+                "path": str(sibling_path),
+                "isDir": True,
+                "depth": 0,
+                "expanded": False,
+                "hasChildren": True,
+                "detail": "文件夹",
+            },
+        ]
+        controller.workspaceModel.set_items(controller._workspace_items)
+        resets = []
+        removals = []
+        insertions = []
+        controller.workspaceModel.modelReset.connect(lambda: resets.append(True))
+        controller.workspaceModel.rowsRemoved.connect(lambda *_args: removals.append(True))
+        controller.workspaceModel.rowsInserted.connect(lambda *_args: insertions.append(True))
+
+        controller.toggleWorkspaceRow(0)
+
+        self.assertEqual(resets, [])
+        self.assertEqual(removals, [True])
+        self.assertEqual(controller.workspaceModel.rowCount(), 2)
+        self.assertFalse(controller.workspaceModel.item_at(0)["expanded"])
+        self.assertEqual(controller.workspaceModel.item_at(1)["name"], "处理结果")
+
+        with patch("hr_toolkit.gui_qt.controller.threading.Thread") as thread:
+            controller.toggleWorkspaceRow(0)
+            thread.return_value.start.assert_called_once_with()
+        controller._apply_workspace_children(
+            7,
+            0,
+            str(root_path),
+            0,
+            [
+                {
+                    "name": "名单.xlsx",
+                    "path": str(child_path),
+                    "isDir": False,
+                    "depth": 1,
+                    "expanded": False,
+                    "hasChildren": False,
+                    "detail": "XLSX",
+                }
+            ],
+        )
+
+        self.assertEqual(resets, [])
+        self.assertEqual(insertions, [True])
+        self.assertEqual(controller.workspaceModel.rowCount(), 3)
+        self.assertTrue(controller.workspaceModel.item_at(0)["expanded"])
+        self.assertEqual(controller.workspaceModel.item_at(1)["name"], "名单.xlsx")
+        controller.close()
+
+    def test_qt_tutorial_uses_the_complete_legacy_tk_content(self) -> None:
+        controller = self.controller()
+        groups = controller.tutorialGroups
+        items = [item for group in groups for item in group["items"]]
+        self.assertEqual(
+            [item["label"] for item in items],
+            [
+                "社保明细与汇总",
+                "保险台账与预警",
+                "考勤与周月报",
+                "工资表拆分",
+                "多月工资合并",
+                "异动表汇总",
+                "花名册更新",
+                "档案入库",
+                "档案表生成",
+                "员工资料打包",
+                "资料文件夹改名",
+            ],
+        )
+        statistics = next(item for item in items if item["toolId"] == "data_statistics")
+        copy = [line["text"] for line in statistics["lines"]]
+        self.assertIn("容易疑惑1：", copy[6])
+        self.assertIn("容易疑惑2：", copy[7])
+        self.assertEqual(statistics["lines"][-1]["style"], "warning")
+        controller.close()
 
     def test_close_requires_confirmation_while_background_work_is_active(self) -> None:
         controller = self.controller()

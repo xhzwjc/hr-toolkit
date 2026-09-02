@@ -70,15 +70,41 @@ class QtEntrypointTests(unittest.TestCase):
         self.assertIn("settledWidth <= 860", source)
         self.assertIn("settledWidth >= 980", source)
         self.assertNotIn("Behavior on Layout.preferredWidth", source)
-        self.assertIn("anchors.leftMargin: 28", source)
-        # Popups/dialogs bind to settled dimensions for resize stability
-        self.assertIn("width: Math.min(440, root.settledWidth - 24)", source)
+        self.assertIn(
+            "anchors.leftMargin: root.compactSidebar ? 12 : 28",
+            source,
+        )
+        self.assertIn("readonly property int contentMaxWidth: 820", source)
+        self.assertIn('objectName: "workspaceButton"', source)
+        self.assertIn('objectName: "workspaceButtonMouse"', source)
+        self.assertIn('objectName: "runButton"', source)
+        self.assertIn('text: "项\\n目\\n文\\n件"', source)
+        self.assertIn("enabled: controller.hasProject\n                    cursorShape", source)
+        self.assertIn("enabled: controller.busy || !controller.workspaceBusy", source)
+        self.assertIn("readonly property int preferredWindowWidth: 1400", source)
+        self.assertIn("readonly property int preferredWindowHeight: 780", source)
+        self.assertIn("Math.min(Screen.width, Screen.desktopAvailableWidth)", source)
+        self.assertIn("Math.min(Screen.height, Screen.desktopAvailableHeight)", source)
+        self.assertIn("currentScreenAvailableWidth - initialWindowMargin", source)
+        self.assertIn("currentScreenAvailableHeight - initialWindowMargin", source)
+        # The open project-files panel must follow every native resize frame;
+        # dialogs that are not being dragged can keep settled dimensions.
+        self.assertIn("x: root.width - width", source)
+        self.assertIn("width: Math.min(340, root.width - 24)", source)
+        self.assertIn("height: root.height", source)
+        self.assertNotIn("width: Math.min(340, root.settledWidth - 24)", source)
         self.assertNotIn("Math.max(360, root.width * 0.38)", source)
         self.assertIn("enter: Transition {}", source)
         self.assertIn("exit: Transition {}", source)
         # Settled-width timer defers layout during native resize
         self.assertIn("settledWidth", source)
         self.assertIn("settleTimer", source)
+        self.assertIn('objectName: "sidebarProjectCard"', source)
+        self.assertIn('readonly property bool showLegacyHistoryEntry: false', source)
+        self.assertIn('objectName: "runLogIconButton"', source)
+        self.assertIn('ToolTip.text: "打开运行日志"', source)
+        self.assertIn("model: controller.tutorialGroups", source)
+        self.assertIn("workspaceList.positionViewAtIndex(safeRow, ListView.Contain)", source)
 
     def test_qt_is_the_default_desktop_renderer(self) -> None:
         with patch.dict(os.environ, {}, clear=False):

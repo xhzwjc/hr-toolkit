@@ -181,3 +181,110 @@
 - [x] 目标图与最终实现同图对照。
 
 **final result: passed**
+
+---
+
+# Qt Quick 与 Tk 同版验收（2026-09-02）
+
+## Evidence
+
+- Source visual truth: `/var/folders/ng/s5d0j44s06z6zdc_qr9ylpv80000gn/T/codex-clipboard-f6d577b3-198a-4f67-a577-1699c1227df4.png`
+- Initial Qt baseline: `/var/folders/ng/s5d0j44s06z6zdc_qr9ylpv80000gn/T/codex-clipboard-9aa81193-906d-4685-8953-620c7df3c423.png`
+- Final implementation: `/tmp/hr_qt_tk_match_project_final.png`
+- Full-view comparison: `/tmp/hr_tk_qt_project_comparison_final.png`
+- Focused form comparison: `/tmp/hr_tk_qt_project_form_comparison_final.png`
+- Compact-width implementation: `/tmp/hr_qt_tk_match_760_final.png`
+- macOS Cocoa/Qt native capture: `/tmp/hr_qt_macos_native_final.png`
+- Project drawer and styled dialog: `/tmp/hr_qt_workspace_dialog_styled.png`
+- Viewport: source outer window 1810 x 941; source client area 1810 x 911 after removing the 30 px macOS title bar; Qt client viewport 1810 x 911.
+- Density normalization: the source screenshot metadata does not expose macOS backing scale, so its cropped 1810 x 911 pixels were treated as the 1:1 target coordinate surface. The Qt implementation is 1810 x 911 logical/physical pixels at offscreen device scale 1. No resampling was applied.
+- State: `material_collector`, light theme, writable project named `2026年8月人事月度工作`, no selected library or roster, no active processing task.
+
+## Required fidelity surfaces
+
+- Fonts and typography: platform families now follow Tk (`PingFang SC`, `Microsoft YaHei UI`, and Win7 `Microsoft YaHei`); title, group labels, body text, hints, weights, wrapping, and truncation match the source hierarchy. Minor antialiasing differences remain platform-renderer dependent.
+- Spacing and layout: the sidebar is 248 px, the main content is centered and capped at 820 px, and the header, upload card, form card, actions, and log align within a few pixels of the normalized source. Card radii, padding, section gaps, and compact breakpoints were checked.
+- Colors and tokens: Tk background, surface, border, text, disabled, navigation, and green action tokens are used directly.
+- Image and icon fidelity: the original brand raster is reused; the tool and folder icons follow the original Tk icon geometry. No emoji or first-letter placeholders remain.
+- Copy and content: the visible material-collector labels and action order match the source. Project status text remains data-dependent, so the empty QA project reports writable state rather than the source project's historical run count.
+- Responsiveness and interactions: 760 x 600 compact mode keeps controls readable without overlap. Nine tool routes load successfully. Project drawer open/close, dialog styling, file actions, focusable controls, and scrollable content were exercised. A real macOS corner drag also repainted continuously to a smaller native window without a skeleton, blank region, mosaic, or post-drag remnant.
+
+## Comparison history
+
+1. Initial baseline — blocked.
+   - P1: Qt used a full-width, low-density layout with native-looking gray controls and materially different visual hierarchy.
+   - P1: navigation used text placeholders instead of the Tk icon system, and the project-files action did not follow the Tk right-edge workspace pattern.
+   - P2: the material-collector form order, spacing, card proportions, and action placement drifted from Tk.
+   - Fixes: introduced Tk design tokens and shared controls, restored the exact form order, capped and centered the content, reused the real brand mark, ported the tool icons, and rebuilt the right-side project workspace as an overlay.
+
+2. Intermediate implementation (`/tmp/hr_qt_tk_match_1810.png`) — blocked.
+   - P2: the upload card still had an extra header action, a solid drop-zone border, and compressed vertical rhythm.
+   - P2: sidebar brand position and project-button widths differed from the source; compact navigation icons rendered too large.
+   - P2: default Qt dialog footers visually broke the otherwise Tk-like screen.
+   - Fixes: moved selection affordances into the drop zone, restored the dashed outline and card height, aligned sidebar geometry and control widths, fixed compact icon sizing, and added the shared Tk-style dialog surface.
+
+3. Final implementation — passed.
+   - Full-view and focused comparisons show no actionable P0, P1, or P2 mismatch.
+   - The project drawer closes with `opened=false`, `visible=false`, and a pixel-identical post-close main screen (zero changed pixels), so no remnant panel remains.
+
+## Follow-up polish
+
+- P3: Qt and Tk render the combo-box arrow area and font antialiasing slightly differently. Keeping the custom Qt control avoids native-style relayout during live resize and is the safer cross-platform choice.
+
+final result: passed
+
+---
+
+# 侧栏项目卡与教程二次验收（2026-09-02）
+
+## Evidence
+
+- Source visual truth: `/Users/wangjingchuan/Downloads/Codex Image Sep 2, 2026, 04_07_22 PM.png`
+- Rendered implementation: `/tmp/hr_toolkit_sidebar_1647x915_final.png`
+- Full-view comparison: `/tmp/hr_toolkit_sidebar_full_compare_final.png`
+- Focused sidebar comparison: `/tmp/hr_toolkit_sidebar_focus_compare_final.png`
+- Tutorial implementation: `/tmp/hr_toolkit_tutorial_final.png`
+- Compact sidebar: `/tmp/hr_toolkit_sidebar_compact_final.png`
+- Compact tutorial: `/tmp/hr_toolkit_tutorial_compact_final.png`
+- Source pixels: 1647 × 953, including a 38 px macOS title bar.
+- Implementation pixels and CSS/logical viewport: 1647 × 915 at offscreen device scale 1.
+- Normalization: the source title bar was cropped, producing a 1647 × 915 client image; no resampling was applied before the full-view comparison. The source screenshot does not publish its backing-scale metadata, so the comparison treats its client pixels as the target surface.
+- State: light theme, `social_security`, read-only project `2026年8月人事月度工作`, no selected input or roster.
+
+## Findings
+
+- No actionable P0, P1, or P2 differences remain in the requested project-card region.
+- [P3] The proposal image uses a roughly 335 px sidebar while the product constraint requires retaining the current 248 px sidebar.
+  - Evidence: the focused comparison shows the same hierarchy and controls compressed into the current width.
+  - Impact: horizontal breathing room is smaller, but the project name, status, dropdown affordance, and both actions remain readable and usable.
+  - Decision: accepted as intentional because widening the sidebar would violate the user's explicit constraint and reduce the main work area.
+
+## Required fidelity surfaces
+
+- Fonts and typography: existing platform typography and all current sizes/weights remain unchanged. Project title and status preserve the proposal hierarchy; long names elide rather than overlap.
+- Spacing and layout rhythm: one rounded card now contains the header, selector, and two lightweight actions. The 248 px sidebar and all lower navigation geometry remain unchanged. Compact mode remains usable at 760 × 600.
+- Colors and tokens: existing warm background, white surface, green accent, neutral border, and muted text tokens are reused without introducing a new palette.
+- Image quality and asset fidelity: the existing brand mark remains unchanged. The project and log actions use the project's shared `ToolIcon` renderer at the existing stroke weight; no emoji or raster placeholders were introduced.
+- Copy and content: the card shows `工作项目 / 最近项目`, the project name, `当前项目 · 只读`, `新建项目`, and `打开项目`. The tutorial contains the exact 11 legacy Tk entries and all 66 original lines from one shared source.
+- States and interactions: selector, recent projects, new project, open project, tutorial navigation, and the icon-only log entry use focusable Qt controls. The old-history entry is hidden while its implementation remains available for later restoration.
+- Responsiveness and accessibility: keyboard focus was restored after the first implementation pass by replacing mouse-only project actions with `Button` controls. The project card collapses to a single project button in compact mode; the tutorial remains scrollable and fully visible.
+
+## Focused region evidence
+
+- The focused comparison directly places the proposal sidebar and final sidebar in one image. It verifies the unified card, label order, selector border/radius, status line, two icon actions, downstream navigation position, and preserved color system.
+- The tutorial required a separate state because the proposal does not show it. Its final capture verifies the original Tk two-column layout: grouped feature navigation on the left and styled, scrollable instructions on the right.
+
+## Comparison history
+
+1. Baseline — blocked.
+   - [P2] Project title/status, new/open actions, and recent projects were rendered as four separate regions rather than one proposal-style card.
+   - [P2] Qt used a generic six-step tutorial whose structure and copy differed from Tk.
+   - [P1] Expanding or collapsing a workspace folder reset the model, forcing the visible list back to the top.
+2. First implementation — blocked.
+   - The unified card and exact tutorial content were present, but the project selector/actions were mouse-only and therefore introduced a keyboard-accessibility regression.
+3. Final implementation — passed.
+   - Replaced mouse-only project actions with focusable buttons without changing the visual layout.
+   - Workspace expansion/collapse now updates, inserts, and removes rows without a model reset; a 10,000-row live test retained `contentY` exactly.
+   - Final full-view, focused, tutorial, and compact captures show no new overlap, clipping, or actionable P0/P1/P2 mismatch.
+
+final result: passed

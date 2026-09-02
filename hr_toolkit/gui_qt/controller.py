@@ -30,6 +30,7 @@ from hr_toolkit.desktop_helpers import (
     workspace_project_creation_target,
 )
 from hr_toolkit.history_store import HISTORY_PAGE_SIZE, HistoryStore, TaskDetail
+from hr_toolkit.gui.tutorial_content import tutorial_groups
 from hr_toolkit.material_preferences import MaterialPreferences
 from hr_toolkit.project_store import ImportCancelled, ProjectStore
 from hr_toolkit.run_coordinator import (
@@ -93,8 +94,10 @@ class AppController(QObject):
     specChanged = Signal()
     projectChanged = Signal()
     busyChanged = Signal()
+    runButtonTextChanged = Signal()
     workspaceBusyChanged = Signal()
     workspaceChanged = Signal()
+    workspaceSelectionChanged = Signal()
     supportChanged = Signal()
     formRevisionChanged = Signal()
     lastResultChanged = Signal()
@@ -144,10 +147,12 @@ class AppController(QObject):
         self._history_model = HistoryModel(self)
         self._trash_model = TrashModel(self)
         self._workspace_items: list[dict[str, Any]] = []
+        self._workspace_child_loads: set[str] = set()
         self._workspace_generation = 0
         self._workspace_scope = "all"
         self._workspace_search = ""
         self._workspace_selected_path: Path | None = None
+        self._workspace_selected_item: dict[str, Any] | None = None
         self._workspace_expanded = False
         self._workspace_busy = False
         self._workspace_cancel_event: threading.Event | None = None
@@ -225,6 +230,8 @@ class AppController(QObject):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self.refreshWorkspace)
+        self.specChanged.connect(self.runButtonTextChanged.emit)
+        self.busyChanged.connect(self.runButtonTextChanged.emit)
 
     def _state_key(self) -> tuple[str, str]:
         return self._spec.nav_id, self._spec.variant
@@ -252,6 +259,10 @@ class AppController(QObject):
             }
             for group, items in NAV_GROUPS
         ]
+
+    @Property("QVariantList", constant=True)
+    def tutorialGroups(self):
+        return tutorial_groups()
 
     @Property(str, notify=specChanged)
     def currentTool(self) -> str:
@@ -475,7 +486,7 @@ class AppController(QObject):
     def busy(self) -> bool:
         return self._busy
 
-    @Property(str, notify=busyChanged)
+    @Property(str, notify=runButtonTextChanged)
     def runButtonText(self) -> str:
         return "停止" if self._busy else self._spec.run_text
 
@@ -526,6 +537,25 @@ class AppController(QObject):
     @Property(bool, notify=workspaceBusyChanged)
     def workspaceBusy(self) -> bool:
         return self._workspace_busy
+
+    @Property(bool, notify=workspaceSelectionChanged)
+    def workspaceSelectionAvailable(self) -> bool:
+        return self._workspace_selected_item is not None
+
+    @Property(str, notify=workspaceSelectionChanged)
+    def workspaceSelectedName(self) -> str:
+        item = self._workspace_selected_item
+        return "" if item is None else str(item.get("name") or "")
+
+    @Property(str, notify=workspaceSelectionChanged)
+    def workspaceSelectedDetail(self) -> str:
+        item = self._workspace_selected_item
+        if item is None:
+            return "双击可以打开文件；文件夹可展开查看。"
+        detail = str(item.get("detail") or "").strip()
+        if detail:
+            return detail
+        return "文件夹" if item.get("isDir") else "文件"
 
     @Property(bool, notify=lastResultChanged)
     def canOpenLastResult(self) -> bool:
@@ -1217,10 +1247,14 @@ class AppController(QObject):
         self._workspace_scan_cancel_event = cancel_event
         root = self._workspace_root()
         self._workspace_generation += 1
+        self._workspace_child_loads.clear()
         generation = self._workspace_generation
         if root is None or not root.is_dir():
             self._workspace_items = []
+            self._workspace_selected_path = None
+            self._workspace_selected_item = None
             self._workspace_model.clear()
+            self.workspaceSelectionChanged.emit()
             return
         query = self._workspace_search.casefold()
 
@@ -1242,6 +1276,16 @@ class AppController(QObject):
             return
         self._workspace_items = list(items)
         self._workspace_model.set_items(self._workspace_items)
+        selected_text = str(self._workspace_selected_path or "")
+        self._workspace_selected_item = next(
+            (
+                dict(item)
+                for item in self._workspace_items
+                if str(item.get("path") or "") == selected_text
+            ),
+            None,
+        )
+        self.workspaceSelectionChanged.emit()
 
     @Slot(int)
     def toggleWorkspaceRow(self, row: int) -> None:
@@ -1255,37 +1299,49 @@ class AppController(QObject):
             end = row + 1
             while end < len(self._workspace_items) and int(self._workspace_items[end].get("depth", 0)) > depth:
                 end += 1
-            del self._workspace_items[row + 1 : end]
             item["expanded"] = False
-            self._workspace_model.set_items(self._workspace_items)
+            self._workspace_model.update_at(row, item)
+            remove_count = end - row - 1
+            del self._workspace_items[row + 1 : end]
+            self._workspace_model.splice(row + 1, remove_count)
             return
         item["expanded"] = True
-        self._workspace_model.set_items(self._workspace_items)
+        self._workspace_model.update_at(row, item)
         generation = self._workspace_generation
         path = Path(str(item["path"]))
+        path_text = str(path)
+        if path_text in self._workspace_child_loads:
+            return
+        self._workspace_child_loads.add(path_text)
 
         def worker() -> None:
             children = self._scan_directory(path, depth=depth + 1)
-            self._workspaceChildrenReady.emit(generation, row, str(path), depth, children)
+            self._workspaceChildrenReady.emit(generation, row, path_text, depth, children)
 
         threading.Thread(target=worker, daemon=True, name="HRToolkit-workspace-children").start()
 
     @Slot(int, int, str, int, object)
     def _apply_workspace_children(self, generation: int, row: int, path: str, depth: int, children) -> None:
+        self._workspace_child_loads.discard(path)
         if generation != self._workspace_generation or row >= len(self._workspace_items):
             return
         item = self._workspace_items[row]
         if str(item.get("path")) != path or not item.get("expanded") or int(item.get("depth", 0)) != depth:
             return
-        self._workspace_items[row + 1 : row + 1] = list(children)
-        self._workspace_model.set_items(self._workspace_items)
+        inserted = list(children)
+        self._workspace_items[row + 1 : row + 1] = inserted
+        self._workspace_model.splice(row + 1, items=inserted)
 
     @Slot(int)
     def selectWorkspaceRow(self, row: int) -> None:
         if 0 <= row < len(self._workspace_items):
-            self._workspace_selected_path = Path(str(self._workspace_items[row]["path"]))
+            item = self._workspace_items[row]
+            self._workspace_selected_path = Path(str(item["path"]))
+            self._workspace_selected_item = dict(item)
         else:
             self._workspace_selected_path = None
+            self._workspace_selected_item = None
+        self.workspaceSelectionChanged.emit()
 
     @Slot(int)
     def openWorkspaceRow(self, row: int) -> None:
@@ -1295,6 +1351,21 @@ class AppController(QObject):
                 self.toggleWorkspaceRow(row)
             elif path.exists():
                 open_path(path)
+
+    @Slot()
+    def launchWorkspaceSelection(self) -> None:
+        path = self._workspace_selected_path
+        if path is not None and path.exists():
+            open_path(path)
+
+    @Slot()
+    def revealWorkspaceSelection(self) -> None:
+        path = self._workspace_selected_path
+        if path is None:
+            return
+        target = path if path.is_dir() else path.parent
+        if target.exists():
+            open_path(target)
 
     @Slot(int)
     def revealWorkspaceRow(self, row: int) -> None:
