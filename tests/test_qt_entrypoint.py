@@ -151,11 +151,15 @@ class QtEntrypointTests(unittest.TestCase):
             def winId(self):
                 raise AssertionError("headless window must not be used as an HWND")
 
-        with (
-            patch.object(sys, "platform", "win32"),
-            patch.dict(os.environ, {"QT_QPA_PLATFORM": "offscreen"}, clear=True),
-        ):
-            backdrop = WindowsResizeBackdrop.install(HeadlessWindow())
+        # Python 3.8 parses ``with (a, b)`` as one tuple context manager.
+        # Keep the Win7 lane on the older, explicit nested form.
+        with patch.object(sys, "platform", "win32"):
+            with patch.dict(
+                os.environ,
+                {"QT_QPA_PLATFORM": "offscreen"},
+                clear=True,
+            ):
+                backdrop = WindowsResizeBackdrop.install(HeadlessWindow())
 
         self.assertFalse(backdrop.active)
 
