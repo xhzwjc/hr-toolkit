@@ -49,6 +49,7 @@ from .compat import (
     QUrl,
     Signal,
     Slot,
+    constant_property,
 )
 from .form_specs import (
     DEFAULT_VARIANTS,
@@ -246,11 +247,11 @@ class AppController(QObject):
         self._input_states.setdefault(key, [])
         self._support_states.setdefault(key, "")
 
-    @Property(str, constant=True)
+    @constant_property(str)
     def appVersion(self) -> str:
         return __version__
 
-    @Property("QVariantList", constant=True)
+    @constant_property("QVariantList")
     def navGroups(self):
         return [
             {
@@ -260,7 +261,7 @@ class AppController(QObject):
             for group, items in NAV_GROUPS
         ]
 
-    @Property("QVariantList", constant=True)
+    @constant_property("QVariantList")
     def tutorialGroups(self):
         return tutorial_groups()
 
@@ -386,23 +387,23 @@ class AppController(QObject):
     def formRevision(self) -> int:
         return self._form_revision
 
-    @Property(QObject, constant=True)
+    @constant_property(QObject)
     def inputModel(self):
         return self._input_model
 
-    @Property(QObject, constant=True)
+    @constant_property(QObject)
     def logModel(self):
         return self._log_model
 
-    @Property(QObject, constant=True)
+    @constant_property(QObject)
     def workspaceModel(self):
         return self._workspace_model
 
-    @Property(QObject, constant=True)
+    @constant_property(QObject)
     def historyModel(self):
         return self._history_model
 
-    @Property(QObject, constant=True)
+    @constant_property(QObject)
     def trashModel(self):
         return self._trash_model
 
@@ -431,7 +432,7 @@ class AppController(QObject):
     def historyDetail(self):
         return dict(self._history_detail)
 
-    @Property("QVariantList", constant=True)
+    @constant_property("QVariantList")
     def historyToolOptions(self):
         values = [{"label": "全部功能", "value": ""}]
         seen: set[str] = set()
@@ -442,7 +443,7 @@ class AppController(QObject):
                     seen.add(tool_id)
         return values
 
-    @Property("QVariantList", constant=True)
+    @constant_property("QVariantList")
     def historyDateOptions(self):
         return ["全部时间", "今天", "最近7天", "最近30天", "今年"]
 
@@ -508,7 +509,7 @@ class AppController(QObject):
     def projectWritable(self) -> bool:
         return bool(self._project_store is not None and self._project_store.writable)
 
-    @Property(str, constant=True)
+    @constant_property(str)
     def defaultProjectName(self) -> str:
         return default_workspace_project_name()
 

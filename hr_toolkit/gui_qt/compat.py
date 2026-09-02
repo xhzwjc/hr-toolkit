@@ -62,6 +62,22 @@ def application_attribute(name: str):
     return getattr(Qt, name, None)
 
 
+def constant_property(value_type):
+    """Create a read-only constant property without PySide2's copy bug.
+
+    PySide2 5.15.2.1 rejects decorator-style ``Property(...,
+    constant=True)`` when it copies the descriptor to attach the getter: its
+    copy path passes ``Py_None`` as the setter and then mistakes that value for
+    a WRITE method.  Constructing the property once with its getter preserves
+    the intended Qt metadata on both PySide2 and PySide6.
+    """
+
+    def decorate(getter):
+        return Property(value_type, getter, constant=True)
+
+    return decorate
+
+
 def delete_qobject(value) -> None:
     """Destroy a QML root while its context objects are still valid."""
 
@@ -90,5 +106,6 @@ __all__ = [
     "QT_API",
     "QT_MAJOR",
     "application_attribute",
+    "constant_property",
     "delete_qobject",
 ]

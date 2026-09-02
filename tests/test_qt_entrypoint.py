@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import hr_toolkit_app
+from hr_toolkit.gui_qt import compat as qt_compat
 from hr_toolkit.gui_qt.live_resize import (
     LiveResizeUpdater,
     WindowsResizeBackdrop,
@@ -17,6 +18,53 @@ from hr_toolkit.gui_qt.main import _prepare_environment
 
 
 class QtEntrypointTests(unittest.TestCase):
+    def test_constant_property_avoids_pyside2_descriptor_copy(self) -> None:
+        calls = []
+
+        def strict_property(value_type, getter=None, **options):
+            if getter is None:
+                raise TypeError("PySide2 decorator copy path was used")
+            calls.append((value_type, getter, options))
+            return (value_type, getter, options)
+
+        def getter(_self):
+            return "value"
+
+        with patch.object(qt_compat, "Property", strict_property):
+            descriptor = qt_compat.constant_property(str)(getter)
+
+        self.assertEqual(descriptor, (str, getter, {"constant": True}))
+        self.assertEqual(calls, [(str, getter, {"constant": True})])
+
+    def test_controller_does_not_use_broken_pyside2_constant_decorator(self) -> None:
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "hr_toolkit"
+            / "gui_qt"
+            / "controller.py"
+        )
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertNotRegex(
+            source,
+            r"@Property\([^\n]*constant\s*=\s*True",
+        )
+
+    def test_constant_property_keeps_qt_constant_metadata(self) -> None:
+        class ConstantProbe(qt_compat.QObject):
+            @qt_compat.constant_property(str)
+            def value(self) -> str:
+                return "stable"
+
+        probe = ConstantProbe()
+        meta_property = probe.metaObject().property(
+            probe.metaObject().indexOfProperty("value")
+        )
+
+        self.assertTrue(meta_property.isConstant())
+        self.assertFalse(meta_property.isWritable())
+        self.assertFalse(meta_property.hasNotifySignal())
+
     def test_windows_qt_environment_keeps_platform_render_defaults(self) -> None:
         with patch.object(sys, "platform", "win32"):
             with patch.dict(os.environ, {}, clear=True):
