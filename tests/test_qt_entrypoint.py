@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import hr_toolkit_app
-from hr_toolkit.gui_qt import compat as qt_compat
 from hr_toolkit.gui_qt.live_resize import (
     LiveResizeUpdater,
     WindowsResizeBackdrop,
@@ -18,7 +17,15 @@ from hr_toolkit.gui_qt.main import _prepare_environment
 
 
 class QtEntrypointTests(unittest.TestCase):
+    def _qt_compat_or_skip(self):
+        try:
+            from hr_toolkit.gui_qt import compat as qt_compat
+        except ImportError as exc:
+            self.skipTest(f"Qt runtime is not installed in this CI lane: {exc}")
+        return qt_compat
+
     def test_constant_property_avoids_pyside2_descriptor_copy(self) -> None:
+        qt_compat = self._qt_compat_or_skip()
         calls = []
 
         def strict_property(value_type, getter=None, **options):
@@ -51,6 +58,8 @@ class QtEntrypointTests(unittest.TestCase):
         )
 
     def test_constant_property_keeps_qt_constant_metadata(self) -> None:
+        qt_compat = self._qt_compat_or_skip()
+
         class ConstantProbe(qt_compat.QObject):
             @qt_compat.constant_property(str)
             def value(self) -> str:
