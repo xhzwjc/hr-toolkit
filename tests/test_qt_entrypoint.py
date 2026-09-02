@@ -8,6 +8,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import hr_toolkit_app
+from hr_toolkit.gui_qt.live_resize import (
+    LiveResizeUpdater,
+    WindowsResizeBackdrop,
+    _windows_colorref,
+)
 from hr_toolkit.gui_qt.main import _prepare_environment
 
 
@@ -19,6 +24,70 @@ class QtEntrypointTests(unittest.TestCase):
                 self.assertNotIn("QSG_RENDER_LOOP", os.environ)
                 self.assertNotIn("QSG_RHI_BACKEND", os.environ)
                 self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "0")
+                self.assertEqual(os.environ["QT_QPA_UPDATE_IDLE_TIME"], "0")
+
+    def test_windows_qt_environment_preserves_explicit_update_delay(self) -> None:
+        with patch.object(sys, "platform", "win32"):
+            with patch.dict(
+                os.environ,
+                {"QT_QPA_UPDATE_IDLE_TIME": "4"},
+                clear=True,
+            ):
+                _prepare_environment()
+                self.assertEqual(os.environ["QT_QPA_UPDATE_IDLE_TIME"], "4")
+
+    def test_live_resize_requests_coalescible_quick_window_updates(self) -> None:
+        class FakeSignal:
+            def __init__(self) -> None:
+                self.callback = None
+
+            def connect(self, callback) -> None:
+                self.callback = callback
+
+            def disconnect(self, callback) -> None:
+                if self.callback == callback:
+                    self.callback = None
+
+            def emit(self) -> None:
+                if self.callback is not None:
+                    self.callback()
+
+        class FakeWindow:
+            def __init__(self) -> None:
+                self.widthChanged = FakeSignal()
+                self.heightChanged = FakeSignal()
+                self.update_calls = 0
+                self.persistent = []
+
+            def setPersistentGraphics(self, value) -> None:
+                self.persistent.append(("graphics", value))
+
+            def setPersistentSceneGraph(self, value) -> None:
+                self.persistent.append(("scene", value))
+
+            def update(self) -> None:
+                self.update_calls += 1
+
+        window = FakeWindow()
+        updater = LiveResizeUpdater(window)
+        window.widthChanged.emit()
+        window.heightChanged.emit()
+
+        self.assertEqual(window.update_calls, 2)
+        self.assertEqual(
+            window.persistent,
+            [("graphics", True), ("scene", True)],
+        )
+        updater.close()
+        window.widthChanged.emit()
+        self.assertEqual(window.update_calls, 2)
+
+    def test_windows_resize_backdrop_is_inert_off_windows(self) -> None:
+        with patch.object(sys, "platform", "darwin"):
+            backdrop = WindowsResizeBackdrop.install(object())
+
+        self.assertFalse(backdrop.active)
+        self.assertEqual(_windows_colorref(0xF7, 0xF5, 0xF1), 0xF1F5F7)
 
     def test_macos_keeps_the_benchmarked_basic_render_loop(self) -> None:
         with patch.object(sys, "platform", "darwin"):

@@ -9,6 +9,8 @@ from pathlib import Path
 from hr_toolkit import __version__, runlog
 from hr_toolkit.desktop_helpers import install_crash_logging, set_windows_app_identity
 
+from .live_resize import LiveResizeUpdater, WindowsResizeBackdrop
+
 
 def _prepare_environment() -> None:
     # Windows must retain Qt's platform/driver selection.  Modern Qt normally
@@ -19,6 +21,12 @@ def _prepare_environment() -> None:
     # remain available for diagnostics on every platform.
     if sys.platform == "darwin":
         os.environ.setdefault("QSG_RENDER_LOOP", "basic")
+    elif sys.platform.startswith("win"):
+        # QWindow::requestUpdate() otherwise allows up to roughly 5 ms of idle
+        # time before delivery.  A zero delay reduces the exposed-background
+        # interval during native edge/corner resizing without changing the
+        # graphics backend or disabling GPU acceleration.
+        os.environ.setdefault("QT_QPA_UPDATE_IDLE_TIME", "0")
     os.environ.setdefault("QML_DISABLE_DISK_CACHE", "0")
 
 
@@ -87,6 +95,21 @@ def main() -> int:
         runlog.log_line(f"Qt Quick 主界面加载失败：{qml_path}")
         controller.close()
         return 1
+    root_window = engine.rootObjects()[0]
+    live_resize_updater = LiveResizeUpdater(
+        root_window if sys.platform.startswith("win") else None
+    )
+    resize_backdrop = WindowsResizeBackdrop.install(root_window)
+    resize_helpers_closed = False
+
+    def close_resize_helpers() -> None:
+        nonlocal resize_helpers_closed
+        if resize_helpers_closed:
+            return
+        resize_helpers_closed = True
+        live_resize_updater.close()
+        resize_backdrop.close()
+
     runlog.log_line(
         f"HR Workbench v{__version__} Qt Quick 启动（{sys.platform}，{QT_API}，"
         f"渲染循环 {os.environ.get('QSG_RENDER_LOOP', 'auto')}）"
@@ -137,8 +160,10 @@ def main() -> int:
     elif smoke_exit.isdigit():
         QTimer.singleShot(max(1, int(smoke_exit)), app.quit)
     app.aboutToQuit.connect(controller.close)
+    app.aboutToQuit.connect(close_resize_helpers)
     execute = getattr(app, "exec", None) or app.exec_
     exit_code = int(execute())
+    close_resize_helpers()
     # Destroy QML roots before their context is cleared.  Besides avoiding
     # noisy null-binding warnings, this deterministically releases scene-graph
     # textures and GPU resources during repeated packaged-app smoke tests.
