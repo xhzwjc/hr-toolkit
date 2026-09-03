@@ -133,7 +133,7 @@ jobs:
           Write-Host "Portable zip created at $zipPath"
 
       - name: Upload Windows test artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: HRToolkit-Windows-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
           path: |
@@ -232,7 +232,7 @@ jobs:
           Compress-Archive -Path dist/windows-win7/HRToolkit -DestinationPath $zipPath -Force
 
       - name: Upload Win7 test artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: HRToolkit-Windows7-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
           path: |
@@ -313,7 +313,7 @@ jobs:
             --output-dir artifacts/macos
 
       - name: Upload macOS test artifacts
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: HRToolkit-macOS-${{ matrix.asset_suffix }}-Test-${{ env.VERSION }}-${{ env.SHORT_SHA }}
           path: artifacts/macos/HRToolkit_${{ env.VERSION }}_${{ matrix.asset_suffix }}.dmg
