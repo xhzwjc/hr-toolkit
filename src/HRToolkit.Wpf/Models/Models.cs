@@ -134,4 +134,10 @@ namespace HRToolkit.Wpf.Models
 
         public string FormattedTime => Timestamp.ToString("HH:mm:ss");
     }
+
+    public class MaterialTypeOption
+    {
+        public string Name { get; set; } = string.Empty;
+        public bool IsSelected { get; set; }
+    }
 }

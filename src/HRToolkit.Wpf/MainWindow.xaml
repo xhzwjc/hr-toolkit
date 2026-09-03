@@ -123,55 +123,241 @@
             </Border>
 
             <!-- 2. Center Content: Selected Tool Form & Run Controls -->
-            <Border Grid.Column="1" Padding="24">
+            <Border Grid.Column="1" Padding="28,20">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel DataContext="{Binding Form}">
+                    <StackPanel DataContext="{Binding Form}" Margin="0,0,12,24">
                         <!-- Tool Header -->
-                        <TextBlock Text="{Binding SelectedTool.Name}" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextMainBrush}" />
-                        <TextBlock Text="{Binding SelectedTool.Description}" FontSize="13" Foreground="{StaticResource TextMutedBrush}" Margin="0,4,0,20" TextWrapping="Wrap" />
+                        <Grid Margin="0,0,0,16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                    <TextBlock Text="{Binding SelectedTool.Name}" FontSize="22" FontWeight="Bold" Foreground="{StaticResource TextMainBrush}" />
+                                    <Border Background="{StaticResource PrimaryLightBrush}" CornerRadius="4" Padding="8,2" Margin="10,0,0,0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding SelectedTool.Group}" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}" />
+                                    </Border>
+                                </StackPanel>
+                                <TextBlock Text="{Binding SelectedTool.Description}" FontSize="13" Foreground="{StaticResource TextMutedBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Grid>
 
-                        <!-- File Input Card -->
-                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                        <!-- Card 1: Primary File / Directory Input -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18" Margin="0,0,0,16">
                             <StackPanel>
                                 <Grid Margin="0,0,0,12">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0" Text="待处理输入文件" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding InputFilesLabel}" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" />
+                                        <TextBlock Text="{Binding InputFiles.Count, StringFormat=' (已选 {0} 项)'}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" Margin="6,2,0,0" />
+                                    </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                        <Button Content="添加文件" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding AddFilesCommand}" />
+                                        <Button Content="+ 添加文件" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding AddFilesCommand}" />
+                                        <Button Content="+ 添加文件夹" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding AddFolderCommand}" />
                                         <Button Content="清空" Style="{StaticResource SecondaryButtonStyle}" Command="{Binding ClearFilesCommand}" />
                                     </StackPanel>
                                 </Grid>
 
-                                <!-- Input Files List -->
-                                <Border MinHeight="100" Background="#F8FAFC" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
-                                    <ItemsControl ItemsSource="{Binding InputFiles}">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate>
-                                                <TextBlock Text="{Binding}" Margin="0,2" FontSize="12" Foreground="{StaticResource TextMainBrush}" TextTrimming="CharacterEllipsis" />
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
+                                <!-- Input Files List Box -->
+                                <Border MinHeight="80" MaxHeight="180" Background="#F8FAFC" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="10">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                        <ItemsControl ItemsSource="{Binding InputFiles}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="0,2">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="📄 " FontSize="12" />
+                                                        <TextBlock Grid.Column="1" Text="{Binding}" FontSize="12" Foreground="{StaticResource TextMainBrush}" TextTrimming="CharacterEllipsis" />
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
                                 </Border>
                             </StackPanel>
                         </Border>
 
-                        <!-- Common Tool Options -->
-                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,24">
+                        <!-- Card 2: Support / Secondary Reference File Card (Conditional) -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18" Margin="0,0,0,16"
+                                Visibility="{Binding HasSupportFile, Converter={StaticResource BoolToVis}}">
                             <StackPanel>
-                                <TextBlock Text="运行选项" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,12" />
-                                <CheckBox Content="只校验预览，不生成最终文件 (Dry Run)" IsChecked="{Binding DryRun}" Margin="0,0,0,8" />
-                                <CheckBox Content="启用 OCR 缓存加速识别" IsChecked="{Binding UseOcrCache}" Margin="0,0,0,8" />
+                                <TextBlock Text="{Binding SupportFileTitle}" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,4" />
+                                <TextBlock Text="{Binding SupportFileHelp}" FontSize="12" Foreground="{StaticResource TextMutedBrush}" Margin="0,0,0,10" TextWrapping="Wrap" />
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Background="#F8FAFC" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="0,0,8,0">
+                                        <TextBlock Text="{Binding SupportFile, TargetNullValue='尚未选择表格文件（点击右侧按钮选择）'}"
+                                                   Foreground="{StaticResource TextMainBrush}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <Button Content="选择文件" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding SelectSupportFileCommand}" />
+                                        <Button Content="清除" Style="{StaticResource SecondaryButtonStyle}" Command="{Binding ClearSupportFileCommand}" />
+                                    </StackPanel>
+                                </Grid>
                             </StackPanel>
                         </Border>
 
-                        <!-- Run Action Buttons -->
-                        <StackPanel Orientation="Horizontal">
-                            <Button Content="开始处理" Style="{StaticResource PrimaryButtonStyle}" Padding="28,10" FontSize="14" Command="{Binding RunCommand}" Margin="0,0,12,0" />
-                            <Button Content="停止运行" Style="{StaticResource SecondaryButtonStyle}" Padding="20,10" FontSize="14" Command="{Binding CancelCommand}" />
-                        </StackPanel>
+                        <!-- Card 3: Material Collector Dedicated Options -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18" Margin="0,0,0,16"
+                                Visibility="{Binding IsMaterialCollector, Converter={StaticResource BoolToVis}}">
+                            <StackPanel>
+                                <TextBlock Text="资料打包与提取选项" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,12" />
+
+                                <!-- Single Employee Filter -->
+                                <TextBlock Text="单人快速过滤（可选）：" FontSize="12" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,4" />
+                                <TextBox Text="{Binding TargetEmployee, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" Height="32" />
+
+                                <!-- Material Types -->
+                                <TextBlock Text="待提取材料类型：" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,8" />
+                                <CheckBox Content="全选全部材料" IsChecked="{Binding CollectAllMaterials}" FontWeight="SemiBold" Margin="0,0,0,8" />
+
+                                <Border Background="#F8FAFC" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12,8" Margin="0,0,0,12">
+                                    <ItemsControl ItemsSource="{Binding MaterialOptions}">
+                                        <ItemsControl.ItemsPanel>
+                                            <ItemsPanelTemplate>
+                                                <WrapPanel />
+                                            </ItemsPanelTemplate>
+                                        </ItemsControl.ItemsPanel>
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <CheckBox Content="{Binding Name}" IsChecked="{Binding IsSelected}" Margin="0,4,16,4" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Border>
+
+                                <CheckBox Content="提取完成后自动打包为 ZIP 压缩包" IsChecked="{Binding CreateZip}" Margin="0,0,0,8" />
+                                <CheckBox Content="启用 OCR 缓存智能加速（极速跳过已扫描文件）" IsChecked="{Binding UseOcrCache}" Margin="0,0,0,4" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Card 4: Folder Rename Dedicated Options -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18" Margin="0,0,0,16"
+                                Visibility="{Binding IsFolderRename, Converter={StaticResource BoolToVis}}">
+                            <StackPanel>
+                                <TextBlock Text="重命名规则设置" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,12" />
+
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="改名模式：" FontSize="13" VerticalAlignment="Center" Margin="0,0,12,0" />
+                                    <ComboBox Grid.Column="1" SelectedValuePath="Tag" SelectedValue="{Binding RenameMode}" Height="30">
+                                        <ComboBoxItem Content="在结尾追加文字" Tag="append" IsSelected="True" />
+                                        <ComboBoxItem Content="删除结尾指定文字" Tag="remove" />
+                                        <ComboBoxItem Content="修改单人名称 (替换)" Tag="replace" />
+                                        <ComboBoxItem Content="按 Excel 人名名单顺序批量重命名" Tag="excel" />
+                                    </ComboBox>
+                                </Grid>
+
+                                <!-- Text inputs for Append/Remove -->
+                                <StackPanel Visibility="{Binding IsAppendOrRemoveMode, Converter={StaticResource BoolToVis}}" Margin="0,0,0,12">
+                                    <TextBlock Text="追加/删除的文字：" FontSize="12" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,4" />
+                                    <TextBox Text="{Binding RenameText, UpdateSourceTrigger=PropertyChanged}" Height="32" />
+                                </StackPanel>
+
+                                <!-- Text inputs for Replace -->
+                                <StackPanel Visibility="{Binding IsReplaceMode, Converter={StaticResource BoolToVis}}" Margin="0,0,0,12">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Margin="0,0,6,0">
+                                            <TextBlock Text="原名称：" FontSize="12" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,4" />
+                                            <TextBox Text="{Binding TargetName, UpdateSourceTrigger=PropertyChanged}" Height="32" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Margin="6,0,0,0">
+                                            <TextBlock Text="替换为：" FontSize="12" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,4" />
+                                            <TextBox Text="{Binding ReplacementName, UpdateSourceTrigger=PropertyChanged}" Height="32" />
+                                        </StackPanel>
+                                    </Grid>
+                                </StackPanel>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="重命名对象：" FontSize="13" VerticalAlignment="Center" Margin="0,0,12,0" />
+                                    <ComboBox Grid.Column="1" SelectedValuePath="Tag" SelectedValue="{Binding RenameFileType}" Height="30">
+                                        <ComboBoxItem Content="仅文件夹" Tag="folder" IsSelected="True" />
+                                        <ComboBoxItem Content="仅文件" Tag="file" />
+                                    </ComboBox>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Card 5: Data Statistics Dedicated Options -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18" Margin="0,0,0,16"
+                                Visibility="{Binding IsDataStatistics, Converter={StaticResource BoolToVis}}">
+                            <StackPanel>
+                                <TextBlock Text="考勤统计周期与选项" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,12" />
+
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Margin="0,0,6,0">
+                                        <TextBlock Text="周报起始日期 (如 2026-01-01)：" FontSize="12" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding WeekStart, UpdateSourceTrigger=PropertyChanged}" Height="30" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Margin="6,0,0,0">
+                                        <TextBlock Text="周报截止日期 (如 2026-01-07)：" FontSize="12" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding WeekEnd, UpdateSourceTrigger=PropertyChanged}" Height="30" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Margin="0,0,6,0">
+                                        <TextBlock Text="月报月份 (如 202601)：" FontSize="12" Margin="0,0,0,4" />
+                                        <TextBox Text="{Binding MonthStart, UpdateSourceTrigger=PropertyChanged}" Height="30" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <CheckBox Content="统计工作日出差记录" IsChecked="{Binding IncludeBusinessTrip}" Margin="0,0,0,4" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Card 6: Salary Split Business Hint -->
+                        <Border Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,16"
+                                Visibility="{Binding IsSalarySplit, Converter={StaticResource BoolToVis}}">
+                            <StackPanel>
+                                <TextBlock Text="💡 业务说明" FontSize="13" FontWeight="SemiBold" Foreground="{StaticResource PrimaryBrush}" Margin="0,0,0,4" />
+                                <TextBlock Text="系统将自动读取工资表中的“发薪主体”或“入职公司”列，并将每一家公司的人员工资数据独立生成单独的 Excel 工作簿。原表的公式计算逻辑与排版样式将完整保留。"
+                                           FontSize="12" Foreground="{StaticResource TextMutedBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Common Execution Card -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="18" Margin="0,0,0,24">
+                            <StackPanel>
+                                <TextBlock Text="执行控制" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,12" />
+                                <CheckBox Content="只校验预览，不生成最终文件 (Dry Run)" IsChecked="{Binding DryRun}" Margin="0,0,0,16" />
+
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="开始处理" Style="{StaticResource PrimaryButtonStyle}" Padding="32,10" FontSize="14" Command="{Binding RunCommand}" Margin="0,0,12,0" />
+                                    <Button Content="停止运行" Style="{StaticResource SecondaryButtonStyle}" Padding="22,10" FontSize="14" Command="{Binding CancelCommand}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
             </Border>
