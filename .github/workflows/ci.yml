@@ -87,7 +87,7 @@ jobs:
       - name: Compile Python sources
         env:
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/hr-toolkit-pycache
-        run: python -m compileall -q -f hr_toolkit scripts tests hr_toolkit_app.py hr_toolkit_qt_app.py hr_toolkit_updater.py
+        run: python -m compileall -q -f hr_toolkit scripts tests hr_toolkit_app.py hr_toolkit_updater.py
 
       - name: Check whitespace errors
         shell: bash
@@ -129,12 +129,6 @@ jobs:
           python -c
           "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test; ocr_runtime_smoke_test()"
 
-      - name: Exercise Qt Quick front end
-        env:
-          HR_TOOLKIT_SKIP_UPDATE: "1"
-          HR_TOOLKIT_QT_SMOKE_EXIT_MS: "800"
-        run: python hr_toolkit_app.py --qt-smoke-test
-
       - name: Run unit tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -144,7 +138,7 @@ jobs:
       - name: Compile Python sources
         env:
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/hr-toolkit-pycache
-        run: python -m compileall -q -f hr_toolkit scripts tests hr_toolkit_app.py hr_toolkit_qt_app.py hr_toolkit_updater.py
+        run: python -m compileall -q -f hr_toolkit scripts tests hr_toolkit_app.py hr_toolkit_updater.py
 
   windows-win7-compat-test:
     name: Windows 7 compatibility stack on Python 3.8
@@ -182,25 +176,6 @@ jobs:
           python -c
           "from hr_toolkit.runtime_checks import ocr_runtime_smoke_test, smoke_test; ocr_runtime_smoke_test(); smoke_test()"
 
-      - name: Exercise Win7 Qt Quick runtime on Windows runner
-        env:
-          HR_TOOLKIT_SKIP_UPDATE: "1"
-          HR_TOOLKIT_QT_SMOKE_EXIT_MS: "800"
-          # Use the native window path without requiring a hosted runner GPU.
-          # The production QML and signal connections are still exercised.
-          QT_QPA_PLATFORM: "windows"
-          QT_QUICK_BACKEND: "software"
-          QSG_RENDER_LOOP: "basic"
-        shell: pwsh
-        run: |
-          # Require all three launches to succeed; do not retry a crash.
-          for ($launch = 1; $launch -le 3; $launch++) {
-            python hr_toolkit_app.py --qt-smoke-test
-            if ($LASTEXITCODE -ne 0) {
-              throw "Win7 Qt startup $launch/3 failed with exit code $LASTEXITCODE"
-            }
-          }
-
       - name: Run Python 3.8-compatible core tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
@@ -218,9 +193,6 @@ jobs:
           tests.test_pdf_backend_compat
           tests.test_release_metadata
           tests.test_background_process
-          tests.test_qt_controller
-          tests.test_qt_entrypoint
-          tests.test_qt_form_specs
           tests.test_run_coordinator
           tests.test_material_preferences
           tests.test_material_collector_gui
@@ -229,4 +201,4 @@ jobs:
       - name: Compile Python sources under Python 3.8
         env:
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/hr-toolkit-pycache-win7
-        run: python -m compileall -q -f hr_toolkit scripts hr_toolkit_app.py hr_toolkit_qt_app.py hr_toolkit_updater.py
+        run: python -m compileall -q -f hr_toolkit scripts hr_toolkit_app.py hr_toolkit_updater.py

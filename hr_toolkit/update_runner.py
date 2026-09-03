@@ -101,74 +101,15 @@ def _create_ui(log_file: Path) -> "_UpdaterUI | None":
     try:
         return _UpdaterUI()
     except Exception as exc:
-        _append_log(log_file, f"无法创建更新进度窗口，改为后台安装：{exc}")
+        _append_log(log_file, f"无法创建更新进度提示，改为后台安装：{exc}")
         return None
 
 
 class _UpdaterUI:
-    """主程序退出后展示的安装进度窗口。
-
-    安装工作在后台线程执行，通过队列把状态文本交给主线程刷新，
-    避免用户在文件替换的几十秒里以为程序消失了。
-    """
-
-    _POLL_MS = 100
+    """更新安装进度提示器（无 GUI 依赖，支持命令行日志与静默流）。"""
 
     def __init__(self) -> None:
-        import tkinter
-        from tkinter import ttk
-
         self._events: queue.Queue[str | None] = queue.Queue()
-        self._root = tkinter.Tk()
-        self._root.title("HR工具箱 更新")
-        self._root.resizable(False, False)
-        try:
-            from hr_toolkit._icon_data import APP_ICON_PNGS_BASE64
-
-            # 从大到小传入，macOS Dock 只取第一张
-            self._icons = [
-                tkinter.PhotoImage(data=APP_ICON_PNGS_BASE64[size])
-                for size in sorted(APP_ICON_PNGS_BASE64, reverse=True)
-            ]
-            self._root.iconphoto(True, *self._icons)
-        except Exception:
-            pass
-        # 安装中途关闭窗口可能留下半成品目录，禁用关闭按钮
-        self._root.protocol("WM_DELETE_WINDOW", lambda: None)
-        body = tkinter.Frame(self._root, bg="#ffffff", padx=30, pady=24)
-        body.pack(fill="both", expand=True)
-        tkinter.Label(
-            body,
-            text="正在安装更新",
-            bg="#ffffff",
-            fg="#17202c",
-            font=("", 14, "bold"),
-        ).pack(anchor="w")
-        self._status_label = tkinter.Label(
-            body,
-            text="请稍候，安装完成后程序会自动打开。",
-            bg="#ffffff",
-            fg="#4f5b68",
-            wraplength=320,
-            justify="left",
-        )
-        self._status_label.pack(anchor="w", pady=(6, 14))
-        bar = ttk.Progressbar(body, mode="indeterminate", length=320)
-        bar.pack(fill="x")
-        bar.start(14)
-        self._center()
-        self._root.lift()
-        self._root.attributes("-topmost", True)
-
-    def _center(self) -> None:
-        self._root.update_idletasks()
-        width = self._root.winfo_reqwidth()
-        height = self._root.winfo_reqheight()
-        screen_width = self._root.winfo_screenwidth()
-        screen_height = self._root.winfo_screenheight()
-        x = max(0, (screen_width - width) // 2)
-        y = max(0, (screen_height - height) // 2)
-        self._root.geometry(f"+{x}+{y}")
 
     def set_status(self, text: str) -> None:
         self._events.put(text)
@@ -177,20 +118,11 @@ class _UpdaterUI:
         self._events.put(None)
 
     def run(self) -> None:
-        self._poll()
-        self._root.mainloop()
-
-    def _poll(self) -> None:
-        try:
-            while True:
-                item = self._events.get_nowait()
-                if item is None:
-                    self._root.destroy()
-                    return
-                self._status_label.config(text=item)
-        except queue.Empty:
-            pass
-        self._root.after(self._POLL_MS, self._poll)
+        while True:
+            item = self._events.get()
+            if item is None:
+                break
+            print(f"[Update] {item}", flush=True)
 
 
 def _run_update(args: argparse.Namespace, log_file: Path, status: StatusCallback | None = None) -> None:

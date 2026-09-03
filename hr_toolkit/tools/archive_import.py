@@ -32,6 +32,7 @@ from hr_toolkit.common.excel_compat import (
     is_supported_excel_file,
 )
 from hr_toolkit.common.excel import (
+    SheetGrid,
     apply_row_snapshot,
     cached_style_id,
     cell_text as _cell_text,
@@ -557,7 +558,7 @@ def _iter_excel_input_files(input_path: Path, temp_dir: Path, warnings: list[str
 
 
 def _read_transfer_file(file_path: Path) -> tuple[list[ArchiveTransferRecord], list[str]]:
-    workbook = load_workbook(file_path, data_only=False)
+    workbook = load_workbook(file_path, data_only=False, read_only=True)
     warnings: list[str] = []
     try:
         ws = _find_transfer_sheet(workbook)
@@ -601,11 +602,12 @@ def _read_transfer_file(file_path: Path) -> tuple[list[ArchiveTransferRecord], l
         workbook.close()
 
 
-def _find_transfer_sheet(workbook) -> Worksheet:
-    for ws in workbook.worksheets:
+def _find_transfer_sheet(workbook) -> SheetGrid:
+    for raw_ws in workbook.worksheets:
+        grid = SheetGrid(raw_ws)
         try:
-            _find_header_row(ws, (HEADER_COMPANY, HEADER_NAME, HEADER_ID_CARD))
-            return ws
+            _find_header_row(grid, (HEADER_COMPANY, HEADER_NAME, HEADER_ID_CARD))
+            return grid
         except ValueError:
             continue
     raise ValueError("未找到包含“公司、姓名、身份证”的档案移交表。")

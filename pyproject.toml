@@ -33,7 +33,6 @@ include = ["hr_toolkit*"]
 
 [tool.setuptools.package-data]
 "hr_toolkit.templates" = ["*.xlsx"]
-"hr_toolkit.gui_qt" = ["qml/*.qml", "qml/components/*.qml"]
 
 [tool.setuptools.dynamic]
 version = { attr = "hr_toolkit.__version__" }

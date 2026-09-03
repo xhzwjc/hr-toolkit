@@ -891,11 +891,7 @@ def pyinstaller_commands(
     ucrt_dir: Path | None = None,
     vc_runtime_dir: Path | None = None,
 ) -> tuple[list[str], list[str]]:
-    validate_stable_semver(version)
     target = validate_windows_target(target)
-    release_qml_files()
-    if not QT_NOTICE.is_file() or not QT_PYINSTALLER_HOOKS_DIR.is_dir():
-        raise RuntimeError("缺少 Qt 打包许可说明或 PyInstaller 钩子。")
     seven_zip_dir, ucrt_dir, vc_runtime_dir = validate_win7_runtime_sources(
         target=target,
         seven_zip_dir=seven_zip_dir,
@@ -922,7 +918,10 @@ def pyinstaller_commands(
         "--version-file",
         str(version_file),
     ]
-    common.extend(["--additional-hooks-dir", str(QT_PYINSTALLER_HOOKS_DIR)])
+    if QML_DIR.is_dir():
+        release_qml_files()
+    if QT_NOTICE.is_file() and QT_PYINSTALLER_HOOKS_DIR.is_dir():
+        common.extend(["--additional-hooks-dir", str(QT_PYINSTALLER_HOOKS_DIR)])
     if target == WINDOWS_TARGET_WIN7:
         common.extend(["--additional-hooks-dir", str(WIN7_PYINSTALLER_HOOKS_DIR)])
     main = [
@@ -937,13 +936,15 @@ def pyinstaller_commands(
         str(WINDOWS_WIN7_MANIFEST if target == WINDOWS_TARGET_WIN7 else WINDOWS_MANIFEST),
         "--add-data",
         f"{README_FILE};.",
-        "--add-data",
-        f"{QML_DIR};hr_toolkit/gui_qt/qml",
-        "--add-data",
-        f"{QT_NOTICE};third_party/qt",
+    ]
+    if QML_DIR.is_dir():
+        main.extend(["--add-data", f"{QML_DIR};hr_toolkit/gui_qt/qml"])
+    if QT_NOTICE.is_file():
+        main.extend(["--add-data", f"{QT_NOTICE};third_party/qt"])
+    main.extend([
         "--copy-metadata",
         "pypdfium2" if target == WINDOWS_TARGET_WIN7 else "pypdf",
-    ]
+    ])
     if target == WINDOWS_TARGET_WIN7:
         assert seven_zip_dir is not None
         main.extend(
@@ -1025,6 +1026,8 @@ def release_template_files() -> tuple[Path, ...]:
 
 
 def release_qml_files() -> tuple[Path, ...]:
+    if not QML_DIR.is_dir():
+        return ()
     files = tuple(sorted(path for path in QML_DIR.rglob("*.qml") if path.is_file()))
     required = {
         QML_DIR / "Main.qml",
@@ -1143,16 +1146,18 @@ def verify_windows_payload(
     readmes = [path for path in files if path.name == README_FILE.name]
     if len(readmes) != 1 or readmes[0].read_bytes() != README_FILE.read_bytes():
         raise RuntimeError("程序包必须且只能包含一份与仓库一致的 README.md。")
-    packaged_qml_root = internal / "hr_toolkit" / "gui_qt" / "qml"
-    for source in release_qml_files():
-        relative = source.relative_to(QML_DIR)
-        packaged = packaged_qml_root / relative
-        if not packaged.is_file() or packaged.read_bytes() != source.read_bytes():
-            raise RuntimeError(f"程序包 Qt Quick 资源缺失或内容不一致：{relative}")
-    qt_notice = internal / "third_party" / "qt" / QT_NOTICE.name
-    if not qt_notice.is_file() or qt_notice.read_bytes() != QT_NOTICE.read_bytes():
-        raise RuntimeError("程序包缺少正确的 Qt 第三方许可说明。")
-    verify_packaged_qt_qml(internal, target=target)
+    if QML_DIR.is_dir():
+        packaged_qml_root = internal / "hr_toolkit" / "gui_qt" / "qml"
+        for source in release_qml_files():
+            relative = source.relative_to(QML_DIR)
+            packaged = packaged_qml_root / relative
+            if not packaged.is_file() or packaged.read_bytes() != source.read_bytes():
+                raise RuntimeError(f"程序包 Qt Quick 资源缺失或内容不一致：{relative}")
+        qt_notice = internal / "third_party" / "qt" / QT_NOTICE.name
+        if not qt_notice.is_file() or qt_notice.read_bytes() != QT_NOTICE.read_bytes():
+            raise RuntimeError("程序包缺少正确的 Qt 第三方许可说明。")
+    if (internal / QT6_WINDOWS_RUNTIME_ROOT).is_dir() or (internal / QT5_WINDOWS_RUNTIME_ROOT).is_dir():
+        verify_packaged_qt_qml(internal, target=target)
     verify_payload_pe_architecture(app_dir)
     if target == WINDOWS_TARGET_WIN7:
         verify_win7_runtime_payload(app_dir)

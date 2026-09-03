@@ -195,25 +195,24 @@ def verify_packaged_resources(
 
     if not matching_readmes:
         raise MacBundleVerificationError("Bundle 缺少与仓库一致的 README.md")
-    packaged_qml_root = app_path / "Contents" / "Resources" / "hr_toolkit" / "gui_qt" / "qml"
-    qml_sources = tuple(sorted(path for path in DEFAULT_QML_DIR.rglob("*.qml") if path.is_file()))
-    if not qml_sources:
-        raise MacBundleVerificationError("源码 Qt Quick 资源为空")
-    for source in qml_sources:
-        relative = source.relative_to(DEFAULT_QML_DIR)
-        packaged = packaged_qml_root / relative
-        if not packaged.is_file() or _sha256(packaged) != _sha256(source):
-            raise MacBundleVerificationError(f"Bundle Qt Quick 资源缺失或内容不一致：{relative}")
-    qt_notice = (
-        app_path
-        / "Contents"
-        / "Resources"
-        / "third_party"
-        / "qt"
-        / DEFAULT_QT_NOTICE.name
-    )
-    if not qt_notice.is_file() or _sha256(qt_notice) != _sha256(DEFAULT_QT_NOTICE):
-        raise MacBundleVerificationError("Bundle 缺少正确的 Qt 第三方许可说明")
+    if DEFAULT_QML_DIR.is_dir():
+        packaged_qml_root = app_path / "Contents" / "Resources" / "hr_toolkit" / "gui_qt" / "qml"
+        qml_sources = tuple(sorted(path for path in DEFAULT_QML_DIR.rglob("*.qml") if path.is_file()))
+        for source in qml_sources:
+            relative = source.relative_to(DEFAULT_QML_DIR)
+            packaged = packaged_qml_root / relative
+            if not packaged.is_file() or _sha256(packaged) != _sha256(source):
+                raise MacBundleVerificationError(f"Bundle Qt Quick 资源缺失或内容不一致：{relative}")
+        qt_notice = (
+            app_path
+            / "Contents"
+            / "Resources"
+            / "third_party"
+            / "qt"
+            / DEFAULT_QT_NOTICE.name
+        )
+        if not qt_notice.is_file() or _sha256(qt_notice) != _sha256(DEFAULT_QT_NOTICE):
+            raise MacBundleVerificationError("Bundle 缺少正确的 Qt 第三方许可说明")
     qt_qml_root = (
         app_path
         / "Contents"

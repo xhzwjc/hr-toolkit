@@ -1,0 +1,200 @@
+<Window x:Class="HRToolkit.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:views="clr-namespace:HRToolkit.Wpf.Views"
+        mc:Ignorable="d"
+        Title="HR-Toolkit 人事综合服务箱 (WPF)" Height="800" Width="1240"
+        MinWidth="1000" MinHeight="650"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource BackgroundBrush}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="54" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Top Navigation & Project Bar -->
+        <Border Grid.Row="0" Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="18,0">
+            <Grid VerticalAlignment="Center">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Brand -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Width="28" Height="28" CornerRadius="6" Background="{StaticResource PrimaryBrush}" Margin="0,0,10,0">
+                        <TextBlock Text="HR" Foreground="White" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Text="HR-Toolkit" FontWeight="Bold" FontSize="15" Foreground="{StaticResource TextMainBrush}" VerticalAlignment="Center" />
+                    <TextBlock Text="人事综合服务箱" Margin="8,0,0,0" FontSize="12" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <!-- Project Status -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Border Background="#F1F5F9" CornerRadius="14" Padding="12,4">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="8" Height="8" Margin="0,0,6,0">
+                                <Ellipse.Style>
+                                    <Style TargetType="Ellipse">
+                                        <Setter Property="Fill" Value="{StaticResource WarningBrush}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Project.HasProject}" Value="True">
+                                                <Setter Property="Fill" Value="{StaticResource SuccessBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Ellipse.Style>
+                            </Ellipse>
+                            <TextBlock Foreground="{StaticResource TextMainBrush}" FontSize="12" FontWeight="Medium">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Text" Value="未打开工作项目（请先新建或打开项目）" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Project.HasProject}" Value="True">
+                                                <Setter Property="Text" Value="{Binding Project.Name, StringFormat='工作项目：{0}'}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- Actions -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="新建项目" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding CreateProjectCommand}" />
+                    <Button Content="打开项目" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding OpenProjectCommand}" />
+                    <Button Content="工作区抽屉" Style="{StaticResource SecondaryButtonStyle}" Command="{Binding Workspace.ToggleDrawerCommand}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Main Body: 3-Pane Layout -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="380" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- 1. Left Sidebar: Tool Navigation Groups -->
+            <Border Grid.Column="0" Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="12,16">
+                        <TextBlock Text="业务工具导航" FontSize="11" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" Margin="8,0,0,8" />
+                        <ItemsControl ItemsSource="{Binding AllTools}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Margin="0,2" Padding="10,8" HorizontalContentAlignment="Left" Cursor="Hand"
+                                            Command="{Binding DataContext.SelectToolCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding}">
+                                        <Button.Style>
+                                            <Style TargetType="Button">
+                                                <Setter Property="Background" Value="Transparent" />
+                                                <Setter Property="BorderThickness" Value="0" />
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                                                <TextBlock Text="{Binding Name}" FontSize="13" Foreground="{StaticResource TextMainBrush}" />
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="Bd" Property="Background" Value="#F1F5F9" />
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </Button.Style>
+                                    </Button>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- 2. Center Content: Selected Tool Form & Run Controls -->
+            <Border Grid.Column="1" Padding="24">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel DataContext="{Binding Form}">
+                        <!-- Tool Header -->
+                        <TextBlock Text="{Binding SelectedTool.Name}" FontSize="20" FontWeight="Bold" Foreground="{StaticResource TextMainBrush}" />
+                        <TextBlock Text="{Binding SelectedTool.Description}" FontSize="13" Foreground="{StaticResource TextMutedBrush}" Margin="0,4,0,20" TextWrapping="Wrap" />
+
+                        <!-- File Input Card -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="待处理输入文件" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" VerticalAlignment="Center" />
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <Button Content="添加文件" Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,8,0" Command="{Binding AddFilesCommand}" />
+                                        <Button Content="清空" Style="{StaticResource SecondaryButtonStyle}" Command="{Binding ClearFilesCommand}" />
+                                    </StackPanel>
+                                </Grid>
+
+                                <!-- Input Files List -->
+                                <Border MinHeight="100" Background="#F8FAFC" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
+                                    <ItemsControl ItemsSource="{Binding InputFiles}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding}" Margin="0,2" FontSize="12" Foreground="{StaticResource TextMainBrush}" TextTrimming="CharacterEllipsis" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Common Tool Options -->
+                        <Border Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,24">
+                            <StackPanel>
+                                <TextBlock Text="运行选项" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource TextMainBrush}" Margin="0,0,0,12" />
+                                <CheckBox Content="只校验预览，不生成最终文件 (Dry Run)" IsChecked="{Binding DryRun}" Margin="0,0,0,8" />
+                                <CheckBox Content="启用 OCR 缓存加速识别" IsChecked="{Binding UseOcrCache}" Margin="0,0,0,8" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Run Action Buttons -->
+                        <StackPanel Orientation="Horizontal">
+                            <Button Content="开始处理" Style="{StaticResource PrimaryButtonStyle}" Padding="28,10" FontSize="14" Command="{Binding RunCommand}" Margin="0,0,12,0" />
+                            <Button Content="停止运行" Style="{StaticResource SecondaryButtonStyle}" Padding="20,10" FontSize="14" Command="{Binding CancelCommand}" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- 3. Right Pane: Live Log View -->
+            <Border Grid.Column="2" Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1,0,0,0">
+                <views:LogView DataContext="{Binding Log}" />
+            </Border>
+
+            <!-- 4. Collapsible Workspace Drawer (Conditional Visibility) -->
+            <Border Grid.Column="3" Width="320" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1,0,0,0">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Workspace.IsDrawerOpen}" Value="True">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <views:WorkspaceDrawerView DataContext="{Binding Workspace}" />
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

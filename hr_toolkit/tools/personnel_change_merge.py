@@ -24,6 +24,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from hr_toolkit.common.resources import open_template_resource
 from hr_toolkit.common.excel_compat import is_supported_excel_file, ensure_xlsx_workbook
 from hr_toolkit.common.excel import (
+    SheetGrid,
     apply_row_snapshot,
     cached_style_id,
     cell_text as _cell_text,
@@ -511,15 +512,16 @@ def _resolve_summary_sources(template_path: str | Path | None, temp_dir: Path) -
 def _read_change_file(file_path: Path) -> tuple[dict[str, list[ChangeRow]], list[str]]:
     warnings: list[str] = []
     rows_by_sheet: dict[str, list[ChangeRow]] = {sheet_name: [] for sheet_name in TARGET_SHEETS}
-    workbook = load_workbook(file_path, data_only=True)
+    workbook = load_workbook(file_path, data_only=True, read_only=True)
     try:
         file_period = _detect_period([file_path])
         for sheet_name in TARGET_SHEETS:
-            ws = _find_source_sheet(workbook, sheet_name)
-            if ws is None:
+            raw_ws = _find_source_sheet(workbook, sheet_name)
+            if raw_ws is None:
                 if _looks_like_change_workbook(workbook):
                     warnings.append(f"{file_path.name} 缺少工作表：{sheet_name}")
                 continue
+            ws = SheetGrid(raw_ws)
             layout = _detect_sheet_layout(ws)
             rows_by_sheet[sheet_name].extend(
                 _read_data_rows(ws, layout, file_path.name, target_sheet=sheet_name, file_period=file_period, warnings=warnings)
@@ -532,14 +534,14 @@ def _read_change_file(file_path: Path) -> tuple[dict[str, list[ChangeRow]], list
 def _read_summary_change_file(file_path: Path) -> tuple[dict[str, list[ChangeRow]], list[str]]:
     warnings: list[str] = []
     rows_by_sheet: dict[str, list[ChangeRow]] = {sheet_name: [] for sheet_name in TARGET_SHEETS}
-    workbook = load_workbook(file_path, data_only=True)
+    workbook = load_workbook(file_path, data_only=True, read_only=True)
     try:
         file_period = _detect_summary_period(file_path)
         for sheet_name in TARGET_SHEETS:
             if sheet_name not in workbook.sheetnames:
                 warnings.append(f"{file_path.name} 缺少工作表：{sheet_name}")
                 continue
-            ws = workbook[sheet_name]
+            ws = SheetGrid(workbook[sheet_name])
             layout = _detect_sheet_layout(ws)
             for row_index in range(layout.data_start_row, layout.footer_start_row):
                 if not _is_existing_summary_data_row(ws, layout, row_index):

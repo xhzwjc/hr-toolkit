@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>../../packaging/windows/HRToolkit.ico</ApplicationIcon>
+    <AssemblyName>HRToolkit</AssemblyName>
+    <RootNamespace>HRToolkit.Wpf</RootNamespace>
+    <Version>1.0.0</Version>
+    <Authors>HR Toolkit Team</Authors>
+    <Product>HR-Toolkit 人事综合服务箱</Product>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Standard .NET 8 contains System.Text.Json and modern async I/O out of the box -->
+  </ItemGroup>
+
+</Project>
