@@ -1,3 +1,2 @@
-# 国内默认读取 Gitee 最新 Release；连接失败、超时或配置无效时自动尝试 GitHub。
+# 检查更新和下载安装包仅使用 Gitee；失败时提示重试，不切换到 GitHub。
 https://gitee.com/api/v5/repos/optimistic-little-sunspot/hr-toolkit/releases/latest
-https://github.com/xhzwjc/hr-toolkit/releases/latest/download/latest.json

@@ -22,6 +22,8 @@ MAX_RELEASE_ASSET_BYTES = 2 * 1024 * 1024 * 1024
 # Gitee publishing remains independently constrained and currently mirrors
 # only source metadata/checksums; retain its conservative decimal 100 MB cap.
 GITEE_ATTACHMENT_SAFE_MAX_BYTES = 100_000_000
+UPDATE_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
+UPDATE_DOWNLOAD_BASE_URL = f"https://gitee.com/{UPDATE_REPOSITORY}/releases/download"
 
 
 class ReleaseMetadataError(RuntimeError):
@@ -201,12 +203,12 @@ def build_latest_manifest(
     if primary_download_max_bytes is not None and primary_download_max_bytes < 1:
         raise ReleaseMetadataError("主下载源单文件上限必须是正整数。")
     download_base_url = _validated_url(
-        download_base_url or f"https://github.com/{repository}/releases/download",
+        download_base_url or UPDATE_DOWNLOAD_BASE_URL,
         label="下载基础地址",
         strip_trailing_slash=True,
     )
     release_url = _validated_url(
-        release_url or f"https://github.com/{repository}/releases/tag/{tag}",
+        release_url or f"https://gitee.com/{UPDATE_REPOSITORY}/releases/tag/{tag}",
         label="Release 页面地址",
     )
     if fallback_download_base_url:
@@ -375,12 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notes", nargs="*", help="latest.json 更新说明")
     parser.add_argument(
         "--download-base-url",
-        help="资产下载基础地址，默认 GitHub releases/download",
+        help="客户端资产下载基础地址，默认仅使用 Gitee releases/download",
     )
     parser.add_argument("--release-url", help="latest.json 中的 Release 页面地址")
     parser.add_argument(
         "--fallback-download-base-url",
-        help="资产备用下载基础地址；Gitee 镜像使用 GitHub 作为备用",
+        help="显式配置备用地址；正式客户端只使用 Gitee，默认不设置备用源",
     )
     parser.add_argument(
         "--primary-download-max-bytes",

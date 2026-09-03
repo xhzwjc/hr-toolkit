@@ -21,11 +21,7 @@ from typing import Any, Callable, Iterable
 
 
 GITEE_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
-GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
 GITEE_LATEST_RELEASE_API_URL = f"https://gitee.com/api/v5/repos/{GITEE_REPOSITORY}/releases/latest"
-GITHUB_LATEST_MANIFEST_URL = (
-    f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/latest.json"
-)
 DEFAULT_UPDATE_MANIFEST_URLS = (
     GITEE_LATEST_RELEASE_API_URL,
 )
@@ -145,6 +141,8 @@ def create_https_context() -> ssl.SSLContext:
 
 
 def _open_url(request: urllib.request.Request, *, timeout: int):
+    if _is_github_url(request.full_url):
+        raise UpdateError("客户端更新仅使用 Gitee，不会访问 GitHub。")
     scheme = urllib.parse.urlparse(request.full_url).scheme.lower()
     if scheme not in {"https", "http", "file"}:
         raise UpdateError(f"不支持的更新地址协议：{scheme or '空'}。")
@@ -192,11 +190,14 @@ def check_for_update(current_version: str, manifest_url: str | None = None, plat
             remote_version = manifest_version(manifest, platform=selected_platform)
             if not is_newer_version(remote_version, current_version):
                 return None
-            return parse_update_manifest(
+            update = parse_update_manifest(
                 manifest,
                 manifest_url=resolved_manifest_url,
                 platform=selected_platform,
             )
+            if not update.download_urls:
+                raise UpdateError("此平台尚无可用的 Gitee 安装包，请联系发布者补充后重试。")
+            return update
         except Exception as exc:
             errors.append(f"{_update_source_name(candidate_url)}：{exc}")
     raise UpdateError("所有更新源均不可用，已按顺序尝试：" + "；".join(errors))
@@ -213,8 +214,80 @@ def load_update_manifest(manifest_url: str, timeout: int = 10) -> tuple[dict[str
         asset_url = _find_manifest_asset_url(data)
         if not asset_url:
             raise UpdateError("最新 Release 缺少 latest.json 附件。")
-        return _fetch_json_object(asset_url, timeout=timeout), asset_url
+        is_gitee = urllib.parse.urlparse(manifest_url).hostname == "gitee.com"
+        if is_gitee and _is_github_url(asset_url):
+            raise UpdateError("Gitee 更新配置不能指向 GitHub。")
+        manifest = _fetch_json_object(asset_url, timeout=timeout)
+        if is_gitee:
+            manifest = _bind_gitee_release_assets(manifest, data, manifest_url)
+        return manifest, asset_url
     return data, manifest_url
+
+
+def _bind_gitee_release_assets(
+    manifest: dict[str, Any], release: dict[str, Any], discovery_url: str,
+) -> dict[str, Any]:
+    """Use only attachments actually uploaded to this Gitee release.
+
+    Older releases can contain a latest.json copied from GitHub. Resolve its
+    exact asset name against Gitee's own list; never guess a mirror URL or
+    query GitHub. Keep versions, platform lanes and SHA256 values unchanged.
+    """
+    path = urllib.parse.urlparse(discovery_url).path
+    match = re.fullmatch(r"/api/v5/repos/([^/]+/[^/]+)/releases/latest/?", path)
+    if match is None:
+        return manifest
+    tag = str(release.get("tag_name") or "")
+    if tag != "v" + str(manifest.get("version") or "").lstrip("v"):
+        raise UpdateError("Gitee 发行版与更新配置的版本不一致。")
+    prefix = f"https://gitee.com/{match.group(1)}/releases/download/{tag}/"
+    assets = release.get("assets") or release.get("attach_files") or []
+    available: dict[str, str] = {}
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or asset.get("url") or "")
+        if (
+            name and "/" not in name and "\\" not in name
+            and url == prefix + urllib.parse.quote(name)
+        ):
+            available[name] = url
+
+    def resolve(payload: dict[str, Any]) -> dict[str, Any] | None:
+        original_url = str(
+            payload.get("file_url") or payload.get("url")
+            or manifest.get("file_url") or manifest.get("url") or ""
+        )
+        filename = urllib.parse.unquote(urllib.parse.urlparse(original_url).path.rsplit("/", 1)[-1])
+        url = available.get(filename)
+        if not url:
+            return None
+        normalized = dict(payload)
+        normalized["file_url"] = url
+        for field in ("url", "fallback_urls", "fallback_url"):
+            normalized.pop(field, None)
+        return normalized
+
+    result = dict(manifest)
+    result["release_url"] = f"https://gitee.com/{match.group(1)}/releases/tag/{tag}"
+    if isinstance(manifest.get("platforms"), dict):
+        for field in ("file_url", "url", "fallback_urls", "fallback_url"):
+            result.pop(field, None)
+        platforms = {}
+        for key, payload in manifest["platforms"].items():
+            if isinstance(payload, dict):
+                resolved = resolve(payload)
+                if resolved is not None:
+                    platforms[key] = resolved
+        result["platforms"] = platforms
+    elif manifest.get("file_url") or manifest.get("url"):
+        result = resolve(result)
+        if result is None:
+            raise UpdateError("Gitee 尚未上传此平台安装包，请稍后重试。")
+    else:
+        return manifest
+    return result
 
 
 def _fetch_json_object(url: str, *, timeout: int) -> dict[str, Any]:
@@ -748,7 +821,10 @@ def _dedupe_urls(urls: Iterable[str]) -> tuple[str, ...]:
 
 def _is_github_url(url: str) -> bool:
     host = (urllib.parse.urlparse(str(url)).hostname or "").casefold()
-    return host == "github.com" or host.endswith(".github.com")
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in ("github.com", "githubusercontent.com", "githubassets.com")
+    )
 
 
 def _is_release_discovery_url(url: str) -> bool:

@@ -108,9 +108,16 @@ class ReleaseMetadataTests(unittest.TestCase):
             self.assertEqual(manifest["platforms"]["macos"]["update_mode"], "manual")
             self.assertEqual(
                 manifest["platforms"]["macos"]["file_url"],
-                "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.2.1/"
+                "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/v0.2.1/"
                 "HRToolkit_0.2.1_universal.dmg",
             )
+            self.assertNotIn("github", json.dumps(manifest).lower())
+            from hr_toolkit.app_update import parse_update_manifest
+            for platform in manifest["platforms"]:
+                update = parse_update_manifest(manifest, str(latest_path), platform)
+                self.assertTrue(update.download_urls)
+                self.assertTrue(all(url.startswith("https://gitee.com/") for url in update.download_urls))
+                self.assertEqual(update.fallback_urls, ())
             checksum_lines = checksums_path.read_text(encoding="utf-8").splitlines()
             checksum_names = [line.split("  ", 1)[1] for line in checksum_lines]
             expected_checksum_names = sorted(

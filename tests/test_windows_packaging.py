@@ -1525,7 +1525,7 @@ class WindowsPackagingTests(unittest.TestCase):
                     app_dir=app_dir,
                     updater=updater,
                     output_dir=output_dir,
-                    notes=["桥接 GitHub Release"],
+                    notes=["桥接 Gitee 更新"],
                     runtime_smoke=False,
                 )
             first_digest = build_update_assets.sha256_file(setup_path)
@@ -1545,12 +1545,11 @@ class WindowsPackagingTests(unittest.TestCase):
                 "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/"
                 f"v{self.version}/{setup_path.name}",
             )
+            self.assertNotIn("fallback_urls", windows)
+            self.assertNotIn("github", json.dumps(manifest).lower())
             self.assertEqual(
-                windows["fallback_urls"],
-                [
-                    "https://github.com/xhzwjc/hr-toolkit/releases/download/"
-                    f"v{self.version}/{setup_path.name}"
-                ],
+                build_update_assets.UPDATE_MANIFEST_URLS,
+                (build_update_assets.GITEE_LATEST_RELEASE_API_URL,),
             )
 
             # staging 生成不得污染纯 PyInstaller 输出目录。
@@ -1569,6 +1568,7 @@ class WindowsPackagingTests(unittest.TestCase):
         )
         self.assertEqual(set(manifest["platforms"]), {"windows-x64-win7"})
         self.assertNotIn("windows", manifest["platforms"])
+        self.assertNotIn("github", json.dumps(manifest).lower())
         self.assertTrue(
             manifest["platforms"]["windows-x64-win7"]["file_url"].endswith(filename)
         )
@@ -1815,6 +1815,10 @@ class WindowsPackagingTests(unittest.TestCase):
         workflow = (build_windows.REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        metadata_step = workflow.split("- name: Generate unified latest.json and SHA256SUMS.txt", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn('--download-base-url "https://gitee.com/', metadata_step)
+        self.assertIn('--release-url "https://gitee.com/', metadata_step)
+        self.assertNotIn("--fallback-download-base-url", metadata_step)
         mirror_job = workflow.split("\n  mirror-gitee:", 1)[1]
         job_configuration = mirror_job.split("\n    steps:", 1)[0]
         self.assertIn("- publish", job_configuration)

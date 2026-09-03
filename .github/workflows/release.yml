@@ -390,6 +390,8 @@ jobs:
           --tag "${TAG}"
           --repository "${GITHUB_REPOSITORY}"
           --assets-dir release-assets
+          --download-base-url "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download"
+          --release-url "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/tag/${TAG}"
           --notes "HR Toolkit v${VERSION}"
 
       - name: Create or reuse a draft release

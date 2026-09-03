@@ -37,17 +37,12 @@ from build_windows import (
 )
 
 
-GITHUB_REPOSITORY = "xhzwjc/hr-toolkit"
 GITEE_REPOSITORY = "optimistic-little-sunspot/hr-toolkit"
 GITEE_LATEST_RELEASE_API_URL = (
     f"https://gitee.com/api/v5/repos/{GITEE_REPOSITORY}/releases/latest"
 )
-GITHUB_LATEST_MANIFEST_URL = (
-    f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/latest.json"
-)
 UPDATE_MANIFEST_URLS = (
     GITEE_LATEST_RELEASE_API_URL,
-    GITHUB_LATEST_MANIFEST_URL,
 )
 LEGACY_MANIFEST_NAME = "legacy-server-latest.json"
 WIN7_LEGACY_MANIFEST_NAME = "legacy-server-latest-win7.json"
@@ -240,9 +235,6 @@ def legacy_server_manifest(
     gitee_release_url = (
         f"https://gitee.com/{GITEE_REPOSITORY}/releases/download/v{version}/{filename}"
     )
-    github_release_url = (
-        f"https://github.com/{GITHUB_REPOSITORY}/releases/download/v{version}/{filename}"
-    )
     normalized_notes = [str(note).strip() for note in (notes or []) if str(note).strip()]
     if not normalized_notes:
         normalized_notes = [f"升级 HRToolkit 至 {version}"]
@@ -255,7 +247,6 @@ def legacy_server_manifest(
             platform_name: {
                 "version": version,
                 "file_url": gitee_release_url,
-                "fallback_urls": [github_release_url],
                 "sha256": sha256.lower(),
             }
         },

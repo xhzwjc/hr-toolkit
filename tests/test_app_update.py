@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import copy
 import ssl
 import tempfile
 import unittest
@@ -316,6 +317,93 @@ class AppUpdateTests(unittest.TestCase):
         self.assertEqual(payload, manifest)
         self.assertEqual(resolved_url, release["assets"][0]["browser_download_url"])
         self.assertEqual(fetcher.call_count, 2)
+
+    def _gitee_uploaded_release(self):
+        prefix = "https://gitee.com/optimistic-little-sunspot/hr-toolkit/releases/download/v0.7.9/"
+        names = {
+            "windows-x64-modern": "HRToolkit_0.7.9_x64-setup.exe",
+            "windows-x64-win7": "HRToolkit_0.7.9_win7_x64-setup.exe",
+            "macos-arm64": "HRToolkit_0.7.9_arm64.dmg",
+        }
+        manifest = {
+            "version": "0.7.9", "mandatory": True, "notes": ["保留更新说明"],
+            "platforms": {
+                platform: {
+                    "version": "0.7.9", "sha256": str(index) * 64,
+                    "file_url": "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.7.9/" + name,
+                    "update_mode": "manual" if platform.startswith("macos") else "auto",
+                }
+                for index, (platform, name) in enumerate(names.items(), 1)
+            },
+        }
+        release = {
+            "tag_name": "v0.7.9",
+            "assets": [{"name": name, "browser_download_url": prefix + name}
+                       for name in ("latest.json", *names.values())],
+        }
+        return manifest, release
+
+    def test_gitee_uses_uploaded_asset_not_github_metadata_url(self) -> None:
+        manifest, release = self._gitee_uploaded_release()
+        original = copy.deepcopy(manifest)
+        for platform in manifest["platforms"]:
+            with self.subTest(platform=platform), patch(
+                "hr_toolkit.app_update._fetch_json_object", side_effect=[release, manifest],
+            ) as fetcher:
+                update = check_for_update("0.7.8", GITEE_LATEST_RELEASE_API_URL, platform)
+                self.assertIsNotNone(update)
+                self.assertEqual(update.sha256, manifest["platforms"][platform]["sha256"])
+                self.assertEqual(update.update_mode, manifest["platforms"][platform]["update_mode"])
+                self.assertEqual(update.notes, ("保留更新说明",))
+                self.assertEqual(update.fallback_urls, ())
+                self.assertTrue(update.file_url.startswith("https://gitee.com/"))
+                self.assertTrue(all(call.args[0].startswith("https://gitee.com/") for call in fetcher.call_args_list))
+        self.assertEqual(manifest, original)
+
+    def test_gitee_missing_win7_asset_never_uses_modern_installer(self) -> None:
+        manifest, release = self._gitee_uploaded_release()
+        release["assets"] = [asset for asset in release["assets"] if "win7" not in asset["name"]]
+        with patch("hr_toolkit.app_update._fetch_json_object", side_effect=[release, manifest]):
+            with self.assertRaisesRegex(UpdateError, "没有 windows-x64-win7 平台"):
+                check_for_update("0.7.8", GITEE_LATEST_RELEASE_API_URL, "windows-x64-win7")
+
+    def test_gitee_rejects_wrong_release_or_foreign_attachment(self) -> None:
+        for mutation in ("tag", "foreign", "other-version"):
+            manifest, release = self._gitee_uploaded_release()
+            if mutation == "tag":
+                release["tag_name"] = "v0.7.8"
+            else:
+                for asset in release["assets"][1:]:
+                    asset["browser_download_url"] = asset["browser_download_url"].replace(
+                        "gitee.com" if mutation == "foreign" else "v0.7.9",
+                        "github.com" if mutation == "foreign" else "v0.7.8",
+                    )
+            with self.subTest(mutation=mutation), patch(
+                "hr_toolkit.app_update._fetch_json_object", side_effect=[release, manifest],
+            ):
+                with self.assertRaises(UpdateError):
+                    check_for_update("0.7.8", GITEE_LATEST_RELEASE_API_URL, "windows-x64-modern")
+
+    def test_github_only_manifest_fails_before_offering_update(self) -> None:
+        manifest, _release = self._gitee_uploaded_release()
+        with patch("hr_toolkit.app_update.load_update_manifest", return_value=(manifest, "https://example.test/latest.json")):
+            with self.assertRaisesRegex(UpdateError, "尚无可用的 Gitee 安装包"):
+                check_for_update("0.7.8", platform="windows-x64-modern")
+
+    def test_gitee_never_fetches_github_manifest_attachment(self) -> None:
+        manifest, release = self._gitee_uploaded_release()
+        release["assets"][0]["browser_download_url"] = "https://github.com/xhzwjc/hr-toolkit/releases/download/v0.7.9/latest.json"
+        with patch("hr_toolkit.app_update._fetch_json_object", return_value=release) as fetcher:
+            with self.assertRaisesRegex(UpdateError, "不能指向 GitHub"):
+                load_update_manifest(GITEE_LATEST_RELEASE_API_URL)
+            self.assertEqual(fetcher.call_count, 1)
+
+    def test_explicit_github_urls_are_rejected_without_network_access(self) -> None:
+        for host in ("github.com", "api.github.com", "raw.githubusercontent.com", "release-assets.githubusercontent.com"):
+            with self.subTest(host=host), patch("hr_toolkit.app_update.urllib.request.urlopen") as network:
+                with self.assertRaisesRegex(UpdateError, "不会访问 GitHub"):
+                    fetch_update_manifest("https://" + host + "/latest.json")
+                network.assert_not_called()
 
     def test_https_manifest_uses_validating_certifi_context(self) -> None:
         response = io.BytesIO(b'{"version": "0.2.1"}')
