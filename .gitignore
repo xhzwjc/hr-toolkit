@@ -29,6 +29,13 @@ artifacts/
 *.egg-info/
 *.spec
 
+# .NET / C# build outputs
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
 # Generated release artifacts
 release/*
 !release/latest.json.example
