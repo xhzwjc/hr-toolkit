@@ -10,6 +10,7 @@ __pycache__/
 
 # Python virtual environments
 .venv/
+.venv-win312/
 venv/
 env/
 ENV/
