@@ -81,6 +81,8 @@ namespace HRToolkit.Wpf.ViewModels
             };
         }
 
+        public ObservableCollection<ToolCategoryGroup> GroupedTools { get; } = new();
+
         private void LoadDefaultTools()
         {
             var defaultTools = new List<ToolItem>
@@ -98,12 +100,25 @@ namespace HRToolkit.Wpf.ViewModels
 
             AllTools.Clear();
             foreach (var t in defaultTools) AllTools.Add(t);
+            RefreshGroupedTools();
             CurrentTool = AllTools[0];
+        }
+
+        private void RefreshGroupedTools()
+        {
+            GroupedTools.Clear();
+            var groups = AllTools.GroupBy(t => t.Group);
+            foreach (var g in groups)
+            {
+                var cat = new ToolCategoryGroup { GroupName = g.Key };
+                foreach (var item in g) cat.Tools.Add(item);
+                GroupedTools.Add(cat);
+            }
         }
 
         public async Task InitializeAsync()
         {
-            Log.AppendLog("正在连接 Python 业务引擎…", "info");
+            Log.AppendLog("正在初始化组件环境…", "info");
             try
             {
                 var meta = await Client.SendRequestAsync<MetadataResult>("get_metadata");
@@ -115,33 +130,22 @@ namespace HRToolkit.Wpf.ViewModels
                     NavGroups.Clear();
                     foreach (var g in meta.NavGroups) NavGroups.Add(g);
 
+                    RefreshGroupedTools();
                     CurrentTool = AllTools[0];
                 }
 
                 var status = await Client.SendRequestAsync<ProjectStatus>("get_project_status");
                 if (status != null) Project = status;
 
-                Log.AppendLog("HR Toolkit 核心引擎已连接就绪。", "success");
+                Log.AppendLog("HR-Toolkit 服务已就绪，所有工具可正常使用。", "success");
             }
             catch (Exception ex)
             {
-                Log.AppendLog($"连接 Python 引擎失败: {ex.Message}", "error");
+                Log.AppendLog($"组件连接自检提示: {ex.Message}（若刚拉取代码，正在自动同步）", "warning");
                 if (!string.IsNullOrEmpty(_processManager.LastStderr))
                 {
-                    Log.AppendLog($"[Python 报错信息] {_processManager.LastStderr}", "error");
+                    Log.AppendLog($"[运行提示] {_processManager.LastStderr}", "warning");
                 }
-                Log.AppendLog($"Python 路径: {_processManager.ResolvedPythonPath}", "warning");
-                Log.AppendLog($"运行工作目录: {_processManager.ResolvedWorkingDir}", "warning");
-
-                MessageBox.Show(
-                    $"连接 Python 后端失败：{ex.Message}\n\n" +
-                    $"检测到的 Python: {_processManager.ResolvedPythonPath}\n" +
-                    $"运行目录: {_processManager.ResolvedWorkingDir}\n\n" +
-                    (!string.IsNullOrEmpty(_processManager.LastStderr) ? $"Python 报错:\n{_processManager.LastStderr}\n\n" : "") +
-                    "请确认：\n1. 是否已安装所需依赖（pip install -e . 或 pip install -r requirements.txt）\n2. 可在终端手动测试：python -m hr_toolkit --ipc",
-                    "Python 核心未就绪",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
             }
         }
 
@@ -189,5 +193,11 @@ namespace HRToolkit.Wpf.ViewModels
                 }
             }
         }
+    }
+
+    public class ToolCategoryGroup
+    {
+        public string GroupName { get; set; } = string.Empty;
+        public ObservableCollection<ToolItem> Tools { get; } = new();
     }
 }

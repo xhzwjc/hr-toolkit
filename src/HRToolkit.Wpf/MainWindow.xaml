@@ -87,34 +87,45 @@
             <Border Grid.Column="0" Background="White" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="12,16">
-                        <TextBlock Text="业务工具导航" FontSize="11" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" Margin="8,0,0,8" />
-                        <ItemsControl ItemsSource="{Binding AllTools}">
+                        <ItemsControl ItemsSource="{Binding GroupedTools}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Button Margin="0,2" Padding="10,8" HorizontalContentAlignment="Left" Cursor="Hand"
-                                            Command="{Binding DataContext.SelectToolCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                            CommandParameter="{Binding}">
-                                        <Button.Style>
-                                            <Style TargetType="Button">
-                                                <Setter Property="Background" Value="Transparent" />
-                                                <Setter Property="BorderThickness" Value="0" />
-                                                <Setter Property="Template">
-                                                    <Setter.Value>
-                                                        <ControlTemplate TargetType="Button">
-                                                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
-                                                                <TextBlock Text="{Binding Name}" FontSize="13" Foreground="{StaticResource TextMainBrush}" />
-                                                            </Border>
-                                                            <ControlTemplate.Triggers>
-                                                                <Trigger Property="IsMouseOver" Value="True">
-                                                                    <Setter TargetName="Bd" Property="Background" Value="#F1F5F9" />
-                                                                </Trigger>
-                                                            </ControlTemplate.Triggers>
-                                                        </ControlTemplate>
-                                                    </Setter.Value>
-                                                </Setter>
-                                            </Style>
-                                        </Button.Style>
-                                    </Button>
+                                    <StackPanel Margin="0,0,0,14">
+                                        <!-- Category Header -->
+                                        <TextBlock Text="{Binding GroupName}" FontSize="11" FontWeight="Bold" Foreground="{StaticResource TextMutedBrush}" Margin="8,0,0,6" />
+
+                                        <!-- Tool Items -->
+                                        <ItemsControl ItemsSource="{Binding Tools}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Button Margin="0,1" Padding="10,8" HorizontalContentAlignment="Left" Cursor="Hand"
+                                                            Command="{Binding DataContext.SelectToolCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                            CommandParameter="{Binding}">
+                                                        <Button.Style>
+                                                            <Style TargetType="Button">
+                                                                <Setter Property="Background" Value="Transparent" />
+                                                                <Setter Property="BorderThickness" Value="0" />
+                                                                <Setter Property="Template">
+                                                                    <Setter.Value>
+                                                                        <ControlTemplate TargetType="Button">
+                                                                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                                                                <TextBlock Text="{Binding Name}" FontSize="13" Foreground="{StaticResource TextMainBrush}" />
+                                                                            </Border>
+                                                                            <ControlTemplate.Triggers>
+                                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                                    <Setter TargetName="Bd" Property="Background" Value="#F1F5F9" />
+                                                                                </Trigger>
+                                                                            </ControlTemplate.Triggers>
+                                                                        </ControlTemplate>
+                                                                    </Setter.Value>
+                                                                </Setter>
+                                                            </Style>
+                                                        </Button.Style>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
