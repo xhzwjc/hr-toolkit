@@ -536,21 +536,27 @@ class QtControllerTests(unittest.TestCase):
             opened = []
             controller._projectOpened.connect(lambda gen, store, path: opened.append((path, store)))
 
-            controller.createProject("测试项目", str(parent))
-            for _ in range(50):
-                if opened:
-                    break
-                time.sleep(0.05)
-                QCoreApplication.processEvents()
+            try:
+                controller.createProject("测试项目", str(parent))
+                for _ in range(50):
+                    if opened:
+                        break
+                    time.sleep(0.05)
+                    QCoreApplication.processEvents()
 
-            self.assertEqual(len(opened), 1)
-            target_path, store = opened[0]
-            self.assertEqual(Path(target_path), parent / "测试项目")
-            self.assertEqual(controller.projectName, "测试项目")
-            self.assertTrue(controller.projectWritable)
-            self.assertEqual(Path(controller.projectPath), parent / "测试项目")
-
-        controller.close()
+                self.assertEqual(len(opened), 1)
+                target_path, store = opened[0]
+                self.assertEqual(Path(target_path), parent / "测试项目")
+                self.assertEqual(controller.projectName, "测试项目")
+                self.assertTrue(controller.projectWritable)
+                self.assertEqual(Path(controller.projectPath), parent / "测试项目")
+            finally:
+                # Windows cannot remove project-write.lock while it is open.
+                controller.close()
+            self.assertIsNone(store._writer_lock)
+            from hr_toolkit.project_store import ProjectStore
+            with ProjectStore.open(parent / "测试项目", read_only_fallback=False) as reopened:
+                self.assertTrue(reopened.writable)
 
     def test_controller_workspace_import_finalizing_error_recovers_store_and_failed_recovery_blocks(self) -> None:
         controller = self.controller()

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -703,6 +704,34 @@ class ProjectStoreTests(unittest.TestCase):
             self.assertTrue(third.writable)
         finally:
             third.close()
+
+    def test_project_writer_lock_can_transfer_from_worker_to_ui(self) -> None:
+        self.store.close()
+        stores = []
+        errors = []
+
+        def open_in_worker():
+            try:
+                stores.append(ProjectStore.open(self.project_root, read_only_fallback=False))
+            except Exception as exc:
+                errors.append(exc)
+
+        for _ in range(3):
+            worker = threading.Thread(target=open_in_worker)
+            worker.start()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            acquired = stores.pop()
+            try:
+                with ProjectStore.open(self.project_root) as competing:
+                    self.assertFalse(competing.writable)
+            finally:
+                acquired.close()
+            self.assertIsNone(acquired._writer_lock)
+            acquired.close()  # Closing twice must not release another session.
+            with ProjectStore.open(self.project_root, read_only_fallback=False) as reopened:
+                self.assertTrue(reopened.writable)
 
     def test_second_process_also_falls_back_to_read_only(self) -> None:
         command = [

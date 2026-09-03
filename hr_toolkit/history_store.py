@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_files_display_name ON files(display_name);
 # Keep a lightweight process-local lock in front of the OS lock.  The weak
 # registry avoids retaining one Python lock forever for every historical task.
 _PROCESS_FILE_LOCKS_GUARD = threading.Lock()
-_PROCESS_FILE_LOCKS: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
+_PROCESS_FILE_LOCKS: weakref.WeakValueDictionary[tuple[str, bool], Any] = weakref.WeakValueDictionary()
 _WINDOWS_FILE_LOCK_RETRY_SECONDS = 0.05
 _WINDOWS_FILE_LOCK_CONTENTION_ERRNOS = frozenset(
     value
@@ -2039,12 +2039,15 @@ def _startup_lock_path(root: Path) -> Path:
     return root.parent / f".hrtoolkit-startup-{digest}.lock"
 
 
-def _process_file_lock(path: Path) -> threading.RLock:
-    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+def _process_file_lock(path: Path, *, transferable: bool = False):
+    key = (os.path.normcase(os.path.abspath(os.fspath(path))), transferable)
     with _PROCESS_FILE_LOCKS_GUARD:
         lock = _PROCESS_FILE_LOCKS.get(key)
         if lock is None:
-            lock = threading.RLock()
+            # A project session is opened in a worker and closed by the UI.
+            # Unlike RLock, Lock can be released by the receiving thread.
+            # Keep the existing thread-owned behavior for history operations.
+            lock = threading.Lock() if transferable else threading.RLock()
             _PROCESS_FILE_LOCKS[key] = lock
         return lock
 
@@ -2075,6 +2078,7 @@ def _exclusive_file_lock(
     *,
     blocking: bool = True,
     private_parent: bool = True,
+    transferable: bool = False,
 ) -> Iterator[None]:
     if private_parent:
         _mkdir_private(path.parent)
@@ -2087,7 +2091,7 @@ def _exclusive_file_lock(
             _make_private(path.parent, directory=True)
     if _is_link_like(path):
         raise HistoryStoreError("历史记录锁文件不安全。")
-    process_lock = _process_file_lock(path)
+    process_lock = _process_file_lock(path, transferable=transferable)
     if not process_lock.acquire(blocking=blocking):
         raise BlockingIOError(f"文件锁正在被当前进程占用：{path}")
     flags = os.O_RDWR | os.O_CREAT

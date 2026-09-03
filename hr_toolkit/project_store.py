@@ -379,7 +379,7 @@ class ProjectStore:
             read_only_reason = "该项目由更高版本 HRToolkit 创建，当前以只读方式打开。"
         elif wants_write:
             lock_path = metadata_dir / PROJECT_WRITE_LOCK
-            writer_lock = _exclusive_file_lock(lock_path, blocking=False)
+            writer_lock = _exclusive_file_lock(lock_path, blocking=False, transferable=True)
             try:
                 writer_lock.__enter__()
             except BlockingIOError as exc:
