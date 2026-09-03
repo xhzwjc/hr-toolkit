@@ -5,17 +5,21 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
 from hr_toolkit import __version__
+from hr_toolkit import app_update
 from hr_toolkit.runtime_checks import (
     CHECK_OUTPUT_ENV,
     ocr_runtime_smoke_test,
     pdf_runtime_smoke_test,
     run_headless_command,
     smoke_test,
+    update_smoke_test,
 )
 from hr_toolkit.update_runner import main as update_runner_main
 
@@ -130,6 +134,79 @@ class RuntimeChecksTest(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
                 f"HRToolkit {__version__} update-smoke-test OK; latest=0.2.1\n",
             )
+
+    def test_update_smoke_is_offline_and_selects_each_native_platform(self) -> None:
+        cases = (
+            ("windows-x64-modern", "AMD64", "x64-setup.exe", "auto"),
+            ("windows-x64-win7", "AMD64", "win7_x64-setup.exe", "auto"),
+            ("macos", "arm64", "arm64.dmg", "manual"),
+            ("macos", "x86_64", "x64.dmg", "manual"),
+            ("linux", "x86_64", "linux.zip", "auto"),
+        )
+        real_open = app_update._open_url
+        real_check = app_update.check_for_update
+        for platform, machine, suffix, mode in cases:
+            opened_paths = []
+            updates = []
+
+            def local_only(request, **kwargs):
+                parsed = urllib.parse.urlparse(request.full_url)
+                self.assertEqual(parsed.scheme, "file", "smoke test must not access the network")
+                opened_paths.append(Path(urllib.request.url2pathname(parsed.path)))
+                return real_open(request, **kwargs)
+
+            def capture_update(*args, **kwargs):
+                result = real_check(*args, **kwargs)
+                updates.append(result)
+                return result
+
+            with self.subTest(platform=platform, machine=machine):
+                with patch("hr_toolkit.app_update.platform_key", return_value=platform), patch(
+                    "hr_toolkit.app_update.platform_module.machine", return_value=machine
+                ), patch("hr_toolkit.app_update._open_url", side_effect=local_only), patch(
+                    "hr_toolkit.app_update.check_for_update", side_effect=capture_update
+                ), patch(
+                    "hr_toolkit.app_update.update_manifest_urls",
+                    side_effect=AssertionError("must not read user or live release configuration"),
+                ), patch.dict(os.environ, {"HR_TOOLKIT_UPDATE_URL": "https://invalid.example/latest.json"}):
+                    self.assertEqual(update_smoke_test(), __version__)
+                self.assertEqual(len(updates), 2)
+                self.assertIsNone(updates[1], "installed version must not offer the same version again")
+                self.assertEqual(
+                    updates[0].file_url,
+                    f"https://gitee.com/{app_update.GITEE_REPOSITORY}/releases/download/"
+                    f"v{__version__}/HRToolkit_{__version__}_{suffix}",
+                )
+                self.assertEqual(updates[0].update_mode, mode)
+                self.assertEqual(len(opened_paths), 2)
+                self.assertTrue(all(not path.parent.exists() for path in opened_paths))
+
+    def test_update_smoke_still_fails_on_broken_metadata(self) -> None:
+        with patch("hr_toolkit.runtime_checks.json.dumps", return_value="{invalid json"):
+            with self.assertRaisesRegex(app_update.UpdateError, "JSON"):
+                update_smoke_test()
+
+    def test_update_smoke_still_fails_if_no_update_is_parsed(self) -> None:
+        with patch("hr_toolkit.app_update.check_for_update", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "正确读取"):
+                update_smoke_test()
+
+    def test_update_smoke_detects_duplicate_version_regression(self) -> None:
+        with patch("hr_toolkit.app_update.is_newer_version", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "重复升级"):
+                update_smoke_test()
+
+    def test_update_smoke_command_reports_real_parse_failure_to_result_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "update-smoke.txt"
+            with patch.dict(os.environ, {CHECK_OUTPUT_ENV: str(output)}), patch(
+                "hr_toolkit.runtime_checks.json.dumps", return_value="{invalid json"
+            ):
+                self.assertEqual(run_headless_command(["--update-smoke-test"]), 1)
+            result = output.read_text(encoding="utf-8")
+            self.assertIn("update-smoke-test FAILED", result)
+            self.assertIn("Traceback", result)
+            self.assertIn("JSON", result)
 
     def test_updater_smoke_command_is_headless_and_machine_verifiable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -307,6 +307,26 @@ def verify_info_plist(app_path: Path, version: str) -> None:
             )
 
 
+def _smoke_failure_details(result: subprocess.CompletedProcess, output_path: Path) -> str:
+    """Keep windowed-app diagnostics before the temporary result is removed."""
+    details = []
+    # Bound log reads even if a failed process writes an unexpectedly large file.
+    for label, path in (("result", output_path), ("native", Path(str(output_path) + ".native.log"))):
+        try:
+            with path.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 8192))
+                content = stream.read(8192).decode("utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if content:
+            details.append(f"{label}: {content}")
+    for label, content in (("stdout", result.stdout), ("stderr", result.stderr)):
+        if content and content.strip():
+            details.append(f"{label}: {content.strip()[-8192:]}")
+    return "\n".join(details) or "无运行检查诊断输出"
+
+
 def run_headless_smoke_tests(app_path: Path, version: str) -> None:
     launcher = app_path / "Contents" / "MacOS" / "HRToolkit"
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
@@ -331,12 +351,13 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
         )
         if version_result.returncode != 0:
             raise MacBundleVerificationError(
-                f"打包程序 --version 失败（{version_result.returncode}）：{version_result.stderr.strip()}"
+                f"打包程序 --version 失败（{version_result.returncode}）：\n"
+                + _smoke_failure_details(version_result, version_output)
             )
         if not version_output.is_file() or version_output.read_text(encoding="utf-8").strip() != version:
-            fallback = version_result.stdout.strip()
             raise MacBundleVerificationError(
-                f"打包程序 --version 结果不一致：文件={version_output!s}，stdout={fallback!r}"
+                "打包程序 --version 结果不一致：\n"
+                + _smoke_failure_details(version_result, version_output)
             )
 
         smoke_output = Path(temporary) / "smoke.txt"
@@ -352,13 +373,14 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
         )
         if smoke_result.returncode != 0:
             raise MacBundleVerificationError(
-                f"打包程序 --smoke-test 失败（{smoke_result.returncode}）：{smoke_result.stderr.strip()}"
+                f"打包程序 --smoke-test 失败（{smoke_result.returncode}）：\n"
+                + _smoke_failure_details(smoke_result, smoke_output)
             )
         expected_smoke = f"HRToolkit {version} smoke-test OK"
         if not smoke_output.is_file() or smoke_output.read_text(encoding="utf-8").strip() != expected_smoke:
-            fallback = smoke_result.stdout.strip()
             raise MacBundleVerificationError(
-                f"打包程序 --smoke-test 结果不一致：文件={smoke_output!s}，stdout={fallback!r}"
+                "打包程序 --smoke-test 结果不一致：\n"
+                + _smoke_failure_details(smoke_result, smoke_output)
             )
 
         update_smoke_output = Path(temporary) / "update-smoke.txt"
@@ -375,17 +397,17 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
         if update_smoke_result.returncode != 0:
             raise MacBundleVerificationError(
                 "打包程序 --update-smoke-test 失败"
-                f"（{update_smoke_result.returncode}）：{update_smoke_result.stderr.strip()}"
+                f"（{update_smoke_result.returncode}）：\n"
+                + _smoke_failure_details(update_smoke_result, update_smoke_output)
             )
         expected_update_prefix = f"HRToolkit {version} update-smoke-test OK; latest="
         if (
             not update_smoke_output.is_file()
             or not update_smoke_output.read_text(encoding="utf-8").strip().startswith(expected_update_prefix)
         ):
-            fallback = update_smoke_result.stdout.strip()
             raise MacBundleVerificationError(
-                "打包程序 --update-smoke-test 结果不一致："
-                f"文件={update_smoke_output!s}，stdout={fallback!r}"
+                "打包程序 --update-smoke-test 结果不一致：\n"
+                + _smoke_failure_details(update_smoke_result, update_smoke_output)
             )
 
         qt_smoke_output = Path(temporary) / "qt-smoke.txt"
@@ -402,13 +424,17 @@ def run_headless_smoke_tests(app_path: Path, version: str) -> None:
         if qt_smoke_result.returncode != 0:
             raise MacBundleVerificationError(
                 "打包程序 Qt Quick smoke-test 失败"
-                f"（{qt_smoke_result.returncode}）：{qt_smoke_result.stderr.strip()}"
+                f"（{qt_smoke_result.returncode}）：\n"
+                + _smoke_failure_details(qt_smoke_result, qt_smoke_output)
             )
         if (
             not qt_smoke_output.is_file()
             or qt_smoke_output.read_text(encoding="utf-8").strip() != "HRToolkit Qt smoke-test OK"
         ):
-            raise MacBundleVerificationError("打包程序 Qt Quick smoke-test 输出不正确")
+            raise MacBundleVerificationError(
+                "打包程序 Qt Quick smoke-test 输出不正确：\n"
+                + _smoke_failure_details(qt_smoke_result, qt_smoke_output)
+            )
 
 
 def verify_app_bundle(

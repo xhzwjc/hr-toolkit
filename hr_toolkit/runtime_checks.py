@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import os
 import struct
 import sys
@@ -247,13 +249,52 @@ def _smoke_test_archive_runtimes(root: Path) -> None:
 
 
 def update_smoke_test() -> str:
-    """Verify secure Gitee-only metadata discovery for domestic clients."""
-    from hr_toolkit.app_update import check_for_update
+    """Exercise the packaged updater offline, independently of release uploads.
 
-    update = check_for_update("0.0.0")
-    if update is None or not update.version:
-        raise RuntimeError("更新配置缺少当前平台版本。")
-    return update.version
+    This is a build check, not a probe of the published release. The operator
+    may not have uploaded this platform's installer to Gitee yet. An explicit
+    temporary manifest also isolates the check from user update_url settings.
+    Normal application update checks still use the real Gitee release API.
+    """
+    from hr_toolkit.app_update import GITEE_REPOSITORY, check_for_update
+
+    checksum = hashlib.sha256(b"HRToolkit update runtime smoke").hexdigest()
+    packages = {
+        "windows-x64-modern": ("x64-setup.exe", "auto"),
+        "windows-x64-win7": ("win7_x64-setup.exe", "auto"),
+        "macos-arm64": ("arm64.dmg", "manual"),
+        "macos-x64": ("x64.dmg", "manual"),
+        # Allows the source-level regression suite to run on Linux too.
+        "linux": ("linux.zip", "auto"),
+    }
+    base_url = f"https://gitee.com/{GITEE_REPOSITORY}/releases/download/v{__version__}"
+    platforms = {
+        key: {
+            "file_url": f"{base_url}/HRToolkit_{__version__}_{filename}",
+            "sha256": checksum,
+            "update_mode": mode,
+        }
+        for key, (filename, mode) in packages.items()
+    }
+    with tempfile.TemporaryDirectory(prefix="hr_toolkit_update_smoke_") as temporary:
+        manifest_path = Path(temporary).resolve() / "latest.json"
+        manifest_path.write_text(
+            json.dumps({"version": __version__, "platforms": platforms}),
+            encoding="utf-8",
+        )
+        manifest_url = manifest_path.as_uri()
+        update = check_for_update("0.0.0", manifest_url=manifest_url)
+        if update is None or update.version != __version__ or update.sha256 != checksum:
+            raise RuntimeError("更新运行检查未能正确读取测试配置。")
+        if update.download_urls != (update.file_url,) or not any(
+            update.file_url == payload["file_url"]
+            and update.update_mode == payload["update_mode"]
+            for payload in platforms.values()
+        ):
+            raise RuntimeError("更新运行检查的平台安装包解析异常。")
+        if check_for_update(__version__, manifest_url=manifest_url) is not None:
+            raise RuntimeError("更新运行检查错误地提示重复升级。")
+        return update.version
 
 
 def _emit(text: str) -> None:
