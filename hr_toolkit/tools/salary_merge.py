@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 
 
@@ -10,12 +11,13 @@ import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -36,7 +38,13 @@ HEADER_NAME = "姓名"
 HEADER_ID_CARD = "身份证号码"
 HEADER_ID_CARD_ALIASES = (HEADER_ID_CARD, "身份证号")
 HEADER_AMOUNT = "应发小计"
+HEADER_AMOUNT_ALIASES = (HEADER_AMOUNT, "本月应发工资")
 AMOUNT_NUMBER_FORMAT = '#,##0.00;[Red]-#,##0.00;0'
+_MONTHLY_AMOUNT_FORMULA = re.compile(
+    r"=ROUND\(SUM\(([A-Z]{1,3}\d+):([A-Z]{1,3}\d+)\)"
+    r"-SUM\(([A-Z]{1,3}\d+):([A-Z]{1,3}\d+)\),2\)"
+)
+_SALARY_CELL_REF = re.compile(r"([A-Z]{1,3})(\d+)")
 
 
 @dataclass
@@ -154,7 +162,12 @@ def merge_monthly_salary(
             source_files.append(str(file_path))
 
         if not records:
-            raise ValueError("未识别到可合并的月度工资记录，请确认路径中包含需求4格式的月度工资表")
+            message = "未识别到可合并的月度工资记录，请确认路径中包含需求4格式的月度工资表"
+            if warnings:
+                message += "\n" + "\n".join(warnings[:3])
+                if len(warnings) > 3:
+                    message += f"\n另有 {len(warnings) - 3} 条提示"
+            raise ValueError(message)
 
         existing_employees: list[MergedEmployee] | None = None
         existing_months: list[str] | None = None
@@ -309,7 +322,7 @@ def _detect_source_layout(workbook) -> SalarySourceLayout:
             data_start_row=_find_data_start_row(ws, header_row),
             name_col=headers[HEADER_NAME],
             id_card_col=_first_header_col(headers, HEADER_ID_CARD_ALIASES, sheet_label="明细表"),
-            amount_col=headers[HEADER_AMOUNT],
+            amount_col=_first_header_col(headers, HEADER_AMOUNT_ALIASES, sheet_label="明细表"),
         )
     except KeyError as exc:
         raise ValueError(f"{workbook.path if hasattr(workbook, 'path') else ''}明细表缺少必要字段：{exc.args[0]}") from exc
@@ -423,8 +436,107 @@ def _amount_value(
 
     formula = formula_ws.cell(row_index, layout.amount_col).value
     if isinstance(formula, str) and formula.startswith("="):
+        amount_header = _cell_text(formula_ws, layout.header_row, layout.amount_col)
+        if amount_header != HEADER_AMOUNT:
+            return _monthly_amount_from_formula(value_ws, formula_ws, row_index, layout, formula)
         return _fallback_amount_from_row(value_ws, row_index)
     return None
+
+
+def _monthly_amount_from_formula(
+    value_ws: Worksheet,
+    formula_ws: Worksheet,
+    row_index: int,
+    layout: SalarySourceLayout,
+    formula: str,
+) -> float:
+    """Read the new template's actual ranges when splitting removed Excel caches.
+
+    Deliberately limited to ROUND(SUM(row range)-SUM(row range),2), with
+    basic arithmetic in its input cells. Never guess columns or execute Excel
+    expressions; other uncached formulas require recalculation in Excel/WPS.
+    The legacy template keeps its existing fallback unchanged.
+    """
+    values: dict[int, Decimal] = {}
+    visiting: set[int] = set()
+
+    def column(ref: str) -> int:
+        match = _SALARY_CELL_REF.fullmatch(ref)
+        if match is None or int(match[2]) != row_index:
+            raise ValueError("not a same-row reference")
+        col = column_index_from_string(match[1])
+        if not 1 <= col < layout.amount_col:
+            raise ValueError("reference outside amount inputs")
+        return col
+
+    def arithmetic(node: ast.AST) -> Decimal:
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return Decimal(str(node.value))
+        if isinstance(node, ast.Name):
+            return cell_value(column(node.id))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            number = arithmetic(node.operand)
+            return number if isinstance(node.op, ast.UAdd) else -number
+        if isinstance(node, ast.BinOp):
+            left, right = arithmetic(node.left), arithmetic(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+        raise ValueError("unsupported arithmetic")
+
+    def cell_value(col: int) -> Decimal:
+        if col in values:
+            return values[col]
+        if col in visiting or len(visiting) >= 32:
+            raise ValueError("cyclic or excessive formula dependencies")
+        visiting.add(col)
+        cached = value_ws.cell(row_index, col).value
+        parsed = _number(cached)
+        source = formula_ws.cell(row_index, col).value
+        if parsed is not None:
+            result = Decimal(str(parsed))
+        elif isinstance(source, str) and source.startswith("="):
+            if len(source) > 512:
+                raise ValueError("excessive formula length")
+            tree = ast.parse(source[1:].replace("$", "").strip().upper(), mode="eval")
+            if sum(1 for _ in ast.walk(tree)) > 64:
+                raise ValueError("excessive formula complexity")
+            result = arithmetic(tree.body)
+        elif source is None or source == "":
+            result = Decimal(0)
+        else:
+            raise ValueError("non-numeric formula input")
+        if not result.is_finite():
+            raise ValueError("non-finite formula input")
+        values[col] = result
+        visiting.remove(col)
+        return result
+
+    def range_sum(start: str, end: str) -> Decimal:
+        first, last = column(start), column(end)
+        if first > last:
+            raise ValueError("reversed amount range")
+        return sum((cell_value(col) for col in range(first, last + 1)), Decimal(0))
+
+    try:
+        if len(formula) > 512:
+            raise ValueError("excessive amount formula length")
+        match = _MONTHLY_AMOUNT_FORMULA.fullmatch(re.sub(r"\s+", "", formula).replace("$", "").upper())
+        if match is None:
+            raise ValueError("unsupported amount formula")
+        amount = range_sum(match[1], match[2]) - range_sum(match[3], match[4])
+        return float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except (ValueError, SyntaxError, ArithmeticError, RecursionError) as exc:
+        coordinate = f"{get_column_letter(layout.amount_col)}{row_index}"
+        raise ValueError(
+            f"{layout.detail_sheet_name}!{coordinate} 应发工资公式没有可用缓存且无法安全计算，"
+            "请用 Excel/WPS 重新计算并保存后再合并"
+        ) from exc
 
 
 def _fallback_amount_from_row(ws: Worksheet, row_index: int) -> float:
