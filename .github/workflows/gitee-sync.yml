@@ -25,6 +25,11 @@ jobs:
           fetch-depth: 0
           ref: main
 
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
       - name: Require Gitee credential
         shell: bash
         env:
@@ -56,11 +61,10 @@ jobs:
           export GIT_ASKPASS="${ASKPASS_PATH}"
 
           git remote add gitee "https://gitee.com/${GITEE_REPOSITORY}.git"
-          git fetch gitee refs/heads/main:refs/remotes/gitee/main
+          python scripts/gitee_git.py fetch gitee refs/heads/main:refs/remotes/gitee/main
           git merge-base --is-ancestor refs/remotes/gitee/main HEAD
 
-          git -c http.postBuffer=1073741824 -c http.version=HTTP/1.1 \
-            push gitee HEAD:refs/heads/main
+          python scripts/gitee_git.py push gitee HEAD:refs/heads/main
 
       - name: Verify Gitee main matches GitHub main
         shell: bash
@@ -73,7 +77,7 @@ jobs:
           export GIT_ASKPASS="${ASKPASS_PATH}"
 
           LOCAL_MAIN="$(git rev-parse HEAD)"
-          REMOTE_MAIN="$(git ls-remote gitee refs/heads/main | awk '{print $1}')"
+          REMOTE_MAIN="$(python scripts/gitee_git.py ls-remote gitee refs/heads/main | awk '{print $1}')"
           if [[ -z "${REMOTE_MAIN}" || "${REMOTE_MAIN}" != "${LOCAL_MAIN}" ]]; then
             echo "Gitee main verification failed" >&2
             exit 1

@@ -534,18 +534,17 @@ jobs:
           export GIT_ASKPASS="${ASKPASS_PATH}"
 
           git remote add gitee "https://gitee.com/${GITEE_REPOSITORY}.git"
-          git fetch gitee refs/heads/main:refs/remotes/gitee/main
+          python scripts/gitee_git.py fetch gitee refs/heads/main:refs/remotes/gitee/main
           TAG_COMMIT="$(git rev-parse "${TAG}^{commit}")"
           git merge-base --is-ancestor refs/remotes/gitee/main "${TAG_COMMIT}"
 
-          REMOTE_TAG="$(git ls-remote gitee "refs/tags/${TAG}" | awk '{print $1}')"
+          REMOTE_TAG="$(python scripts/gitee_git.py ls-remote gitee "refs/tags/${TAG}" | awk '{print $1}')"
           LOCAL_TAG="$(git rev-parse "refs/tags/${TAG}")"
           if [[ -n "${REMOTE_TAG}" && "${REMOTE_TAG}" != "${LOCAL_TAG}" ]]; then
             echo "Gitee tag ${TAG} already exists at a different object" >&2
             exit 1
           fi
-          git -c http.postBuffer=1073741824 -c http.version=HTTP/1.1 \
-            push --atomic gitee \
+          python scripts/gitee_git.py push --atomic gitee \
             "${TAG_COMMIT}:refs/heads/main" \
             "refs/tags/${TAG}:refs/tags/${TAG}"
 
