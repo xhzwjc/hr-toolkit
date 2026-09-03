@@ -19,6 +19,7 @@ namespace HRToolkit.Wpf.Services
             ResolvedWorkingDir = ResolveWorkingDirectory();
             ResolvedPythonPath = ResolvePythonExecutable(ResolvedWorkingDir);
 
+            var utf8NoBom = new UTF8Encoding(false);
             var psi = new ProcessStartInfo
             {
                 FileName = ResolvedPythonPath,
@@ -27,9 +28,9 @@ namespace HRToolkit.Wpf.Services
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
-                StandardInputEncoding = Encoding.UTF8,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
+                StandardInputEncoding = utf8NoBom,
+                StandardOutputEncoding = utf8NoBom,
+                StandardErrorEncoding = utf8NoBom,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };

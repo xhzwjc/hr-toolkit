@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -144,6 +145,19 @@ namespace HRToolkit.Wpf.Services
                         {
                             tcs.TrySetResult(default);
                         }
+                    }
+                    return;
+                }
+
+                // 1.1 Global error response without request ID (e.g. parse error)
+                if (root.TryGetProperty("error", out var globalErrProp))
+                {
+                    string errMsg = globalErrProp.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "RPC Error" : "Unknown RPC Error";
+                    OnLogReceived?.Invoke("error", $"Python 核心报错: {errMsg}");
+                    var firstKey = _pendingRequests.Keys.FirstOrDefault();
+                    if (firstKey != 0 && _pendingRequests.TryRemove(firstKey, out var pendingTcs))
+                    {
+                        pendingTcs.TrySetException(new InvalidOperationException(errMsg));
                     }
                     return;
                 }

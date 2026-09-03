@@ -71,7 +71,7 @@ class IpcServer:
         self._write_line(payload)
 
     def _write_line(self, obj: dict[str, Any]) -> None:
-        line = json.dumps(obj, ensure_ascii=False)
+        line = json.dumps(obj, ensure_ascii=True)
         with self._out_lock:
             try:
                 self._out_stream.write(line + "\n")
@@ -417,7 +417,7 @@ class IpcServer:
                 line = stream.readline()
                 if not line:
                     break
-                stripped = line.strip()
+                stripped = line.strip().lstrip("\ufeff")
                 if not stripped:
                     continue
                 message = json.loads(stripped)
@@ -437,6 +437,13 @@ class IpcServer:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(encoding="utf-8-sig", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     server = IpcServer()
     return server.run_loop()
 
