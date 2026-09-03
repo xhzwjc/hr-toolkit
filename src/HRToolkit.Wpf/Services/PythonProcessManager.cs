@@ -22,7 +22,7 @@ namespace HRToolkit.Wpf.Services
             var psi = new ProcessStartInfo
             {
                 FileName = ResolvedPythonPath,
-                Arguments = "-m hr_toolkit --ipc",
+                Arguments = "-u -m hr_toolkit --ipc",
                 WorkingDirectory = ResolvedWorkingDir,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
@@ -36,10 +36,12 @@ namespace HRToolkit.Wpf.Services
 
             psi.EnvironmentVariables["PYTHONUTF8"] = "1";
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            psi.EnvironmentVariables["PYTHONUNBUFFERED"] = "1";
             psi.EnvironmentVariables["PYTHONPATH"] = ResolvedWorkingDir;
 
             _process = new Process { StartInfo = psi };
             _process.Start();
+            _process.StandardInput.AutoFlush = true;
 
             _process.ErrorDataReceived += (s, e) =>
             {

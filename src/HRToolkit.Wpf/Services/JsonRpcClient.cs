@@ -185,7 +185,8 @@ namespace HRToolkit.Wpf.Services
             }
             catch (Exception ex)
             {
-                OnLogReceived?.Invoke("warning", $"解析 IPC 消息失败: {ex.Message}");
+                string preview = jsonLine.Length > 120 ? jsonLine.Substring(0, 120) + "..." : jsonLine;
+                OnLogReceived?.Invoke("warning", $"解析 IPC 消息失败: {ex.Message} (内容: {preview})");
             }
         }
 
