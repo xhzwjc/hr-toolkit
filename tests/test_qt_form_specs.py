@@ -187,6 +187,81 @@ class QtFormSpecTests(unittest.TestCase):
                 support_text="",
             )
 
+    def test_material_collector_invocation_collect_all_and_specific_checkboxes(self) -> None:
+        # 1. collect_all is True: material_types is None, OCR cache disabled if target_text given in person_folder mode
+        inv_all = self.invocation(
+            "material_collector",
+            input_paths=[self.folder],
+            support_text="",
+            values={
+                "target_input": "张三",
+                "collect_all": True,
+                "material_types": ["身份证"],
+                "library_mode": "person_folder",
+            },
+        )
+        self.assertIsNone(inv_all.kwargs["material_types"])
+        self.assertTrue(inv_all.kwargs["collect_all"])
+        self.assertFalse(inv_all.kwargs["use_ocr_cache"])
+        self.assertEqual(inv_all.kwargs["roster_source"], "张三")
+
+        # 2. Specific checkboxes when collect_all is False
+        inv_specific = self.invocation(
+            "material_collector",
+            input_paths=[self.folder],
+            support_text=str(self.file_a),
+            values={
+                "target_input": "",
+                "collect_all": False,
+                "material_types": ["身份证", "户口本"],
+                "library_mode": "person_folder",
+                "use_ocr_cache": True,
+            },
+        )
+        self.assertEqual(inv_specific.kwargs["material_types"], ["身份证", "户口本"])
+        self.assertFalse(inv_specific.kwargs["collect_all"])
+        self.assertTrue(inv_specific.kwargs["use_ocr_cache"])
+        self.assertEqual(inv_specific.kwargs["roster_source"], self.file_a)
+
+        # 3. flat_ocr mode forces use_ocr_cache=True
+        inv_flat = self.invocation(
+            "material_collector",
+            input_paths=[self.folder],
+            support_text="李四",
+            values={
+                "target_input": "李四",
+                "collect_all": True,
+                "library_mode": "flat_ocr",
+                "use_ocr_cache": False,
+            },
+        )
+        self.assertTrue(inv_flat.kwargs["use_ocr_cache"])
+
+        # 4. Validates neither collect_all nor materials
+        with self.assertRaisesRegex(FormValidationError, "请至少选择一种材料"):
+            self.invocation(
+                "material_collector",
+                input_paths=[self.folder],
+                support_text="王五",
+                values={
+                    "target_input": "王五",
+                    "collect_all": False,
+                    "material_types": [],
+                },
+            )
+
+        # 5. Validates missing roster source
+        with self.assertRaisesRegex(FormValidationError, "请输入员工姓名"):
+            self.invocation(
+                "material_collector",
+                input_paths=[self.folder],
+                support_text="",
+                values={
+                    "target_input": "",
+                    "collect_all": True,
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

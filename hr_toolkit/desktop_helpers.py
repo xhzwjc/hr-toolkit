@@ -20,6 +20,17 @@ def default_workspace_project_name(today_value: Optional[date] = None) -> str:
     return f"{current.year}年{current.month}月人事月度工作"
 
 
+def desktop_dir() -> Path:
+    home = Path.home()
+    desktop = home / "Desktop"
+    if desktop.is_dir():
+        return desktop
+    localized = home / "桌面"
+    if localized.is_dir():
+        return localized
+    return home
+
+
 def workspace_project_name_error(value: str) -> Optional[str]:
     try:
         module = importlib.import_module("hr_toolkit.project_store")
@@ -147,6 +158,7 @@ def install_crash_logging() -> None:
 
 __all__ = [
     "default_workspace_project_name",
+    "desktop_dir",
     "workspace_project_name_error",
     "workspace_project_creation_target",
     "workspace_project_create_error_message",

@@ -25,6 +25,7 @@ from hr_toolkit.app_update import (
 )
 from hr_toolkit.desktop_helpers import (
     default_workspace_project_name,
+    desktop_dir,
     open_path,
     workspace_project_create_error_message,
     workspace_project_creation_target,
@@ -182,6 +183,7 @@ class AppController(QObject):
         self._pending_text_action: str | None = None
         self._pending_text_payload: Any = None
         self._last_result_dir: Path | None = None
+        self._last_selected_dir: Path | None = None
         self._last_run_by_key: dict[tuple[str, str], tuple[str, bool]] = {}
         self._original_switch_interval: float | None = None
         self._closed = False
@@ -839,19 +841,73 @@ class AppController(QObject):
 
         return QApplication.activeWindow()
 
+    def _file_dialog_initial_dir(self, *, role: str = "general") -> str:
+        if role == "new_project":
+            try:
+                parent = Path(self.defaultProjectParent).expanduser().absolute()
+                if parent.is_dir():
+                    return str(parent)
+            except Exception:
+                pass
+
+        if self._last_selected_dir is not None:
+            try:
+                cand = Path(self._last_selected_dir).expanduser().absolute()
+                if cand.is_dir():
+                    return str(cand)
+            except Exception:
+                pass
+        if self._project_path is not None:
+            try:
+                cand = Path(self._project_path).expanduser().absolute()
+                if cand.is_dir():
+                    return str(cand)
+            except Exception:
+                pass
+        try:
+            fallback = desktop_dir() or Path.home()
+            if fallback and Path(fallback).is_dir():
+                return str(Path(fallback).expanduser().absolute())
+        except Exception:
+            pass
+        return str(Path.home())
+
+    def _remember_file_dialog_path(
+        self, selected: str | Path | list[str | Path] | tuple[str | Path, ...] | None
+    ) -> None:
+        if not selected:
+            return
+        item = selected[0] if isinstance(selected, (list, tuple)) else selected
+        if not item:
+            return
+        try:
+            path = Path(item).expanduser().absolute()
+            folder = path if path.is_dir() else path.parent
+            if folder.is_dir():
+                self._last_selected_dir = folder
+                self._save_workspace_preferences()
+        except Exception:
+            pass
+
     @Slot()
     def chooseInputFiles(self) -> None:
         if self._busy or not self.inputAllowsFiles:
             return
         parent = self._dialog_parent()
         file_filter = "Excel 或压缩包 (*.xlsx *.xls *.zip *.rar *.7z *.tar *.gz *.tgz);;所有文件 (*)"
+        initial_dir = self._file_dialog_initial_dir()
         if self._spec.input_mode == "excel_single":
-            filename, _selected = QFileDialog.getOpenFileName(parent, self._spec.input_drop_title, "", "Excel 工作簿 (*.xlsx *.xls);;所有文件 (*)")
+            filename, _selected = QFileDialog.getOpenFileName(
+                parent, self._spec.input_drop_title, initial_dir, "Excel 工作簿 (*.xlsx *.xls);;所有文件 (*)"
+            )
             paths = [Path(filename)] if filename else []
         else:
-            filenames, _selected = QFileDialog.getOpenFileNames(parent, self._spec.input_drop_title, "", file_filter)
+            filenames, _selected = QFileDialog.getOpenFileNames(
+                parent, self._spec.input_drop_title, initial_dir, file_filter
+            )
             paths = [Path(filename) for filename in filenames]
         if paths:
+            self._remember_file_dialog_path(paths)
             self._set_inputs(paths, replace=self._spec.tool_id == "data_statistics" or not self.inputAllowsMultiple)
 
     @Slot()
@@ -859,9 +915,10 @@ class AppController(QObject):
         if self._busy or not self.inputAllowsFolder:
             return
         selected = QFileDialog.getExistingDirectory(
-            self._dialog_parent(), self._spec.input_drop_title, ""
+            self._dialog_parent(), self._spec.input_drop_title, self._file_dialog_initial_dir()
         )
         if selected:
+            self._remember_file_dialog_path(selected)
             self._set_inputs(
                 [Path(selected)],
                 replace=self._spec.tool_id == "data_statistics" or not self.inputAllowsMultiple,
@@ -915,9 +972,10 @@ class AppController(QObject):
         if self._spec.support_mode == "excel_archive_or_folder":
             file_filter = "Excel 或压缩包 (*.xlsx *.xls *.zip *.rar *.7z *.tar *.gz *.tgz);;所有文件 (*)"
         filename, _selected = QFileDialog.getOpenFileName(
-            self._dialog_parent(), self._spec.support_label, "", file_filter
+            self._dialog_parent(), self._spec.support_label, self._file_dialog_initial_dir(), file_filter
         )
         if filename:
+            self._remember_file_dialog_path(filename)
             self._support_states[self._state_key()] = filename
             self.supportChanged.emit()
 
@@ -926,9 +984,10 @@ class AppController(QObject):
         if self._busy or not self.supportAllowsFolder:
             return
         selected = QFileDialog.getExistingDirectory(
-            self._dialog_parent(), self._spec.support_label, ""
+            self._dialog_parent(), self._spec.support_label, self._file_dialog_initial_dir()
         )
         if selected:
+            self._remember_file_dialog_path(selected)
             self._support_states[self._state_key()] = selected
             self.supportChanged.emit()
 
@@ -979,9 +1038,10 @@ class AppController(QObject):
         if self._busy or self._workspace_busy or self._project_opening:
             return
         selected = QFileDialog.getExistingDirectory(
-            self._dialog_parent(), "打开工作项目", self.defaultProjectParent
+            self._dialog_parent(), "打开工作项目", self._file_dialog_initial_dir()
         )
         if selected:
+            self._remember_file_dialog_path(selected)
             self.openProject(selected)
 
     @Slot(str)
@@ -1061,6 +1121,14 @@ class AppController(QObject):
             if candidate.is_dir() and candidate not in recent:
                 recent.append(candidate)
         self._recent_projects = recent[:8]
+        raw_last_dir = state.get("last_selected_dir")
+        if raw_last_dir:
+            try:
+                candidate = Path(str(raw_last_dir)).expanduser().absolute()
+                if candidate.is_dir():
+                    self._last_selected_dir = candidate
+            except Exception:
+                pass
         self._material_preferences = MaterialPreferences.from_payload(
             state.get("material_preferences")
         )
@@ -1103,6 +1171,7 @@ class AppController(QObject):
                 "current_project": None if self._project_path is None else str(self._project_path),
                 "recent_projects": [str(item) for item in self._recent_projects[:8]],
                 "material_preferences": self._material_preferences.to_payload(),
+                "last_selected_dir": str(self._last_selected_dir) if self._last_selected_dir is not None else None,
             }
         )
         try:
@@ -1394,9 +1463,10 @@ class AppController(QObject):
         if not self.projectWritable or self._busy or self._workspace_busy:
             return
         names, _selected = QFileDialog.getOpenFileNames(
-            self._dialog_parent(), "选择要导入项目的文件", "", "所有文件 (*)"
+            self._dialog_parent(), "选择要导入项目的文件", self._file_dialog_initial_dir(), "所有文件 (*)"
         )
         if names:
+            self._remember_file_dialog_path(names)
             self._start_workspace_import([Path(name) for name in names])
 
     @Slot()
@@ -1404,9 +1474,10 @@ class AppController(QObject):
         if not self.projectWritable or self._busy or self._workspace_busy:
             return
         selected = QFileDialog.getExistingDirectory(
-            self._dialog_parent(), "选择要导入项目的文件夹", ""
+            self._dialog_parent(), "选择要导入项目的文件夹", self._file_dialog_initial_dir()
         )
         if selected:
+            self._remember_file_dialog_path(selected)
             self._start_workspace_import([Path(selected)])
 
     def _workspace_import_target(self) -> tuple[Path, tuple[str, str] | None] | None:

@@ -30,6 +30,12 @@ def _copy_probe(
     return {"output_file": str(output), "value": Path(input_path).read_text(encoding="utf-8")}
 
 
+def _fake_folder_rename(root_dir, *, mode, cancelled=None, progress_callback=None):
+    target = Path(root_dir) / "张三-已核对"
+    (Path(root_dir) / "张三").rename(target)
+    return {"count": 1, "output_dir": str(root_dir)}
+
+
 class ProjectRunCoordinatorTests(unittest.TestCase):
     def test_business_progress_is_coalesced_without_losing_completion(self) -> None:
         def noisy_probe(*, progress_callback=None):
@@ -100,6 +106,58 @@ class ProjectRunCoordinatorTests(unittest.TestCase):
                 self.assertEqual(len(summaries), 1)
                 self.assertEqual(summaries[0].status, "success")
                 self.assertEqual(source.read_text(encoding="utf-8"), "unchanged-business-value")
+            finally:
+                store.close()
+
+    def test_coordinator_folder_rename_operates_on_project_copy_and_preserves_customer_source(self) -> None:
+        from hr_toolkit.project_store import CATEGORY_RESULTS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            customer_source = root / "人员资料"
+            person_folder = customer_source / "张三"
+            person_folder.mkdir(parents=True)
+            (person_folder / "说明.txt").write_text("record", encoding="utf-8")
+
+            project_root = root / "project"
+            store = ProjectStore.create(project_root, "测试项目")
+            coordinator = ProjectRunCoordinator()
+            finished = threading.Event()
+            success = []
+            errors = []
+
+            request = RunRequest(
+                tool_id="folder_rename",
+                tool_name="资料文件夹改名",
+                group_name="人员与档案",
+                description="改名测试",
+                function=_fake_folder_rename,
+                args=(customer_source,),
+                kwargs={"mode": "append"},
+            )
+            callbacks = RunCallbacks(
+                success=lambda *payload: success.append(payload),
+                error=lambda error: errors.append(error),
+                finished=finished.set,
+            )
+            try:
+                self.assertTrue(coordinator.start(store, request, callbacks))
+                self.assertTrue(finished.wait(10))
+                self.assertFalse(errors)
+                self.assertEqual(len(success), 1)
+
+                # Customer source folder MUST REMAIN UNTOUCHED
+                self.assertTrue((customer_source / "张三" / "说明.txt").is_file())
+                self.assertFalse((customer_source / "张三-已核对").exists())
+
+                # Project results copy MUST HAVE THE RENAMED FOLDER
+                batches = store.list_batches()
+                self.assertEqual(len(batches), 1)
+                batch_detail = store.get_batch(batches[0].id)
+                assert batch_detail is not None
+                results_dir = batch_detail.directories[CATEGORY_RESULTS]
+                found = list(results_dir.glob("**/张三-已核对"))
+                self.assertTrue(len(found) > 0, f"Expected renamed folder in results: {list(results_dir.rglob('*'))}")
             finally:
                 store.close()
 

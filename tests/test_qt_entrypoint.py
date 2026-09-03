@@ -358,33 +358,41 @@ class QtEntrypointTests(unittest.TestCase):
                 self.assertEqual(hr_toolkit_app._run_desktop(), 0)
         qt_main.assert_called_once_with()
 
-    def test_legacy_renderer_remains_an_explicit_recovery_option(self) -> None:
-        legacy_main = Mock()
-        legacy_module = types.ModuleType("hr_toolkit.gui")
-        legacy_module.main = legacy_main
-        with patch.dict(os.environ, {"HR_TOOLKIT_RENDERER": "legacy-tk"}):
-            with patch.dict(sys.modules, {"hr_toolkit.gui": legacy_module}):
-                self.assertEqual(hr_toolkit_app._run_desktop(), 0)
-        legacy_main.assert_called_once_with()
+    def test_launcher_main_dispatches_software_rendering_flag(self) -> None:
+        from hr_toolkit import launcher
 
-    def test_missing_qt_runtime_never_silently_starts_legacy_renderer(self) -> None:
-        legacy_main = Mock()
-        legacy_module = types.ModuleType("hr_toolkit.gui")
-        legacy_module.main = legacy_main
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("hr_toolkit.launcher._run_desktop", return_value=0) as run_desktop:
+                code = launcher.main(["--software-rendering"])
+                self.assertEqual(code, 0)
+                self.assertEqual(os.environ.get("HR_TOOLKIT_QT_SOFTWARE_RENDER"), "1")
+                run_desktop.assert_called_once_with()
+
+    def test_launcher_main_routes_cli_without_qt(self) -> None:
+        from hr_toolkit import launcher
+
+        with patch("hr_toolkit.cli.main", return_value=0) as cli_main:
+            with patch("hr_toolkit.launcher._run_desktop") as run_desktop:
+                code = launcher.main(["--help"])
+                self.assertEqual(code, 0)
+                cli_main.assert_called_once_with()
+                run_desktop.assert_not_called()
+
+    def test_missing_qt_runtime_reports_instructions_and_exits_code_2(self) -> None:
+        from hr_toolkit import launcher
+
         missing_qt = ImportError("No module named 'shiboken6'", name="shiboken6")
-
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("HR_TOOLKIT_RENDERER", None)
-            with patch.dict(sys.modules, {"hr_toolkit.gui": legacy_module}):
-                with patch("hr_toolkit.gui_qt.main", side_effect=missing_qt):
-                    with self.assertRaises(
-                        hr_toolkit_app.DesktopRuntimeUnavailable
-                    ) as raised:
-                        hr_toolkit_app._run_desktop()
+        with patch("hr_toolkit.gui_qt.main", side_effect=missing_qt):
+            with self.assertRaises(launcher.DesktopRuntimeUnavailable) as raised:
+                launcher._run_desktop()
 
         self.assertIn("shiboken6", str(raised.exception))
         self.assertIn("requirements-gui.txt", str(raised.exception))
-        legacy_main.assert_not_called()
+
+        # Test main() prints to stderr and returns code 2
+        with patch("hr_toolkit.launcher._run_desktop", side_effect=launcher.DesktopRuntimeUnavailable("missing")):
+            code = launcher.main([])
+            self.assertEqual(code, 2)
 
     def test_non_qt_import_failure_is_not_misreported_as_missing_qt(self) -> None:
         missing_core = ImportError("No module named 'openpyxl'", name="openpyxl")

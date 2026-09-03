@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import tempfile
+import threading
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -326,6 +329,225 @@ class QtControllerTests(unittest.TestCase):
 
         self.assertEqual(len(controller.logModel), 1)
         self.assertEqual(controller.logModel.item_at(0)["text"], "timer_msg")
+        controller.close()
+
+    def test_controller_file_dialog_directory_memory_hierarchy_and_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            saved_dir = tmp_path / "saved"
+            saved_dir.mkdir()
+            project_dir = tmp_path / "project"
+            project_dir.mkdir()
+            other_dir = tmp_path / "other"
+            other_dir.mkdir()
+            sample_file = other_dir / "test.xlsx"
+            sample_file.write_text("dummy", encoding="utf-8")
+
+            controller = self.controller()
+
+            # 1. When last_selected_dir is valid, it takes priority
+            controller._last_selected_dir = saved_dir
+            controller._project_path = project_dir
+            self.assertEqual(controller._file_dialog_initial_dir(), str(saved_dir))
+
+            # 2. When last_selected_dir is deleted/invalid, falls back to project_path
+            controller._last_selected_dir = tmp_path / "non_existent"
+            self.assertEqual(controller._file_dialog_initial_dir(), str(project_dir))
+
+            # 3. When project_path is also None, falls back to desktop / home
+            controller._project_path = None
+            fallback = controller._file_dialog_initial_dir()
+            self.assertTrue(Path(fallback).is_dir())
+
+            # 4. role="new_project" starts at defaultProjectParent
+            self.assertEqual(
+                controller._file_dialog_initial_dir(role="new_project"),
+                str(Path(controller.defaultProjectParent).expanduser().absolute()),
+            )
+
+            # 5. Successful selection remembers folder (or parent folder for file)
+            controller._remember_file_dialog_path(str(sample_file))
+            self.assertEqual(controller._last_selected_dir, other_dir)
+
+            # 6. Cancelled dialog (empty string/list/None) DOES NOT overwrite memory
+            controller._remember_file_dialog_path("")
+            self.assertEqual(controller._last_selected_dir, other_dir)
+            controller._remember_file_dialog_path([])
+            self.assertEqual(controller._last_selected_dir, other_dir)
+            controller._remember_file_dialog_path(None)
+            self.assertEqual(controller._last_selected_dir, other_dir)
+
+            controller.close()
+
+    def test_controller_file_dialog_directory_memory_persists_in_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            settings_file = tmp_path / "workspace-ui.json"
+            chosen_dir = tmp_path / "chosen"
+            chosen_dir.mkdir()
+
+            with patch.object(AppController, "_settings_path", return_value=settings_file):
+                controller = AppController()
+                controller._remember_file_dialog_path(chosen_dir)
+
+                self.assertTrue(settings_file.is_file())
+                data = json.loads(settings_file.read_text(encoding="utf-8"))
+                self.assertEqual(data.get("last_selected_dir"), str(chosen_dir))
+
+                # New controller instance loads it on start()
+                controller2 = AppController()
+                controller2.start()
+                self.assertEqual(controller2._last_selected_dir, chosen_dir)
+                self.assertEqual(controller2._file_dialog_initial_dir(), str(chosen_dir))
+
+                controller.close()
+                controller2.close()
+
+    def test_controller_trash_read_only_protection_and_restore_selection(self) -> None:
+        controller = self.controller()
+        fake_store = SimpleNamespace(writable=False, list_trash_details=lambda: [])
+        controller._project_store = fake_store
+        controller._trash_selected_id = "batch-1"
+
+        with patch("threading.Thread") as mock_thread:
+            controller.restoreSelectedTrash()
+            # Read-only store prevents launching restore worker thread
+            mock_thread.assert_not_called()
+
+        # Selection retention test
+        fake_detail = SimpleNamespace(
+            summary=SimpleNamespace(
+                id="batch-1",
+                group_name="薪酬管理",
+                tool_name="工资表拆分",
+                business_description="七月",
+                business_period="2026-07",
+                directory_name="dir",
+                status="success",
+                deleted_at="2026-08-01T00:00:00Z",
+            ),
+            original_relative_path="rel",
+            upload_count=1,
+            result_count=1,
+            supplement_count=0,
+            total_size_bytes=100,
+        )
+        controller._apply_trash_list(controller._trash_generation, [fake_detail], "")
+        self.assertEqual(controller.trashSelectedId, "batch-1")
+
+        # Simulate restore failure
+        notifications = []
+        controller.notificationRequested.connect(lambda *args: notifications.append(args))
+        controller._apply_trash_action(False, "权限不足")
+        self.assertEqual(notifications[-1][0], "恢复没有完成")
+        self.assertEqual(notifications[-1][1], "权限不足")
+        controller._apply_trash_list(controller._trash_generation, [fake_detail], "")
+        self.assertFalse(controller.trashBusy)
+        self.assertEqual(controller.trashSelectedId, "batch-1")
+        controller.close()
+
+    def test_controller_workspace_search_and_scan_threading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sub = root / "sub"
+            sub.mkdir()
+            (sub / "file.xlsx").touch()
+
+            controller = self.controller()
+            controller._project_path = root
+
+            threads_started = []
+            orig_start = threading.Thread.start
+
+            def tracking_start(t_self):
+                threads_started.append(t_self.name)
+                return orig_start(t_self)
+
+            with patch.object(threading.Thread, "start", side_effect=tracking_start, autospec=True):
+                controller.refreshWorkspace()
+
+            self.assertIn("HRToolkit-workspace-scan", threads_started)
+            controller.close()
+
+    def test_controller_workspace_import_cancellation_and_state(self) -> None:
+        controller = self.controller()
+        controller._workspace_busy = True
+        cancel_event = threading.Event()
+        controller._workspace_cancel_event = cancel_event
+
+        self.assertFalse(cancel_event.is_set())
+        controller.cancelWorkspaceImport()
+        self.assertTrue(cancel_event.is_set())
+
+        notifications = []
+        controller.notificationRequested.connect(lambda *args: notifications.append(args))
+        controller._apply_workspace_import_result(False, "资料导入已取消。")
+        self.assertFalse(controller.workspaceBusy)
+        self.assertIsNone(controller._workspace_cancel_event)
+        self.assertEqual(notifications[-1][0], "导入未完成")
+        self.assertEqual(notifications[-1][1], "资料导入已取消。")
+        controller.close()
+
+    def test_controller_material_preferences_and_presets(self) -> None:
+        controller = self.controller()
+        controller.selectTool("material_collector")
+
+        state = controller._form_states[("material_collector", "default")]
+        self.assertTrue(state.get("collect_all"))
+
+        # Apply preset "入职材料" -> collect_all becomes False, materials updated
+        controller.applyMaterialPreset("入职材料")
+        self.assertFalse(state.get("collect_all"))
+        self.assertEqual(state.get("material_types"), ["身份证", "劳动合同"])
+
+        # Add custom material via submitTextAction
+        controller.requestAddCustomMaterial()
+        token = controller._pending_text_action
+        self.assertIsNotNone(token)
+        controller.submitTextAction(token, "体检报告")
+        self.assertIn("体检报告", state.get("material_types"))
+        self.assertIn("体检报告", controller._material_preferences.custom_materials)
+
+        # Clear and select all
+        controller.clearMaterials()
+        self.assertEqual(state.get("material_types"), [])
+        controller.selectAllMaterials()
+        self.assertEqual(
+            set(state.get("material_types")),
+            set(controller._material_preferences.available_materials),
+        )
+        controller.close()
+
+    def test_controller_create_project_validation_and_creation(self) -> None:
+        import time
+
+        controller = self.controller()
+        notifications = []
+        controller.notificationRequested.connect(lambda *args: notifications.append(args))
+
+        # 1. Invalid project name rejects before creating thread
+        controller.createProject("CON", "/some/path")
+        self.assertEqual(notifications[-1][0], "无法创建项目")
+        self.assertIn("Windows 系统保留名称", notifications[-1][1])
+
+        # 2. Valid project creates project store in background
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            opened = []
+            controller._projectOpened.connect(lambda gen, store, path: opened.append((path, store)))
+            dummy_store = SimpleNamespace(close=lambda: None)
+            with patch("hr_toolkit.project_store.ProjectStore.create", return_value=dummy_store):
+                controller.createProject("测试项目", str(parent))
+                for _ in range(50):
+                    if opened:
+                        break
+                    time.sleep(0.05)
+                    QCoreApplication.processEvents()
+            self.assertEqual(len(opened), 1)
+            target_path, store = opened[0]
+            self.assertEqual(Path(target_path), parent / "测试项目")
+            self.assertIs(store, dummy_store)
+
         controller.close()
 
 
