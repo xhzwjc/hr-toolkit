@@ -29,6 +29,11 @@ namespace HRToolkit.Wpf.Services
             Task.Run(ListenLoopAsync);
         }
 
+        public void RaiseLog(string level, string message)
+        {
+            OnLogReceived?.Invoke(level, message);
+        }
+
         public async Task<T?> SendRequestAsync<T>(string method, object? parameters = null, CancellationToken ct = default)
         {
             long id = Interlocked.Increment(ref _nextId);
@@ -45,18 +50,33 @@ namespace HRToolkit.Wpf.Services
 
             string line = JsonSerializer.Serialize(requestObj);
 
-            await _writeLock.WaitAsync(ct);
+            // Default 15-second timeout for RPC requests if not specified
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+            await _writeLock.WaitAsync(linkedCts.Token);
             try
             {
-                await _writer.WriteLineAsync(line.AsMemory(), ct);
-                await _writer.FlushAsync(ct);
+                await _writer.WriteLineAsync(line.AsMemory(), linkedCts.Token);
+                await _writer.FlushAsync(linkedCts.Token);
             }
             finally
             {
                 _writeLock.Release();
             }
 
-            using var registration = ct.Register(() => tcs.TrySetCanceled());
+            using var registration = linkedCts.Token.Register(() =>
+            {
+                if (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    tcs.TrySetException(new TimeoutException($"RPC 请求 '{method}' 超时（15秒内未收到响应）。"));
+                }
+                else
+                {
+                    tcs.TrySetCanceled();
+                }
+            });
+
             JsonElement resultElement = await tcs.Task;
 
             if (resultElement.ValueKind == JsonValueKind.Undefined || resultElement.ValueKind == JsonValueKind.Null)
@@ -74,7 +94,18 @@ namespace HRToolkit.Wpf.Services
                 while (!_cts.Token.IsCancellationRequested)
                 {
                     string? line = await _reader.ReadLineAsync(_cts.Token);
-                    if (line == null) break;
+                    if (line == null)
+                    {
+                        // EOF detected: Python backend process closed stdout or terminated
+                        var ex = new IOException("Python 后端进程通信中断（标准输出流已关闭，进程可能已退出）。");
+                        foreach (var kvp in _pendingRequests)
+                        {
+                            kvp.Value.TrySetException(ex);
+                        }
+                        _pendingRequests.Clear();
+                        OnLogReceived?.Invoke("error", "与 Python 后端引擎通信断开。");
+                        break;
+                    }
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
                     ProcessIncomingMessage(line);

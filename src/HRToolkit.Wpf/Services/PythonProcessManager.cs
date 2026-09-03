@@ -1,24 +1,29 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 
 namespace HRToolkit.Wpf.Services
 {
     public class PythonProcessManager : IDisposable
     {
         private Process? _process;
+        private readonly StringBuilder _stderrBuffer = new();
         public JsonRpcClient? Client { get; private set; }
+        public string LastStderr => _stderrBuffer.ToString();
+        public string ResolvedPythonPath { get; private set; } = string.Empty;
+        public string ResolvedWorkingDir { get; private set; } = string.Empty;
 
         public void StartEngine()
         {
-            string pythonExe = ResolvePythonExecutable();
-            string workingDir = ResolveWorkingDirectory();
+            ResolvedWorkingDir = ResolveWorkingDirectory();
+            ResolvedPythonPath = ResolvePythonExecutable(ResolvedWorkingDir);
 
             var psi = new ProcessStartInfo
             {
-                FileName = pythonExe,
+                FileName = ResolvedPythonPath,
                 Arguments = "-m hr_toolkit --ipc",
-                WorkingDirectory = workingDir,
+                WorkingDirectory = ResolvedWorkingDir,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -28,16 +33,18 @@ namespace HRToolkit.Wpf.Services
 
             psi.EnvironmentVariables["PYTHONUTF8"] = "1";
             psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            psi.EnvironmentVariables["PYTHONPATH"] = ResolvedWorkingDir;
 
             _process = new Process { StartInfo = psi };
             _process.Start();
 
-            // Direct stderr to debug / error logging
             _process.ErrorDataReceived += (s, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Data))
                 {
+                    _stderrBuffer.AppendLine(e.Data);
                     Debug.WriteLine($"[Python Stderr] {e.Data}");
+                    Client?.RaiseLog("warning", e.Data);
                 }
             };
             _process.BeginErrorReadLine();
@@ -45,36 +52,53 @@ namespace HRToolkit.Wpf.Services
             Client = new JsonRpcClient(_process.StandardOutput, _process.StandardInput);
         }
 
-        private string ResolvePythonExecutable()
+        private string ResolvePythonExecutable(string workingDir)
         {
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            // 1. Working dir .venv or venv
+            string venvWin = Path.Combine(workingDir, ".venv", "Scripts", "python.exe");
+            if (File.Exists(venvWin)) return venvWin;
 
-            // 1. Packaged standalone python executable or embedded runtime
+            string venvWin2 = Path.Combine(workingDir, "venv", "Scripts", "python.exe");
+            if (File.Exists(venvWin2)) return venvWin2;
+
+            string venvPosix = Path.Combine(workingDir, ".venv", "bin", "python");
+            if (File.Exists(venvPosix)) return venvPosix;
+
+            string venvPosix2 = Path.Combine(workingDir, "venv", "bin", "python");
+            if (File.Exists(venvPosix2)) return venvPosix2;
+
+            // 2. Base dir embedded or relative
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             string embedded = Path.Combine(baseDir, "python", "python.exe");
             if (File.Exists(embedded)) return embedded;
 
             string standalone = Path.Combine(baseDir, "hr_toolkit_core.exe");
             if (File.Exists(standalone)) return standalone;
 
-            // 2. Developer local venv
-            string venvPy = Path.Combine(baseDir, "..", "..", "..", "..", ".venv", "Scripts", "python.exe");
-            if (File.Exists(venvPy)) return Path.GetFullPath(venvPy);
+            string relVenvWin = Path.Combine(baseDir, "..", "..", "..", "..", ".venv", "Scripts", "python.exe");
+            if (File.Exists(relVenvWin)) return Path.GetFullPath(relVenvWin);
 
-            string venvPyPosix = Path.Combine(baseDir, "..", "..", "..", "..", ".venv", "bin", "python");
-            if (File.Exists(venvPyPosix)) return Path.GetFullPath(venvPyPosix);
-
-            // 3. System fallback
+            // 3. Fallback to system python
             return "python";
         }
 
         private string ResolveWorkingDirectory()
         {
+            // 1. Current working directory (if run via dotnet run from repo root)
+            string cwd = Directory.GetCurrentDirectory();
+            if (Directory.Exists(Path.Combine(cwd, "hr_toolkit")))
+            {
+                return Path.GetFullPath(cwd);
+            }
+
+            // 2. Base directory relative traversal
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             string repoRoot = Path.Combine(baseDir, "..", "..", "..", "..");
             if (Directory.Exists(Path.Combine(repoRoot, "hr_toolkit")))
             {
                 return Path.GetFullPath(repoRoot);
             }
+
             return baseDir;
         }
 
