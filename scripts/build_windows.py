@@ -786,7 +786,16 @@ def stage_win7_app_local_runtimes(
     ucrt_dir: Path,
     vc_runtime_dir: Path,
 ) -> None:
-    """Place downlevel runtimes beside the main EXE as required before Windows 8."""
+    """Cover both Win7 app-local UCRT and PyInstaller's Python DLL loader."""
+    internal = app_dir / "_internal"
+    if internal.is_symlink() or not internal.is_dir():
+        raise RuntimeError(f"Win7 程序目录缺少有效的 _internal：{app_dir}")
+    # Win7 UCRT forwarders need the runtime next to the EXE. PyInstaller,
+    # however, loads _internal/python38.dll with LOAD_WITH_ALTERED_SEARCH_PATH
+    # and sets its DLL directory to _internal. Its VC/UCRT dependencies must
+    # also be available there, before any Python runtime hook can execute.
+    # Keep identical pinned copies in both locations; do not restore a private
+    # Qt/runner version or rely on the build host's system VC redistributable.
     for source_dir, names, label in (
         (ucrt_dir, WIN7_REQUIRED_UCRT_FILES, "app-local UCRT"),
         (vc_runtime_dir, WIN7_REQUIRED_VC_RUNTIME_FILES, "Visual C++ app-local runtime"),
@@ -803,6 +812,8 @@ def stage_win7_app_local_runtimes(
                     raise RuntimeError(f"拒绝替换非普通 Win7 运行库文件：{path}")
                 path.unlink()
             shutil.copy2(source_dir / name, app_dir / name)
+            shutil.copy2(source_dir / name, internal / name)
+    verify_win7_app_local_runtimes(app_dir)
 
 
 def stage_modern_app_local_vc_runtimes(
@@ -1237,17 +1248,29 @@ def verify_win7_runtime_payload(app_dir: Path) -> None:
     )
     if unexpected_python:
         raise RuntimeError(f"Windows 7 程序包混入其他 Python 运行时：{unexpected_python}")
-    _require_files(app_dir, WIN7_REQUIRED_UCRT_FILES, label="Win7 payload UCRT")
-    _require_files(
-        app_dir,
-        WIN7_REQUIRED_VC_RUNTIME_FILES,
-        label="Win7 payload Visual C++ runtime",
-    )
+    verify_win7_app_local_runtimes(app_dir)
     seven_zip_dir = internal / "third_party" / "7zip"
     _require_files(seven_zip_dir, WIN7_REQUIRED_7ZIP_FILES, label="Win7 payload 7-Zip")
     notice = seven_zip_dir / WIN7_THIRD_PARTY_NOTICE.name
     if not notice.is_file() or notice.read_bytes() != WIN7_THIRD_PARTY_NOTICE.read_bytes():
         raise RuntimeError("Windows 7 程序包缺少正确的 7-Zip 第三方许可说明。")
+
+
+def verify_win7_app_local_runtimes(app_dir: Path) -> None:
+    """Reject the root-only layout even on a host with system runtimes installed."""
+    internal = app_dir / "_internal"
+    for names, label in (
+        (WIN7_REQUIRED_UCRT_FILES, "UCRT"),
+        (WIN7_REQUIRED_VC_RUNTIME_FILES, "Visual C++ runtime"),
+    ):
+        _require_files(app_dir, names, label=f"Win7 payload {label}")
+        _require_files(internal, names, label=f"Win7 _internal 启动运行库 {label}")
+        _require_matching_files(
+            source_dir=app_dir,
+            payload_dir=internal,
+            names=names,
+            label=f"Win7 _internal 启动运行库 {label}",
+        )
 
 
 def verify_modern_vc_runtime_payload(app_dir: Path) -> None:
@@ -1284,18 +1307,19 @@ def verify_win7_runtime_source_integrity(
 ) -> None:
     """Ensure PyInstaller did not replace the pinned Win7 compatibility runtimes."""
     internal = app_dir / "_internal"
-    _require_matching_files(
-        source_dir=ucrt_dir,
-        payload_dir=app_dir,
-        names=WIN7_REQUIRED_UCRT_FILES,
-        label="app-local UCRT",
-    )
-    _require_matching_files(
-        source_dir=vc_runtime_dir,
-        payload_dir=app_dir,
-        names=WIN7_REQUIRED_VC_RUNTIME_FILES,
-        label="Visual C++ app-local runtime",
-    )
+    for payload_dir in (app_dir, internal):
+        _require_matching_files(
+            source_dir=ucrt_dir,
+            payload_dir=payload_dir,
+            names=WIN7_REQUIRED_UCRT_FILES,
+            label=f"{payload_dir.name} app-local UCRT",
+        )
+        _require_matching_files(
+            source_dir=vc_runtime_dir,
+            payload_dir=payload_dir,
+            names=WIN7_REQUIRED_VC_RUNTIME_FILES,
+            label=f"{payload_dir.name} Visual C++ app-local runtime",
+        )
     _require_matching_files(
         source_dir=seven_zip_dir,
         payload_dir=internal / "third_party" / "7zip",

@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import runpy
+import shutil
 import struct
 import subprocess
 import sys
@@ -235,7 +236,7 @@ class WindowsPackagingTests(unittest.TestCase):
             self.assertNotIn(expected, main)
             self.assertIn(expected, updater)
 
-    def test_win7_app_local_runtimes_are_staged_beside_main_executable(self) -> None:
+    def test_win7_app_local_runtimes_cover_executable_and_python_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             app_dir = tmp_dir / "HRToolkit"
@@ -243,6 +244,8 @@ class WindowsPackagingTests(unittest.TestCase):
             ucrt_dir = tmp_dir / "ucrt"
             vc_runtime_dir = tmp_dir / "vc-runtime"
             internal.mkdir(parents=True)
+            private_qt = internal / "PySide2"
+            private_qt.mkdir()
             ucrt_dir.mkdir()
             vc_runtime_dir.mkdir()
 
@@ -257,6 +260,7 @@ class WindowsPackagingTests(unittest.TestCase):
                 for name in names:
                     (source_dir / name).write_bytes(label + name.encode("ascii"))
                     (internal / name).write_bytes(b"runner-runtime")
+                    (private_qt / name).write_bytes(b"private-qt-runtime")
 
             build_windows.stage_win7_app_local_runtimes(
                 app_dir=app_dir,
@@ -270,7 +274,18 @@ class WindowsPackagingTests(unittest.TestCase):
             ):
                 for name in names:
                     self.assertEqual((app_dir / name).read_bytes(), (source_dir / name).read_bytes())
-                    self.assertFalse((internal / name).exists())
+                    self.assertEqual((internal / name).read_bytes(), (source_dir / name).read_bytes())
+                    self.assertFalse((private_qt / name).exists())
+
+            # A repeated build stage must neither lose nor diverge either copy.
+            build_windows.stage_win7_app_local_runtimes(
+                app_dir=app_dir, ucrt_dir=ucrt_dir, vc_runtime_dir=vc_runtime_dir,
+            )
+            for name in (
+                *build_windows.WIN7_REQUIRED_UCRT_FILES,
+                *build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+            ):
+                self.assertEqual((app_dir / name).read_bytes(), (internal / name).read_bytes())
 
     def test_modern_vc_runtimes_replace_private_qt_copies(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1140,8 +1155,10 @@ class WindowsPackagingTests(unittest.TestCase):
             self._write_fake_pe(internal / "python3.dll", build_windows.PE_MACHINE_AMD64)
             for name in build_windows.WIN7_REQUIRED_UCRT_FILES:
                 self._write_fake_pe(app_dir / name, build_windows.PE_MACHINE_AMD64)
+                self._write_fake_pe(internal / name, build_windows.PE_MACHINE_AMD64)
             for name in build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES:
                 self._write_fake_pe(app_dir / name, build_windows.PE_MACHINE_AMD64)
+                self._write_fake_pe(internal / name, build_windows.PE_MACHINE_AMD64)
             seven_zip = internal / "third_party" / "7zip"
             self._write_fake_pe(seven_zip / "7z.exe", build_windows.PE_MACHINE_AMD64)
             self._write_fake_pe(seven_zip / "7z.dll", build_windows.PE_MACHINE_AMD64)
@@ -1154,6 +1171,41 @@ class WindowsPackagingTests(unittest.TestCase):
                 app_dir,
                 target=build_windows.WINDOWS_TARGET_WIN7,
             )
+            staged = Path(tmp) / "staged-win7"
+            # Fake PE fixtures only omit import tables; run the real payload,
+            # staging and installer-file checks, mocking just PE import parsing.
+            with patch.object(build_update_assets, "verify_win7_pe_compatibility"):
+                build_update_assets.stage_windows_payload(
+                    app_dir=app_dir, updater=_updater, target_dir=staged, target="win7",
+                )
+            fragment = build_windows_installers.generate_wix_payload_fragment(
+                staged, Path(tmp) / "payload-win7.wxs", target="win7",
+            )
+            sources = {
+                Path(item.attrib["Source"])
+                for item in ET.parse(fragment).findall(
+                    ".//w:File", {"w": build_windows_installers.WIX_NAMESPACE},
+                )
+            }
+            for name in (
+                *build_windows.WIN7_REQUIRED_UCRT_FILES,
+                *build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES,
+            ):
+                for directory in (staged, staged / "_internal"):
+                    self.assertIn((directory / name).resolve(), sources)
+                    self.assertEqual((directory / name).read_bytes(), (app_dir / name).read_bytes())
+            (staged / "_internal" / "vcruntime140.dll").unlink()
+            with self.assertRaisesRegex(RuntimeError, "_internal.*缺少文件"):
+                build_update_assets.verify_staged_payload(staged, target="win7")
+            # The release gate must not depend on System32 filling these gaps.
+            for name in ("vcruntime140.dll", "ucrtbase.dll", "api-ms-win-crt-runtime-l1-1-0.dll"):
+                with self.subTest(missing_bootstrap_runtime=name):
+                    missing = internal / name
+                    original = missing.read_bytes()
+                    missing.unlink()
+                    with self.assertRaisesRegex(RuntimeError, "_internal.*缺少文件"):
+                        build_windows.verify_windows_payload(app_dir, target="win7")
+                    missing.write_bytes(original)
             forbidden = internal / "api-ms-win-core-path-l1-1-0.dll"
             self._write_fake_pe(forbidden, build_windows.PE_MACHINE_AMD64)
             with self.assertRaisesRegex(RuntimeError, "旁加载伪造"):
@@ -1228,6 +1280,7 @@ class WindowsPackagingTests(unittest.TestCase):
                     (source_dir / name).write_bytes(payload)
                     (payload_dir / name).write_bytes(payload)
                     if label in {"ucrt", "vc"}:
+                        (internal / name).write_bytes(payload)
                         archive_payloads[name] = payload
 
             class FakeArchiveReader:
@@ -1259,10 +1312,47 @@ class WindowsPackagingTests(unittest.TestCase):
                 build_windows.verify_win7_runtime_source_integrity(**kwargs)
             substituted.write_bytes(original)
 
+            for directory in (internal, app_dir):
+                with self.subTest(substitution=str(directory)):
+                    substituted = directory / "vcruntime140.dll"
+                    original = substituted.read_bytes()
+                    substituted.write_bytes(b"newer system runtime")
+                    with self.assertRaisesRegex(RuntimeError, "未使用已锁定"):
+                        build_windows.verify_win7_runtime_source_integrity(**kwargs)
+                    substituted.write_bytes(original)
+
             runtime_name = build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES[0]
             archive_payloads[runtime_name] = b"newer embedded runtime"
             with self.assertRaisesRegex(RuntimeError, "Updater 未使用已锁定"):
                 build_windows.verify_win7_runtime_source_integrity(**kwargs)
+
+    def test_win7_bootstrap_gate_rejects_missing_or_divergent_runtime_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = Path(tmp)
+            internal = app_dir / "_internal"
+            internal.mkdir()
+            names = (*build_windows.WIN7_REQUIRED_UCRT_FILES,
+                     *build_windows.WIN7_REQUIRED_VC_RUNTIME_FILES)
+            for name in names:
+                (app_dir / name).write_bytes(b"pinned:" + name.encode("ascii"))
+            # Reproduce the v0.7.8 layout: all runtime files only beside the EXE.
+            with self.assertRaisesRegex(RuntimeError, "_internal.*缺少文件"):
+                build_windows.verify_win7_app_local_runtimes(app_dir)
+            for name in names:
+                shutil.copy2(app_dir / name, internal / name)
+            build_windows.verify_win7_app_local_runtimes(app_dir)
+            for directory in (app_dir, internal):
+                for name in names:
+                    with self.subTest(directory=directory.name, runtime=name):
+                        path = directory / name
+                        original = path.read_bytes()
+                        path.unlink()
+                        with self.assertRaisesRegex(RuntimeError, "缺少文件"):
+                            build_windows.verify_win7_app_local_runtimes(app_dir)
+                        path.write_bytes(b"different-runtime")
+                        with self.assertRaisesRegex(RuntimeError, "未使用已锁定"):
+                            build_windows.verify_win7_app_local_runtimes(app_dir)
+                        path.write_bytes(original)
 
     def test_win7_pe_gate_rejects_post_win7_imports(self) -> None:
         imported = SimpleNamespace(name=b"PssQuerySnapshot")
@@ -1758,10 +1848,17 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("python3.dll", script)
         self.assertIn("vcruntime140_1.dll", script)
         self.assertIn('(Join-Path $payload "ucrtbase.dll")', script)
-        self.assertNotIn('(Join-Path $internal "ucrtbase.dll")', script)
+        self.assertIn('(Join-Path $internal "ucrtbase.dll")', script)
+        self.assertIn('(Join-Path $internal "vcruntime140.dll")', script)
+        self.assertIn("$runtimeNames.Count -ne 44", script)
+        self.assertIn("$rootHash -ne $internalHash", script)
         self.assertIn("api-ms-win-core-path-l1-1-0.dll", script)
         self.assertIn("Remove-Item Env:\\HR_TOOLKIT_7ZIP_EXE", script)
-        self.assertIn('ArgumentList "--smoke-test"', script)
+        self.assertIn('-Argument "--smoke-test"', script)
+        self.assertIn('-Argument "--qt-smoke-test"', script)
+        self.assertIn("$launch -le 3", script)
+        self.assertIn("WaitForExit($TimeoutSeconds * 1000)", script)
+        self.assertNotIn("Get-FileHash", script)  # Win7 can still use PowerShell 2.
         self.assertIn("HRToolkitUpdater $ExpectedVersion smoke-test OK", script)
 
     def test_gitee_source_sync_is_manual_and_never_publishes_a_release(self) -> None:

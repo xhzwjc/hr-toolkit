@@ -19,6 +19,27 @@ $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 $installRoot = Join-Path $env:TEMP ("HRToolkit-Win7-Smoke-" + [Guid]::NewGuid().ToString("N"))
 $resultPath = Join-Path $installRoot "smoke-result.txt"
 
+function Invoke-InstalledSmoke {
+    param([string]$Executable, [string]$Argument, [string]$Expected, [int]$TimeoutSeconds = 90)
+    Remove-Item -LiteralPath $resultPath -ErrorAction SilentlyContinue
+    $process = Start-Process -FilePath $Executable -ArgumentList $Argument -WorkingDirectory $installRoot -PassThru
+    # Retain the handle so ExitCode remains available in Windows PowerShell.
+    $processHandle = $process.Handle
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $process.Kill()
+        $process.WaitForExit()
+        throw "$Argument timed out; check for a native loader error dialog."
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "$Argument exited with code $($process.ExitCode)."
+    }
+    $result = ([string](Get-Content -LiteralPath $resultPath -Encoding UTF8 | Out-String)).Trim()
+    if ($result -ne $Expected) {
+        throw "Unexpected $Argument output: $result"
+    }
+    Write-Host $Expected
+}
+
 try {
     $installArgs = @(
         "/VERYSILENT",
@@ -43,6 +64,10 @@ try {
         (Join-Path $payload "msvcp140.dll"),
         (Join-Path $payload "vcruntime140.dll"),
         (Join-Path $payload "vcruntime140_1.dll"),
+        (Join-Path $internal "ucrtbase.dll"),
+        (Join-Path $internal "msvcp140.dll"),
+        (Join-Path $internal "vcruntime140.dll"),
+        (Join-Path $internal "vcruntime140_1.dll"),
         (Join-Path $internal "third_party\7zip\7z.exe"),
         (Join-Path $internal "third_party\7zip\7z.dll")
     )
@@ -50,6 +75,30 @@ try {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Installed Win7 payload is missing: $path"
         }
+    }
+    $runtimeNames = @("ucrtbase.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+    $runtimeNames += @(Get-ChildItem -LiteralPath $payload -Filter "api-ms-win-*.dll" | ForEach-Object { $_.Name })
+    if ($runtimeNames.Count -ne 44) {
+        throw "Installed Win7 payload does not contain the complete pinned runtime set."
+    }
+    # Use .NET hashing for Windows PowerShell 2 compatibility.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        foreach ($name in $runtimeNames) {
+            $rootFile = Join-Path $payload $name
+            $internalFile = Join-Path $internal $name
+            if (-not (Test-Path -LiteralPath $internalFile -PathType Leaf)) {
+                throw "Installed Win7 bootstrap runtime is missing: $internalFile"
+            }
+            $rootHash = [Convert]::ToBase64String($sha.ComputeHash([IO.File]::ReadAllBytes($rootFile)))
+            $internalHash = [Convert]::ToBase64String($sha.ComputeHash([IO.File]::ReadAllBytes($internalFile)))
+            if ($rootHash -ne $internalHash) {
+                throw "Installed Win7 runtime copies differ: $name"
+            }
+        }
+    }
+    finally {
+        $sha.Dispose()
     }
     if (Test-Path -LiteralPath (Join-Path $internal "python312.dll")) {
         throw "Installed Win7 payload contains the modern Python runtime."
@@ -61,27 +110,16 @@ try {
     $env:HR_TOOLKIT_CHECK_OUTPUT = $resultPath
     Remove-Item Env:\HR_TOOLKIT_7ZIP_EXE -ErrorAction SilentlyContinue
     $app = Join-Path $payload "HRToolkit.exe"
-    $smoke = Start-Process -FilePath $app -ArgumentList "--smoke-test" -Wait -PassThru
-    if ($smoke.ExitCode -ne 0) {
-        throw "HRToolkit smoke test exited with code $($smoke.ExitCode)."
-    }
-    $result = [string](Get-Content -LiteralPath $resultPath | Out-String)
     $expected = "HRToolkit $ExpectedVersion smoke-test OK"
-    if ($result -notmatch [Regex]::Escape($expected)) {
-        throw "Unexpected smoke-test output: $result"
+    Invoke-InstalledSmoke -Executable $app -Argument "--smoke-test" -Expected $expected -TimeoutSeconds 180
+    # Require three consecutive native Qt launches; this is not a retry loop.
+    for ($launch = 1; $launch -le 3; $launch++) {
+        Invoke-InstalledSmoke -Executable $app -Argument "--qt-smoke-test" -Expected "HRToolkit Qt smoke-test OK"
     }
 
-    Remove-Item -LiteralPath $resultPath -ErrorAction SilentlyContinue
     $updater = Join-Path $payload "HRToolkitUpdater.exe"
-    $updaterSmoke = Start-Process -FilePath $updater -ArgumentList "--smoke-test" -Wait -PassThru
-    if ($updaterSmoke.ExitCode -ne 0) {
-        throw "HRToolkit updater smoke test exited with code $($updaterSmoke.ExitCode)."
-    }
-    $updaterResult = [string](Get-Content -LiteralPath $resultPath | Out-String)
     $expectedUpdater = "HRToolkitUpdater $ExpectedVersion smoke-test OK"
-    if ($updaterResult -notmatch [Regex]::Escape($expectedUpdater)) {
-        throw "Unexpected updater smoke-test output: $updaterResult"
-    }
+    Invoke-InstalledSmoke -Executable $updater -Argument "--smoke-test" -Expected $expectedUpdater
     Write-Host "Windows 7 SP1 x64 acceptance passed: $expected; $expectedUpdater"
 }
 finally {
