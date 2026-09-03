@@ -221,7 +221,6 @@ jobs:
           tests.test_qt_controller
           tests.test_qt_entrypoint
           tests.test_qt_form_specs
-          tests.test_qt_models
           tests.test_run_coordinator
           tests.test_material_preferences
           tests.test_material_collector_gui

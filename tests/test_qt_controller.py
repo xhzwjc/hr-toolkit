@@ -8,7 +8,7 @@ import threading
 import unittest
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -530,25 +530,149 @@ class QtControllerTests(unittest.TestCase):
         self.assertEqual(notifications[-1][0], "无法创建项目")
         self.assertIn("Windows 系统保留名称", notifications[-1][1])
 
-        # 2. Valid project creates project store in background
+        # 2. Valid project creates real project store in background without slot exceptions
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)
             opened = []
             controller._projectOpened.connect(lambda gen, store, path: opened.append((path, store)))
-            dummy_store = SimpleNamespace(close=lambda: None)
-            with patch("hr_toolkit.project_store.ProjectStore.create", return_value=dummy_store):
-                controller.createProject("测试项目", str(parent))
-                for _ in range(50):
-                    if opened:
-                        break
-                    time.sleep(0.05)
-                    QCoreApplication.processEvents()
+
+            controller.createProject("测试项目", str(parent))
+            for _ in range(50):
+                if opened:
+                    break
+                time.sleep(0.05)
+                QCoreApplication.processEvents()
+
             self.assertEqual(len(opened), 1)
             target_path, store = opened[0]
             self.assertEqual(Path(target_path), parent / "测试项目")
-            self.assertIs(store, dummy_store)
+            self.assertEqual(controller.projectName, "测试项目")
+            self.assertTrue(controller.projectWritable)
+            self.assertEqual(Path(controller.projectPath), parent / "测试项目")
 
         controller.close()
+
+    def test_controller_workspace_import_finalizing_error_recovers_store_and_failed_recovery_blocks(self) -> None:
+        controller = self.controller()
+        notifications = []
+        controller.notificationRequested.connect(lambda *args: notifications.append(args))
+
+        # 1. Import error with successful store.refresh() -> project stays recovered
+        mock_store = Mock()
+        mock_store.workspace.common_root = Path("/tmp/project/共用资料")
+        mock_store.list_batch_locations.return_value = ()
+        mock_store.writable = True
+        mock_store.import_to_directory.side_effect = RuntimeError("磁盘临时写满")
+        controller._project_store = mock_store
+        controller._project_path = Path("/tmp/project")
+
+        controller._start_workspace_import([Path("/tmp/sample.txt")])
+        import time
+        for _ in range(20):
+            if not controller.workspaceBusy and notifications:
+                break
+            time.sleep(0.05)
+            QCoreApplication.processEvents()
+
+        mock_store.refresh.assert_called_once_with()
+        self.assertFalse(controller._workspace_recovery_blocked)
+        self.assertTrue(controller.projectWritable)
+        self.assertEqual(notifications[-1][0], "导入未完成")
+        self.assertIn("已恢复到安全状态", notifications[-1][1])
+
+        # 2. Import error with FAILED store.refresh() -> project recovery is blocked
+        notifications.clear()
+        mock_store.refresh.reset_mock()
+        mock_store.refresh.side_effect = OSError("无法读取清单文件，磁盘损坏")
+        mock_store.import_to_directory.side_effect = RuntimeError("保存提交失败")
+
+        controller._start_workspace_import([Path("/tmp/sample.txt")])
+        for _ in range(20):
+            if not controller.workspaceBusy and notifications:
+                break
+            time.sleep(0.05)
+            QCoreApplication.processEvents()
+
+        mock_store.refresh.assert_called_once_with()
+        self.assertTrue(controller._workspace_recovery_blocked)
+        self.assertFalse(controller.projectWritable)
+        self.assertEqual(notifications[-1][0], "项目未安全恢复")
+        self.assertIn("项目状态恢复失败", notifications[-1][1])
+
+        # 3. Operations are blocked while recovery is blocked
+        notifications.clear()
+        controller.createProject("新建项目", "/tmp")
+        self.assertEqual(notifications[-1][0], "项目未安全恢复")
+
+        notifications.clear()
+        controller.openProjectDialog()
+        self.assertEqual(notifications[-1][0], "项目未安全恢复")
+
+        notifications.clear()
+        controller.openProject("/tmp/other_project")
+        self.assertEqual(notifications[-1][0], "项目未安全恢复")
+
+        notifications.clear()
+        controller.restoreSelectedTrash()
+        self.assertEqual(notifications[-1][0], "项目未安全恢复")
+
+        notifications.clear()
+        controller.runOrCancel()
+        self.assertEqual(notifications[-1][0], "项目未安全恢复")
+
+        # 4. Reopening the current project resets the recovery blocked state
+        controller._apply_project_open(controller._project_generation, mock_store, "/tmp/project")
+        self.assertFalse(controller._workspace_recovery_blocked)
+        self.assertTrue(controller.projectWritable)
+
+        controller.close()
+
+    def test_controller_ocr_cache_mode_switch_restores_user_preference(self) -> None:
+        controller = self.controller()
+        controller.selectTool("material_collector")
+
+        # 1. User sets use_ocr_cache to False in normal (person_folder) mode
+        controller.setFieldValue("use_ocr_cache", False)
+        state = controller._form_states[controller._state_key()]
+        self.assertFalse(state["use_ocr_cache"])
+
+        # 2. Switch library_mode to flat_ocr -> use_ocr_cache is forced to True
+        controller.setFieldValue("library_mode", "flat_ocr")
+        self.assertTrue(state["use_ocr_cache"])
+
+        # 3. Switch library_mode back to person_folder -> use_ocr_cache is restored to False!
+        controller.setFieldValue("library_mode", "person_folder")
+        self.assertFalse(state["use_ocr_cache"])
+
+        controller.close()
+
+    def test_controller_choose_project_parent_directory_memory_and_initial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            dir_a = tmp_root / "dir_a"
+            dir_b = tmp_root / "dir_b"
+            dir_a.mkdir()
+            dir_b.mkdir()
+
+            controller = self.controller()
+
+            # 1. When called with an existing directory, that directory is passed as initial
+            with patch("hr_toolkit.gui_qt.controller.QFileDialog.getExistingDirectory", return_value=str(dir_b)) as chooser:
+                chosen = controller.chooseProjectParent(str(dir_a))
+                self.assertEqual(chosen, str(dir_b))
+                chooser.assert_called_once()
+                self.assertEqual(chooser.call_args.args[2], str(dir_a.resolve()))
+                # Memory is updated to chosen directory
+                self.assertEqual(controller._last_selected_dir, dir_b)
+
+            # 2. When user cancels, empty string is returned and memory does NOT change
+            with patch("hr_toolkit.gui_qt.controller.QFileDialog.getExistingDirectory", return_value="") as chooser:
+                chosen = controller.chooseProjectParent(str(dir_a))
+                self.assertEqual(chosen, "")
+                # Memory remains dir_b
+                self.assertEqual(controller._last_selected_dir, dir_b)
+
+            controller.close()
 
 
 if __name__ == "__main__":

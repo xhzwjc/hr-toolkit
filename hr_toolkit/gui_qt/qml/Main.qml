@@ -1800,7 +1800,7 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 AppTextField { id: projectParentField; Layout.fillWidth: true; selectByMouse: true }
-                AppButton { text: "选择其他位置"; onClicked: { var chosen = controller.chooseProjectParent(); if (chosen) projectParentField.text = chosen } }
+                AppButton { text: "选择其他位置"; onClicked: { var chosen = controller.chooseProjectParent(projectParentField.text); if (chosen) projectParentField.text = chosen } }
             }
             Text { Layout.fillWidth: true; text: projectParentField.text && projectNameField.text ? (projectParentField.text + "/" + projectNameField.text) : ""; color: root.primary; font.pixelSize: 11; elide: Text.ElideMiddle }
         }

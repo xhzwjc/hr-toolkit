@@ -212,6 +212,8 @@ class AppController(QObject):
         self._pending_update: UpdateInfo | None = None
         self._update_cancel_event: threading.Event | None = None
         self._workspace_scan_cancel_event: threading.Event | None = None
+        self._workspace_recovery_blocked: bool = False
+        self._workspace_recovery_error: str = ""
         self._shutdown_requested = False
         self._shutdown_wait_started = 0.0
 
@@ -520,6 +522,8 @@ class AppController(QObject):
 
     @Property(bool, notify=projectChanged)
     def projectWritable(self) -> bool:
+        if self._workspace_recovery_blocked:
+            return False
         return bool(self._project_store is not None and self._project_store.writable)
 
     @constant_property(str)
@@ -631,9 +635,17 @@ class AppController(QObject):
     def setFieldValue(self, field_id: str, value: Any) -> None:
         state = self._form_states[self._state_key()]
         state[field_id] = value
-        if field_id in {"rename_mode", "collect_all", "library_mode"}:
-            if field_id == "library_mode" and value == "flat_ocr":
+        if field_id == "use_ocr_cache" and state.get("library_mode") != "flat_ocr":
+            state.pop("_saved_use_ocr_cache", None)
+        elif field_id == "library_mode":
+            if value == "flat_ocr":
+                if "_saved_use_ocr_cache" not in state:
+                    state["_saved_use_ocr_cache"] = bool(state.get("use_ocr_cache", True))
                 state["use_ocr_cache"] = True
+            else:
+                if "_saved_use_ocr_cache" in state:
+                    state["use_ocr_cache"] = state.pop("_saved_use_ocr_cache")
+        if field_id in {"rename_mode", "collect_all", "library_mode", "use_ocr_cache"}:
             self.specChanged.emit()
             self._bump_form_revision()
 
@@ -999,11 +1011,20 @@ class AppController(QObject):
         self.supportChanged.emit()
 
     @Slot(result=str)
-    def chooseProjectParent(self) -> str:
+    @Slot(str, result=str)
+    def chooseProjectParent(self, current: str = "") -> str:
+        current_dir = Path(str(current or "").strip())
+        if current_dir.is_dir():
+            initial = str(current_dir.resolve())
+        else:
+            initial = self._file_dialog_initial_dir("new_project")
         selected = QFileDialog.getExistingDirectory(
-            self._dialog_parent(), "选择项目保存位置", self.defaultProjectParent
+            self._dialog_parent(), "选择项目保存位置", initial
         )
-        return str(selected or "")
+        if selected:
+            self._remember_file_dialog_path(selected)
+            return str(selected)
+        return ""
 
     @Slot()
     def requestCreateProject(self) -> None:
@@ -1014,6 +1035,13 @@ class AppController(QObject):
     @Slot(str, str)
     def createProject(self, name: str, parent: str) -> None:
         if self._busy or self._workspace_busy or self._project_opening:
+            return
+        if self._workspace_recovery_blocked:
+            self.notificationRequested.emit(
+                "项目未安全恢复",
+                "当前项目处于未恢复状态，禁止新建项目。请重新打开当前项目以恢复状态。",
+                "error",
+            )
             return
         target, error = workspace_project_creation_target(parent, name)
         if error or target is None:
@@ -1037,6 +1065,13 @@ class AppController(QObject):
     def openProjectDialog(self) -> None:
         if self._busy or self._workspace_busy or self._project_opening:
             return
+        if self._workspace_recovery_blocked:
+            self.notificationRequested.emit(
+                "项目未安全恢复",
+                "当前项目处于未恢复状态，禁止打开其他项目。请重新打开当前项目以恢复状态。",
+                "error",
+            )
+            return
         selected = QFileDialog.getExistingDirectory(
             self._dialog_parent(), "打开工作项目", self._file_dialog_initial_dir()
         )
@@ -1048,6 +1083,16 @@ class AppController(QObject):
     def openProject(self, path: str) -> None:
         if self._busy or self._workspace_busy or self._project_opening:
             return
+        if self._workspace_recovery_blocked:
+            target_path = Path(path).resolve()
+            current_path = self._project_path.resolve() if self._project_path else None
+            if target_path != current_path:
+                self.notificationRequested.emit(
+                    "项目未安全恢复",
+                    "当前项目处于未恢复状态，禁止切换到其他项目。请先重新打开当前项目以恢复状态。",
+                    "error",
+                )
+                return
         self._project_generation += 1
         generation = self._project_generation
         self._project_opening = True
@@ -1071,12 +1116,15 @@ class AppController(QObject):
         self._project_store = store
         self._project_path = Path(path)
         self._project_opening = False
+        self._workspace_recovery_blocked = False
+        self._workspace_recovery_error = ""
         if previous is not None:
             try:
                 previous.close()
             except Exception as exc:
                 runlog.log_exception("关闭旧工作项目失败", exc)
         self._remember_project(self._project_path)
+        self._remember_file_dialog_path(self._project_path)
         self._save_workspace_preferences()
         self.projectChanged.emit()
         self.refreshWorkspace()
@@ -1519,6 +1567,13 @@ class AppController(QObject):
         return target, None
 
     def _start_workspace_import(self, sources: list[Path]) -> None:
+        if self._workspace_recovery_blocked:
+            self.notificationRequested.emit(
+                "项目未安全恢复",
+                "当前项目处于未恢复状态，写入已锁定。请重新打开当前项目以恢复状态。",
+                "error",
+            )
+            return
         resolved = self._workspace_import_target()
         store = self._project_store
         if resolved is None or store is None:
@@ -1549,7 +1604,22 @@ class AppController(QObject):
             except ImportCancelled:
                 self._workspaceImportFinished.emit(False, "资料导入已取消。")
             except Exception as exc:
-                self._workspaceImportFinished.emit(False, f"资料没有导入：{exc}")
+                runlog.log_exception("工作区资料导入失败", exc)
+                recovery_ok = True
+                try:
+                    store.refresh()
+                except Exception as refresh_exc:
+                    runlog.log_exception("工作区项目状态恢复失败", refresh_exc)
+                    recovery_ok = False
+                    self._workspace_recovery_blocked = True
+                    self._workspace_recovery_error = str(refresh_exc)
+                if recovery_ok:
+                    self._workspaceImportFinished.emit(False, f"资料没有导入，项目已恢复到安全状态：{exc}")
+                else:
+                    self._workspaceImportFinished.emit(
+                        False,
+                        f"项目状态恢复失败：{self._workspace_recovery_error}。写入与切换已被锁定，请重新打开当前项目。",
+                    )
             else:
                 self._workspaceImportFinished.emit(True, "资料已安全保存到当前项目。")
 
@@ -1565,8 +1635,13 @@ class AppController(QObject):
         self._workspace_busy = False
         self._workspace_cancel_event = None
         self.workspaceBusyChanged.emit()
-        self._append_log(message, "success" if success else "warning")
-        self.notificationRequested.emit("项目文件" if success else "导入未完成", message, "info" if success else "warning")
+        if self._workspace_recovery_blocked:
+            self.projectChanged.emit()
+            self._append_log(message, "error")
+            self.notificationRequested.emit("项目未安全恢复", message, "error")
+        else:
+            self._append_log(message, "success" if success else "warning")
+            self.notificationRequested.emit("项目文件" if success else "导入未完成", message, "info" if success else "warning")
         self.refreshWorkspace()
 
     @staticmethod
@@ -1972,7 +2047,9 @@ class AppController(QObject):
     def restoreSelectedTrash(self) -> None:
         store = self._project_store
         batch_id = self._trash_selected_id
-        if store is None or not batch_id or self._trash_busy or not store.writable or self._busy or self._workspace_busy:
+        if store is None or not batch_id or self._trash_busy or not store.writable or self._busy or self._workspace_busy or self._workspace_recovery_blocked:
+            if self._workspace_recovery_blocked:
+                self.notificationRequested.emit("项目未安全恢复", "当前项目处于未恢复状态，写入已锁定。请重新打开当前项目以恢复状态。", "error")
             return
         self._trash_busy = True
         self.trashChanged.emit()
@@ -2031,7 +2108,9 @@ class AppController(QObject):
 
     def _move_project_batch_to_trash(self, batch_id: str) -> None:
         store = self._project_store
-        if store is None or not store.writable or self._busy or self._workspace_busy:
+        if store is None or not store.writable or self._busy or self._workspace_busy or self._workspace_recovery_blocked:
+            if self._workspace_recovery_blocked:
+                self.notificationRequested.emit("项目未安全恢复", "当前项目处于未恢复状态，写入已锁定。请重新打开当前项目以恢复状态。", "error")
             return
         self._workspace_busy = True
         self.workspaceBusyChanged.emit()
@@ -2217,6 +2296,9 @@ class AppController(QObject):
         store = self._project_store
         if store is None:
             self.notificationRequested.emit("请先打开工作项目", "请先新建或打开一个工作项目。", "warning")
+            return
+        if self._workspace_recovery_blocked:
+            self.notificationRequested.emit("项目未安全恢复", "当前项目处于未恢复状态，写入已锁定。请重新打开当前项目以恢复状态。", "error")
             return
         if not store.writable:
             self.notificationRequested.emit("当前项目只能查看", store.workspace.read_only_reason or "项目为只读状态。", "warning")

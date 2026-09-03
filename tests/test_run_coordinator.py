@@ -110,6 +110,7 @@ class ProjectRunCoordinatorTests(unittest.TestCase):
                 store.close()
 
     def test_coordinator_folder_rename_operates_on_project_copy_and_preserves_customer_source(self) -> None:
+        import hashlib
         from hr_toolkit.project_store import CATEGORY_RESULTS
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -117,7 +118,19 @@ class ProjectRunCoordinatorTests(unittest.TestCase):
             customer_source = root / "人员资料"
             person_folder = customer_source / "张三"
             person_folder.mkdir(parents=True)
-            (person_folder / "说明.txt").write_text("record", encoding="utf-8")
+            (person_folder / "说明.txt").write_text("record-content-original", encoding="utf-8")
+            (customer_source / "根文件.txt").write_text("root-file-original", encoding="utf-8")
+
+            def _hash_tree(directory: Path) -> dict[str, str]:
+                result = {}
+                for path in sorted(directory.rglob("*")):
+                    if path.is_file():
+                        rel = str(path.relative_to(directory))
+                        result[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+                return result
+
+            hashes_before = _hash_tree(customer_source)
+            self.assertEqual(len(hashes_before), 2)
 
             project_root = root / "project"
             store = ProjectStore.create(project_root, "测试项目")
@@ -146,7 +159,9 @@ class ProjectRunCoordinatorTests(unittest.TestCase):
                 self.assertFalse(errors)
                 self.assertEqual(len(success), 1)
 
-                # Customer source folder MUST REMAIN UNTOUCHED
+                # Customer source folder MUST REMAIN UNTOUCHED - verified by SHA-256
+                hashes_after = _hash_tree(customer_source)
+                self.assertEqual(hashes_before, hashes_after)
                 self.assertTrue((customer_source / "张三" / "说明.txt").is_file())
                 self.assertFalse((customer_source / "张三-已核对").exists())
 
