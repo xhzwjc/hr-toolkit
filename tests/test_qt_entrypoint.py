@@ -266,6 +266,28 @@ class QtEntrypointTests(unittest.TestCase):
                 self.assertEqual(os.environ["QSG_RHI_BACKEND"], "opengl")
                 self.assertEqual(os.environ["QML_DISABLE_DISK_CACHE"], "1")
 
+    def test_software_rendering_environment_sets_backend_and_basic_loop(self) -> None:
+        with patch.dict(os.environ, {"HR_TOOLKIT_QT_SOFTWARE_RENDER": "1"}, clear=True):
+            _prepare_environment()
+            self.assertEqual(os.environ["QT_QUICK_BACKEND"], "software")
+            self.assertEqual(os.environ["QSG_RENDER_LOOP"], "basic")
+
+    def test_apply_software_rendering_flags(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            remaining = hr_toolkit_app._apply_software_rendering_flags(["--software-rendering", "foo"])
+            self.assertEqual(remaining, ["foo"])
+            self.assertEqual(os.environ.get("HR_TOOLKIT_QT_SOFTWARE_RENDER"), "1")
+
+        with patch.dict(os.environ, {}, clear=True):
+            remaining = hr_toolkit_app._apply_software_rendering_flags(["--software-render"])
+            self.assertEqual(remaining, [])
+            self.assertEqual(os.environ.get("HR_TOOLKIT_QT_SOFTWARE_RENDER"), "1")
+
+        with patch.dict(os.environ, {}, clear=True):
+            remaining = hr_toolkit_app._apply_software_rendering_flags(["--foo"])
+            self.assertEqual(remaining, ["--foo"])
+            self.assertNotIn("HR_TOOLKIT_QT_SOFTWARE_RENDER", os.environ)
+
     def test_qt_entrypoint_does_not_subclass_the_native_window(self) -> None:
         source_path = (
             Path(__file__).resolve().parents[1]

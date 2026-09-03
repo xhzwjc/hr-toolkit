@@ -14,9 +14,11 @@ os.environ.setdefault("HR_TOOLKIT_SKIP_UPDATE", "1")
 try:
     from hr_toolkit.gui_qt.compat import QCoreApplication
     from hr_toolkit.gui_qt.controller import AppController
+    from hr_toolkit.gui_qt.models import LogModel
 except ImportError:
     QCoreApplication = None
     AppController = None
+    LogModel = None
 
 
 @unittest.skipUnless(AppController is not None, "PySide GUI runtime is not installed")
@@ -264,6 +266,66 @@ class QtControllerTests(unittest.TestCase):
         self.assertFalse(update_cancel.called)
         controller._workspace_cancel_event = None
         controller._update_cancel_event = None
+        controller.close()
+
+    def test_log_model_append_batch_preserves_order_and_truncation(self) -> None:
+        model = LogModel()
+        items = [{"time": "12:00:00", "text": f"msg_{i}", "level": "info"} for i in range(15)]
+        model.append_batch(items[:10], maximum=10)
+        self.assertEqual(len(model), 10)
+        self.assertEqual(model.item_at(0)["text"], "msg_0")
+        self.assertEqual(model.item_at(9)["text"], "msg_9")
+
+        # Adding 5 more with maximum=10 should drop oldest 5 and keep newest 10
+        model.append_batch(items[10:], maximum=10)
+        self.assertEqual(len(model), 10)
+        self.assertEqual(model.item_at(0)["text"], "msg_5")
+        self.assertEqual(model.item_at(9)["text"], "msg_14")
+
+    def test_controller_log_batching_and_synchronous_flush(self) -> None:
+        controller = self.controller()
+        controller._clear_logs()
+        self.assertEqual(len(controller.logModel), 0)
+
+        # Emitting 10 logs buffers them before flush
+        for i in range(10):
+            controller._append_log(f"test_log_{i}", "info")
+        self.assertEqual(len(controller._log_buffer), 10)
+        self.assertEqual(len(controller.logModel), 0)
+
+        # Synchronous flush empties buffer and populates model in FIFO order
+        controller._flush_logs()
+        self.assertEqual(len(controller._log_buffer), 0)
+        self.assertEqual(len(controller.logModel), 10)
+        self.assertEqual(controller.logModel.item_at(0)["text"], "test_log_0")
+        self.assertEqual(controller.logModel.item_at(9)["text"], "test_log_9")
+
+        # _apply_run_finished forces synchronous flush
+        controller._append_log("trailing_message", "success")
+        self.assertEqual(len(controller._log_buffer), 1)
+        controller._apply_run_finished()
+        self.assertEqual(len(controller._log_buffer), 0)
+        self.assertEqual(len(controller.logModel), 11)
+        self.assertEqual(controller.logModel.item_at(10)["text"], "trailing_message")
+        controller.close()
+
+    def test_controller_log_timer_flush(self) -> None:
+        import time
+
+        controller = self.controller()
+        controller._clear_logs()
+        controller._append_log("timer_msg", "info")
+        self.assertEqual(len(controller.logModel), 0)
+        self.assertEqual(len(controller._log_buffer), 1)
+
+        # Let Qt event loop process events until timer fires
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and len(controller.logModel) == 0:
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+
+        self.assertEqual(len(controller.logModel), 1)
+        self.assertEqual(controller.logModel.item_at(0)["text"], "timer_msg")
         controller.close()
 
 

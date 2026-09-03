@@ -14,6 +14,16 @@ from .smoke import mark_stage
 
 
 def _prepare_environment() -> None:
+    software_requested = (
+        os.environ.get("HR_TOOLKIT_QT_SOFTWARE_RENDER", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+        or os.environ.get("HR_TOOLKIT_SOFTWARE_RENDER", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if software_requested:
+        os.environ.setdefault("QT_QUICK_BACKEND", "software")
+        os.environ.setdefault("QSG_RENDER_LOOP", "basic")
+
     # Windows must retain Qt's platform/driver selection.  Modern Qt normally
     # chooses its threaded scene-graph renderer there, while the Win7 Qt 5 lane
     # can select a compatible path for the actual GPU.  The production Qt
@@ -117,6 +127,7 @@ def main() -> int:
 
     runlog.log_line(
         f"HR Workbench v{__version__} Qt Quick 启动（{sys.platform}，{QT_API}，"
+        f"后端 {os.environ.get('QT_QUICK_BACKEND', 'hardware')}，"
         f"渲染循环 {os.environ.get('QSG_RENDER_LOOP', 'auto')}）"
     )
     smoke_tool = str(os.environ.get("HR_TOOLKIT_QT_SMOKE_TOOL", "")).strip()

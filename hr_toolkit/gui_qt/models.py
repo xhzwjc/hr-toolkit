@@ -63,6 +63,33 @@ class ObjectListModel(QAbstractListModel):
         self._items.append({role: item.get(role) for role in self._roles})
         self.endInsertRows()
 
+    def append_batch(
+        self,
+        items: Iterable[Mapping[str, Any]],
+        *,
+        maximum: int | None = None,
+    ) -> None:
+        normalized = [
+            {role: item.get(role) for role in self._roles}
+            for item in items
+        ]
+        if not normalized:
+            return
+        if maximum is not None and maximum > 0 and len(normalized) > maximum:
+            normalized = normalized[-maximum:]
+        if maximum is not None and maximum > 0:
+            total_after = len(self._items) + len(normalized)
+            if total_after > maximum:
+                remove_count = min(total_after - maximum, len(self._items))
+                if remove_count > 0:
+                    self.beginRemoveRows(QModelIndex(), 0, remove_count - 1)
+                    del self._items[:remove_count]
+                    self.endRemoveRows()
+        row = len(self._items)
+        self.beginInsertRows(QModelIndex(), row, row + len(normalized) - 1)
+        self._items.extend(normalized)
+        self.endInsertRows()
+
     def remove_at(self, row: int) -> bool:
         if row < 0 or row >= len(self._items):
             return False

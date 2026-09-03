@@ -65,8 +65,18 @@ def _run_desktop() -> int:
         raise DesktopRuntimeUnavailable(message) from exc
 
 
+def _apply_software_rendering_flags(args: list[str]) -> list[str]:
+    software_flags = {"--software-rendering", "--software-render"}
+    if any(arg.casefold() in software_flags for arg in args):
+        os.environ["HR_TOOLKIT_QT_SOFTWARE_RENDER"] = "1"
+        return [arg for arg in args if arg.casefold() not in software_flags]
+    return list(args)
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    filtered_args = _apply_software_rendering_flags(sys.argv[1:])
+    sys.argv = [sys.argv[0]] + filtered_args
     if sys.argv[1:] == ["--qt-smoke-test"]:
         from hr_toolkit.gui_qt.smoke import run as run_qt_smoke
 

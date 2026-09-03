@@ -150,6 +150,11 @@ class AppController(QObject):
         self._form_revision = 0
         self._input_model = InputFileModel(self)
         self._log_model = LogModel(self)
+        self._log_buffer: list[dict[str, Any]] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setSingleShot(True)
+        self._log_flush_timer.setInterval(50)
+        self._log_flush_timer.timeout.connect(self._flush_logs)
         self._workspace_model = WorkspaceModel(self)
         self._history_model = HistoryModel(self)
         self._trash_model = TrashModel(self)
@@ -588,8 +593,9 @@ class AppController(QObject):
         self._spec = spec
         self._ensure_state(spec)
         self._sync_input_model()
-        self._log_model.clear()
+        self._clear_logs()
         self._append_log(spec.log_text, "info")
+        self._flush_logs()
         self.specChanged.emit()
         self.materialChanged.emit()
         self.supportChanged.emit()
@@ -609,8 +615,9 @@ class AppController(QObject):
         self._spec = spec
         self._ensure_state(spec)
         self._sync_input_model()
-        self._log_model.clear()
+        self._clear_logs()
         self._append_log(spec.log_text, "info")
+        self._flush_logs()
         self.specChanged.emit()
         self.materialChanged.emit()
         self.supportChanged.emit()
@@ -1745,8 +1752,9 @@ class AppController(QObject):
                 support = paths[0]
             self._support_states[self._state_key()] = str(support)
         self._sync_input_model()
-        self._log_model.clear()
+        self._clear_logs()
         self._append_log(self._spec.log_text, "info")
+        self._flush_logs()
         self.specChanged.emit()
         self.supportChanged.emit()
         self.materialChanged.emit()
@@ -2184,8 +2192,9 @@ class AppController(QObject):
 
         self._set_busy(True)
         self._preview_cancel_event = threading.Event()
-        self._log_model.clear()
+        self._clear_logs()
         self._append_log("正在生成改名预览…", "info")
+        self._flush_logs()
 
         def worker() -> None:
             try:
@@ -2216,6 +2225,7 @@ class AppController(QObject):
             self._append_log(f"另有 {len(operations) - 120} 项，界面不再逐条显示。", "muted")
         for warning in warnings[:20]:
             self._append_log(str(warning), "warning")
+        self._flush_logs()
         if not operations:
             self.notificationRequested.emit("没有可改名项目", "没有找到可以安全改名的项目，请检查目录、名单、文件类型和预览提醒。", "info")
             return
@@ -2320,8 +2330,9 @@ class AppController(QObject):
             kwargs=invocation.kwargs,
         )
         self._set_busy(True)
-        self._log_model.clear()
+        self._clear_logs()
         self._append_log(f"开始{invocation.tool_name}，请稍候…", "info")
+        self._flush_logs()
         callbacks = RunCallbacks(
             log=lambda message: self._logIncoming.emit(str(message), "info"),
             progress=lambda current, total, message: self._runProgress.emit(int(current), int(total), str(message)),
@@ -2351,6 +2362,7 @@ class AppController(QObject):
             self._append_log(f"共有 {len(warnings)} 条提醒。", "warning")
             for warning in warnings[:30]:
                 self._append_log(str(warning), "warning")
+        self._flush_logs()
         self.notificationRequested.emit("处理完成", "结果已安全保存到当前项目。", "success")
         self.refreshWorkspace()
 
@@ -2359,25 +2371,48 @@ class AppController(QObject):
         self._last_run_by_key[self._state_key()] = (datetime.now().strftime("%H:%M"), False)
         self.specChanged.emit()
         self._append_log(f"处理失败：{message}", "error")
+        self._flush_logs()
         self.notificationRequested.emit("处理失败", message, "error")
         self.refreshWorkspace()
 
     @Slot()
     def _apply_run_stopped(self) -> None:
         self._append_log("本次处理已安全停止。", "warning")
+        self._flush_logs()
         self.notificationRequested.emit("已停止", "本次处理已安全结束，未完成批次可在项目中追溯。", "info")
         self.refreshWorkspace()
 
     @Slot()
     def _apply_run_finished(self) -> None:
+        self._flush_logs()
         self._set_busy(False)
+
+    @Slot()
+    def _flush_logs(self) -> None:
+        if hasattr(self, "_log_flush_timer") and self._log_flush_timer.isActive():
+            self._log_flush_timer.stop()
+        if not hasattr(self, "_log_buffer") or not self._log_buffer:
+            return
+        buffered = self._log_buffer
+        self._log_buffer = []
+        self._log_model.append_batch(buffered, maximum=MAX_LOG_ROWS)
+
+    def _clear_logs(self) -> None:
+        if hasattr(self, "_log_flush_timer") and self._log_flush_timer.isActive():
+            self._log_flush_timer.stop()
+        if hasattr(self, "_log_buffer"):
+            self._log_buffer.clear()
+        self._log_model.clear()
 
     @Slot(str, str)
     def _append_log(self, text: str, level: str = "info") -> None:
-        self._log_model.append(
-            {"time": datetime.now().strftime("%H:%M:%S"), "text": str(text), "level": str(level)},
-            maximum=MAX_LOG_ROWS,
+        self._log_buffer.append(
+            {"time": datetime.now().strftime("%H:%M:%S"), "text": str(text), "level": str(level)}
         )
+        if len(self._log_buffer) >= 30:
+            self._flush_logs()
+        elif hasattr(self, "_log_flush_timer") and not self._log_flush_timer.isActive():
+            self._log_flush_timer.start(50)
 
     @Slot()
     def openLastResult(self) -> None:
@@ -2462,6 +2497,9 @@ class AppController(QObject):
     def close(self) -> None:
         if self._closed:
             return
+        self._flush_logs()
+        if hasattr(self, "_log_flush_timer") and self._log_flush_timer.isActive():
+            self._log_flush_timer.stop()
         self._closed = True
         if self._preview_cancel_event is not None:
             self._preview_cancel_event.set()
