@@ -28,6 +28,19 @@ class QtEntrypointTests(unittest.TestCase):
             self.skipTest(f"Qt runtime is not installed in this CI lane: {exc}")
         return qt_compat
 
+    def test_production_window_and_dialog_inherit_embedded_brand_icon(self) -> None:
+        self._qt_compat_or_skip()
+        probe = Path(__file__).with_name("qt_icon_probe.py")
+        completed = subprocess.run(
+            [sys.executable, "-X", "faulthandler", str(probe)],
+            cwd=str(probe.resolve().parents[1]),
+            env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "HR_TOOLKIT_SKIP_UPDATE": "1"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", errors="replace", timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("brand icon: 6 sizes, main window and dialog OK", completed.stdout)
+
     def test_production_qml_connections_preserve_every_signal_argument(self) -> None:
         self._qt_compat_or_skip()
         probe = Path(__file__).with_name("qt_connections_probe.py")

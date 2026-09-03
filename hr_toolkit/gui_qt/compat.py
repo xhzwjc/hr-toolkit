@@ -17,7 +17,7 @@ try:
         Signal,
         Slot,
     )
-    from PySide6.QtGui import QDesktopServices, QFontDatabase, QGuiApplication
+    from PySide6.QtGui import QDesktopServices, QFontDatabase, QGuiApplication, QIcon, QPixmap
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -37,7 +37,7 @@ except ImportError:
         Signal,
         Slot,
     )
-    from PySide2.QtGui import QDesktopServices, QFontDatabase, QGuiApplication  # type: ignore[no-redef]
+    from PySide2.QtGui import QDesktopServices, QFontDatabase, QGuiApplication, QIcon, QPixmap  # type: ignore[no-redef]
     from PySide2.QtQml import QQmlApplicationEngine  # type: ignore[no-redef]
     from PySide2.QtWidgets import QApplication, QFileDialog  # type: ignore[no-redef]
 

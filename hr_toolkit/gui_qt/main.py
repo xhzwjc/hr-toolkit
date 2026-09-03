@@ -41,6 +41,22 @@ def _prepare_environment() -> None:
     os.environ.setdefault("QML_DISABLE_DISK_CACHE", "0")
 
 
+def _application_icon():
+    """Use the same embedded logo as the EXE, without external resource paths."""
+    import base64
+
+    from hr_toolkit._icon_data import APP_ICON_PNGS_BASE64
+    from .compat import QIcon, QPixmap
+
+    icon = QIcon()
+    for encoded in APP_ICON_PNGS_BASE64.values():
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(base64.b64decode(encoded), "PNG"):
+            raise RuntimeError("无法加载应用图标。")
+        icon.addPixmap(pixmap)
+    return icon
+
+
 def main() -> int:
     _prepare_environment()
     install_crash_logging()
@@ -79,6 +95,9 @@ def main() -> int:
     app.setApplicationDisplayName("HR Workbench")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("HRToolkit")
+    # PyInstaller's --icon sets the EXE resource, not Qt Quick's window icon.
+    # Set this before QML creates any windows (also covers dialogs/taskbar).
+    app.setWindowIcon(_application_icon())
     system_font_enum = getattr(QFontDatabase, "SystemFont", None)
     general_font = (
         system_font_enum.GeneralFont
@@ -111,6 +130,7 @@ def main() -> int:
         controller.close()
         return 1
     root_window = engine.rootObjects()[0]
+    root_window.setIcon(app.windowIcon())
     live_resize_updater = LiveResizeUpdater(
         root_window if sys.platform.startswith("win") else None
     )
