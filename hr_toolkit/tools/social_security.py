@@ -235,7 +235,6 @@ class DetailRecord:
     management_fee: float | None
     amounts: dict[str, dict[str, float]] = field(default_factory=dict)
     bases: dict[str, float] = field(default_factory=dict)
-    base_period_counts: dict[str, int] = field(default_factory=dict)
     rates: dict[str, dict[str, float]] = field(default_factory=dict)
     arrears_amounts: dict[str, dict[str, float]] = field(default_factory=dict)
     difference_amounts: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -958,10 +957,7 @@ def _build_detail_records(
                 record,
                 front_group,
                 normalized_natures,
-                accumulate_bases=group_by_period and _front_group_source_period_count(front_group) > 1,
             )
-            if group_by_period and record.main_periods:
-                record.period = _format_period_span(record.main_periods)
             if group_index == primary_index:
                 _add_difference_payment_lines(record, difference_items)
             _append_payment_nature_warnings(record, warnings)
@@ -986,24 +982,15 @@ def _group_front_payment_items(
         key=lambda item: (item[0][0] if item[0] else "999999", item[0]),
     )
     groups: list[list[tuple[SocialPaymentLine, RosterPerson, str, str, str]]] = []
-    group_periods: list[set[str]] = []
-    group_profiles: list[tuple[tuple[str, str, float, float], ...] | None] = []
-    for periods, bucket_items in ordered_buckets:
-        profile = _front_payment_profile(bucket_items) if len(periods) == 1 else None
-        can_merge = (
-            bool(groups)
-            and profile is not None
-            and group_profiles[-1] == profile
-            and len(periods) == 1
-            and _periods_are_adjacent(group_periods[-1], periods[0])
-        )
-        if can_merge:
-            groups[-1].extend(bucket_items)
-            group_periods[-1].update(periods)
+    profile_groups: dict[tuple[tuple[str, str, float, float], ...], int] = {}
+    for _periods, bucket_items in ordered_buckets:
+        profile = _front_payment_profile(bucket_items)
+        if profile is not None and profile in profile_groups:
+            groups[profile_groups[profile]].extend(bucket_items)
             continue
         groups.append(list(bucket_items))
-        group_periods.append(set(periods))
-        group_profiles.append(profile)
+        if profile is not None:
+            profile_groups[profile] = len(groups) - 1
     return groups
 
 
@@ -1020,14 +1007,7 @@ def _front_payment_profile(
     for values in bases_by_category.values():
         if any(not _amount_close(values[0], value) for value in values[1:]):
             return None
-    return tuple(sorted(profile))
-
-
-def _periods_are_adjacent(existing_periods: set[str], next_period: str) -> bool:
-    if not existing_periods or not _is_period(next_period):
-        return False
-    last_period = max(existing_periods)
-    return _period_sequence(last_period, next_period) == [last_period, next_period]
+    return tuple(sorted(set(profile)))
 
 
 def _primary_front_group_index(
@@ -1041,25 +1021,11 @@ def _primary_front_group_index(
     return max(len(groups) - 1, 0)
 
 
-def _front_group_source_period_count(
-    items: list[tuple[SocialPaymentLine, RosterPerson, str, str, str]],
-) -> int:
-    periods = {
-        (item[0].fee_period, item[0].fee_period_end or item[0].fee_period)
-        for item in items
-        if item[0].fee_period
-    }
-    return len(periods)
-
-
 def _add_front_payment_lines(
     record: DetailRecord,
     items: list[tuple[SocialPaymentLine, RosterPerson, str, str, str]],
     natures: dict[SocialPaymentLine, str],
-    *,
-    accumulate_bases: bool,
 ) -> None:
-    bases_by_category_period: dict[str, dict[tuple[str, str], list[float]]] = {}
     for line, _person, _account_display, _source_company, _source_place in items:
         if line.category not in SOCIAL_CATEGORIES:
             record.warnings.append(f"未识别险种：{line.category}")
@@ -1069,30 +1035,12 @@ def _add_front_payment_lines(
         side_amounts = record.amounts.setdefault(line.category, {"个人": 0.0, "单位": 0.0})
         side_amounts[line.side] = round(side_amounts.get(line.side, 0.0) + line.amount, 2)
         record.main_periods.update(line_periods)
-        if line.base is not None:
-            if accumulate_bases:
-                period_key = (line.fee_period, line.fee_period_end or line.fee_period)
-                bases_by_category_period.setdefault(line.category, {}).setdefault(period_key, []).append(line.base)
-            else:
-                record.bases[line.category] = line.base
+        if line.base is not None and line.category not in record.bases:
+            record.bases[line.category] = line.base
         if line.rate is not None:
             record.rates.setdefault(line.category, {})[line.side] = line.rate
         if natures[line] == PAYMENT_UNKNOWN:
             record.unknown_periods.setdefault(line.category, set()).update(line_periods)
-
-    if not accumulate_bases:
-        return
-    for category, period_values in bases_by_category_period.items():
-        total_base = 0.0
-        valid = True
-        for values in period_values.values():
-            if any(not _amount_close(values[0], value) for value in values[1:]):
-                valid = False
-                break
-            total_base += values[0]
-        if valid:
-            record.bases[category] = round(total_base, 4)
-            record.base_period_counts[category] = len(period_values)
 
 
 def _add_difference_payment_lines(
@@ -1782,8 +1730,7 @@ def _write_category_analysis(ws: Worksheet, start_row: int, records: list[Detail
         bases: list[float] = []
         for record in category_records:
             if category in record.bases:
-                period_count = max(record.base_period_counts.get(category, 1), 1)
-                bases.append(record.bases[category] / period_count)
+                bases.append(record.bases[category])
             else:
                 difference_base = _single_number(record.difference_bases.get(category, set()))
                 if difference_base is not None:
@@ -1959,7 +1906,7 @@ def _source_context(file_path: Path) -> SourceContext:
         label=file_path.name,
         file_period=file_period,
         container_period=container_period,
-        billing_period_hint=(file_period if file_period and not period_split_file else "") or (container_period if not file_period else ""),
+        billing_period_hint=file_period or container_period,
         period_split_file=period_split_file,
         account_hint=account_hint,
         company_hint=_company_hint_from_filename(hint_text),
