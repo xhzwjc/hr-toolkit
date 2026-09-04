@@ -4,7 +4,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from hr_toolkit.background_process import (
+    BusinessProcessError,
+    BusinessProcessStartError,
+    ProcessCallResult,
+)
 from hr_toolkit.project_store import ProjectStore
 from hr_toolkit.run_coordinator import (
     PROGRESS_UI_INTERVAL_SECONDS,
@@ -54,7 +60,7 @@ class ProjectRunCoordinatorTests(unittest.TestCase):
             args=(),
             kwargs={},
         )
-        payload, isolated = ProjectRunCoordinator._business_call(
+        payload, isolated = ProjectRunCoordinator()._business_call(
             request,
             (),
             {},
@@ -68,6 +74,142 @@ class ProjectRunCoordinatorTests(unittest.TestCase):
         self.assertGreaterEqual(len(progress), 1)
         self.assertLessEqual(len(progress), 2)
         self.assertEqual(progress[-1], (1000, 1000, "处理 1000"))
+
+    def test_process_start_failure_falls_back_without_changing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.txt"
+            source.write_text("unchanged-business-value", encoding="utf-8")
+            output_dir = root / "output"
+            output_dir.mkdir()
+            logs = []
+            request = RunRequest(
+                tool_id="probe",
+                tool_name="兼容模式测试",
+                group_name="测试",
+                description="兼容模式测试",
+                function=_copy_probe,
+                args=(source, output_dir),
+                kwargs={},
+            )
+
+            coordinator = ProjectRunCoordinator()
+            with patch(
+                "hr_toolkit.run_coordinator.should_use_process",
+                return_value=True,
+            ), patch(
+                "hr_toolkit.run_coordinator.run_business_process",
+                side_effect=BusinessProcessStartError("[WinError 2] 系统找不到指定的文件。"),
+            ) as process_call:
+                payload, isolated = coordinator._business_call(
+                    request,
+                    request.args,
+                    request.kwargs,
+                    threading.Event(),
+                    RunCallbacks(log=logs.append),
+                )
+                second_payload, second_isolated = coordinator._business_call(
+                    request,
+                    request.args,
+                    request.kwargs,
+                    threading.Event(),
+                    RunCallbacks(log=logs.append),
+                )
+
+            self.assertFalse(isolated)
+            self.assertFalse(second_isolated)
+            self.assertFalse(coordinator.process_isolation_available)
+            self.assertIn("WinError 2", coordinator.process_isolation_failure)
+            process_call.assert_called_once_with(
+                module_name=request.function.__module__,
+                function_name="_copy_probe",
+                args=request.args,
+                kwargs={},
+                cancel_event=unittest.mock.ANY,
+                on_progress=unittest.mock.ANY,
+            )
+            self.assertEqual(payload["value"], "unchanged-business-value")
+            self.assertEqual(second_payload, payload)
+            self.assertEqual(
+                (output_dir / "same.txt").read_text(encoding="utf-8"),
+                "unchanged-business-value",
+            )
+            self.assertEqual(
+                logs,
+                ["独立后台进程不可用，已自动切换兼容后台模式继续处理。"],
+            )
+
+    def test_running_process_failure_is_not_retried_in_thread(self) -> None:
+        business_calls = []
+
+        def probe():
+            business_calls.append("called")
+            return {"ok": True}
+
+        request = RunRequest(
+            tool_id="probe",
+            tool_name="失败测试",
+            group_name="测试",
+            description="失败测试",
+            function=probe,
+            args=(),
+            kwargs={},
+        )
+        with patch(
+            "hr_toolkit.run_coordinator.should_use_process",
+            return_value=True,
+        ), patch(
+            "hr_toolkit.run_coordinator.run_business_process",
+            side_effect=BusinessProcessError("后台业务已经失败"),
+        ):
+            with self.assertRaises(BusinessProcessError):
+                ProjectRunCoordinator()._business_call(
+                    request,
+                    (),
+                    {},
+                    threading.Event(),
+                    RunCallbacks(),
+                )
+
+        self.assertEqual(business_calls, [])
+
+    def test_hundred_inputs_still_use_exactly_one_worker_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = []
+            for index in range(100):
+                source = root / f"input-{index:03d}.xlsx"
+                source.write_bytes(b"x")
+                inputs.append(source)
+
+            def count_probe(input_paths, output_dir):
+                return {"count": len(input_paths)}
+
+            request = RunRequest(
+                tool_id="social_security",
+                tool_name="百文件测试",
+                group_name="测试",
+                description="百文件测试",
+                function=count_probe,
+                args=(inputs, root / "output"),
+                kwargs={},
+            )
+            expected = ProcessCallResult(payload={"count": 100}, elapsed_seconds=0.01)
+            with patch(
+                "hr_toolkit.run_coordinator.run_business_process",
+                return_value=expected,
+            ) as process_call:
+                payload, isolated = ProjectRunCoordinator()._business_call(
+                    request,
+                    request.args,
+                    request.kwargs,
+                    threading.Event(),
+                    RunCallbacks(),
+                )
+
+            self.assertTrue(isolated)
+            self.assertEqual(payload, {"count": 100})
+            process_call.assert_called_once()
 
     def test_project_snapshot_business_output_and_result_registration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

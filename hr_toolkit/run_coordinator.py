@@ -13,6 +13,7 @@ from . import runlog
 from .background_process import (
     BusinessProcessCancelled,
     BusinessProcessError,
+    BusinessProcessStartError,
     run_business_process,
     should_use_process,
 )
@@ -59,6 +60,12 @@ class ProjectRunCoordinator:
         self._thread: threading.Thread | None = None
         self._cancel_event: threading.Event | None = None
         self._active_batch_id: str | None = None
+        # One controller owns one coordinator for the whole desktop session.
+        # Once this machine proves that the frozen worker cannot be launched,
+        # remember it instead of paying the same failing CreateProcess cost on
+        # every subsequent large batch.
+        self._process_isolation_available = True
+        self._process_isolation_failure = ""
 
     @property
     def running(self) -> bool:
@@ -69,6 +76,23 @@ class ProjectRunCoordinator:
     def active_batch_id(self) -> str | None:
         with self._lock:
             return self._active_batch_id
+
+    @property
+    def process_isolation_available(self) -> bool:
+        with self._lock:
+            return self._process_isolation_available
+
+    @property
+    def process_isolation_failure(self) -> str:
+        with self._lock:
+            return self._process_isolation_failure
+
+    def note_process_start_failure(self, error: BaseException) -> None:
+        """Open the session circuit breaker after a proven launch failure."""
+
+        with self._lock:
+            self._process_isolation_available = False
+            self._process_isolation_failure = str(error)
 
     def start(self, store: Any, request: RunRequest, callbacks: RunCallbacks) -> bool:
         with self._lock:
@@ -113,8 +137,8 @@ class ProjectRunCoordinator:
             value = {"result": result}
         return serializable(value)
 
-    @staticmethod
     def _business_call(
+        self,
         request: RunRequest,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
@@ -152,27 +176,40 @@ class ProjectRunCoordinator:
             for name, value in bound.arguments.items()
             if name not in {"output_dir", "cancelled", "progress_callback"}
         }
-        use_process = should_use_process(request.tool_id, (), load_arguments)
+        use_process = (
+            self.process_isolation_available
+            and should_use_process(request.tool_id, (), load_arguments)
+        )
         if use_process:
-            result = run_business_process(
-                module_name=request.function.__module__,
-                function_name=request.function.__name__,
-                args=args,
-                kwargs=call_kwargs,
-                cancel_event=cancel_event,
-                on_progress=report_progress,
-            )
-            flush_progress()
-            return result.payload, True
+            try:
+                result = run_business_process(
+                    module_name=request.function.__module__,
+                    function_name=request.function.__name__,
+                    args=args,
+                    kwargs=call_kwargs,
+                    cancel_event=cancel_event,
+                    on_progress=report_progress,
+                )
+            except BusinessProcessStartError as exc:
+                self.note_process_start_failure(exc)
+                fallback_message = (
+                    "独立后台进程不可用，已自动切换兼容后台模式继续处理。"
+                )
+                callbacks.log(fallback_message)
+                runlog.log_line(f"{fallback_message} 原因：{exc}")
+            else:
+                flush_progress()
+                return result.payload, True
 
+        thread_call_kwargs = dict(call_kwargs)
         parameters = inspect.signature(request.function).parameters
         if "cancelled" in parameters:
-            call_kwargs["cancelled"] = cancel_event.is_set
+            thread_call_kwargs["cancelled"] = cancel_event.is_set
         if "progress_callback" in parameters:
-            call_kwargs["progress_callback"] = report_progress
-        result = request.function(*args, **call_kwargs)
+            thread_call_kwargs["progress_callback"] = report_progress
+        result = request.function(*args, **thread_call_kwargs)
         flush_progress()
-        return ProjectRunCoordinator._payload(result), False
+        return self._payload(result), False
 
     def _run(
         self,

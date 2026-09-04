@@ -17,11 +17,22 @@ os.environ.setdefault("HR_TOOLKIT_SKIP_UPDATE", "1")
 try:
     from hr_toolkit.gui_qt.compat import QCoreApplication
     from hr_toolkit.gui_qt.controller import AppController
+    from hr_toolkit.gui_qt.form_specs import ToolInvocation
     from hr_toolkit.gui_qt.models import LogModel
 except ImportError:
     QCoreApplication = None
     AppController = None
+    ToolInvocation = None
     LogModel = None
+
+
+def _preview_probe(*, cancelled=None):
+    if cancelled is not None and cancelled():
+        raise RuntimeError("cancelled")
+    return {
+        "operations": [{"source": "旧名称", "target": "新名称"}],
+        "warnings": [],
+    }
 
 
 @unittest.skipUnless(AppController is not None, "PySide GUI runtime is not installed")
@@ -100,6 +111,44 @@ class QtControllerTests(unittest.TestCase):
         self.assertEqual(len(notifications), 1)
         self.assertEqual(notifications[0][0], "请先打开工作项目")
         self.assertIn("新建或打开", notifications[0][1])
+        controller.close()
+
+    def test_preview_process_start_failure_uses_compatible_worker(self) -> None:
+        from hr_toolkit.background_process import BusinessProcessStartError
+
+        controller = self.controller()
+        invocation = ToolInvocation(
+            nav_id="folder_rename",
+            variant="default",
+            tool_id="folder_rename",
+            tool_name="资料文件夹改名",
+            group_name="人员与档案",
+            function_module="tests.test_qt_controller",
+            function_name="_preview_probe",
+            args=(),
+            kwargs={},
+            description="预览兼容测试",
+            preview=True,
+        )
+
+        with patch(
+            "hr_toolkit.background_process.run_business_process",
+            side_effect=BusinessProcessStartError(
+                "[WinError 2] 系统找不到指定的文件。"
+            ),
+        ), patch("hr_toolkit.gui_qt.controller.threading.Thread") as thread:
+            controller._start_preview(invocation)
+            worker = thread.call_args.kwargs["target"]
+            worker()
+
+        self.assertFalse(controller.busy)
+        self.assertEqual(
+            controller._pending_preview,
+            {
+                "operations": [{"source": "旧名称", "target": "新名称"}],
+                "warnings": [],
+            },
+        )
         controller.close()
 
     def test_workspace_selection_details_follow_model_refresh(self) -> None:

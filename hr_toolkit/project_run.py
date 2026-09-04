@@ -158,7 +158,8 @@ def import_project_run_sources(
 
     replacements: dict[str, list[Path]] = {}
     project_root = Path(store.root).absolute()
-    for source in sources:
+
+    def source_location(source: SourceSpec) -> tuple[Path, bool, bool]:
         source_path = Path(source.path).expanduser().absolute()
         source_was_file = source_path.is_file()
         try:
@@ -166,6 +167,71 @@ def import_project_run_sources(
             is_project_source = True
         except ValueError:
             is_project_source = False
+        return source_path, source_was_file, is_project_source
+
+    source_items = list(sources)
+    source_index = 0
+    while source_index < len(source_items):
+        source = source_items[source_index]
+        source_path, source_was_file, is_project_source = source_location(source)
+
+        # A multi-file picker can easily provide hundreds of files with the
+        # same role.  Store those files in one journalled transaction instead
+        # of re-reading and fsyncing the project manifest once per file.  Files
+        # are still copied sequentially with the existing bounded buffer, and
+        # the returned replacement list remains in the exact source order.
+        if source_was_file and not source.preserve_directories:
+            grouped_sources: list[SourceSpec] = [source]
+            grouped_paths: list[Path] = [source_path]
+            next_index = source_index + 1
+            while next_index < len(source_items):
+                candidate = source_items[next_index]
+                candidate_path, candidate_is_file, candidate_is_project = source_location(
+                    candidate
+                )
+                if (
+                    not candidate_is_file
+                    or candidate.preserve_directories
+                    or candidate.role != source.role
+                    or candidate_is_project != is_project_source
+                ):
+                    break
+                grouped_sources.append(candidate)
+                grouped_paths.append(candidate_path)
+                next_index += 1
+
+            if is_project_source:
+                copier = getattr(store, "copy_project_sources", None)
+                if not callable(copier):
+                    raise RuntimeError(
+                        "当前版本暂时不能复用项目内资料，请从原文件位置重新选择。"
+                    )
+            else:
+                copier = store.import_sources
+            records = tuple(
+                copier(
+                    batch_id,
+                    grouped_paths,
+                    category="uploads",
+                    role=source.role,
+                    cancelled=cancel_event.is_set,
+                    on_progress=on_progress,
+                )
+            )
+            if len(records) != len(grouped_sources):
+                raise RuntimeError("项目资料批量快照数量不完整。")
+            for grouped_source, record in zip(grouped_sources, records):
+                replacement = project_source_replacement(
+                    store,
+                    batch_id,
+                    grouped_source,
+                    (record,),
+                    source_was_file=True,
+                )
+                replacements.setdefault(grouped_source.role, []).append(replacement)
+            source_index = next_index
+            continue
+
         if source.preserve_directories:
             if source_was_file:
                 raise RuntimeError(f"需要文件夹资料：{source.path.name}")
@@ -210,6 +276,7 @@ def import_project_run_sources(
                 source_was_file=source_was_file,
             )
         replacements.setdefault(source.role, []).append(replacement)
+        source_index += 1
     return replacements
 
 

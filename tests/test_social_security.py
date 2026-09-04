@@ -63,8 +63,16 @@ class SocialSecurityTest(unittest.TestCase):
             _write_roster(roster)
             _write_long_payment_file(input_dir / "北京春苗抚州账户2026年5月社保单位缴费明细.xlsx")
             _write_single_kind_file(input_dir / "2026-04——工伤保险（单位缴纳部分）职工明细.xlsx")
+            progress = []
 
-            result = generate_social_security_reports(input_dir, roster, output_dir)
+            result = generate_social_security_reports(
+                input_dir,
+                roster,
+                output_dir,
+                progress_callback=lambda current, total, message: progress.append(
+                    (current, total, message)
+                ),
+            )
             payload = result.to_dict()
 
             self.assertEqual(payload["source_file_count"], 2)
@@ -78,6 +86,8 @@ class SocialSecurityTest(unittest.TestCase):
             split_names = {path.name for path in result.detail_output_files}
             self.assertEqual(split_names, {"北京抚州-社保明细表.xlsx", "唐人四川-社保明细表.xlsx"})
             self.assertTrue(result.summary_output_file and result.summary_output_file.exists())
+            self.assertEqual(progress[0][:2], (0, 5))
+            self.assertEqual(progress[-1], (5, 5, "社保报表生成完成"))
 
             detail_wb = load_workbook(result.detail_output_file, data_only=False)
             detail_ws = detail_wb["社保明细表"]

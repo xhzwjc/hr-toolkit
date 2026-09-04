@@ -319,6 +319,7 @@ def generate_social_security_reports(
     *,
     dry_run: bool = False,
     cancelled: Callable[[], bool] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> SocialSecurityResult:
     _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(input_path)
@@ -344,9 +345,17 @@ def generate_social_security_reports(
         if not source_files:
             raise ValueError("未找到 .xlsx 或 .xls 社保缴费清单。")
 
+        output_steps = 0 if dry_run else 3
+        progress_total = len(source_files) + output_steps
+        if progress_callback is not None:
+            progress_callback(
+                0,
+                progress_total,
+                f"正在读取社保缴费清单：0/{len(source_files)}",
+            )
         lines: list[SocialPaymentLine] = []
         used_files: list[str] = []
-        for source_file in source_files:
+        for file_index, source_file in enumerate(source_files, start=1):
             _check_cancelled(cancelled)
             try:
                 file_lines = _read_payment_file(source_file)
@@ -354,10 +363,16 @@ def generate_social_security_reports(
                 if len(input_paths) == 1 and input_paths[0].is_file():
                     raise
                 warnings.append(f"{source_file.name} 不是可识别的社保缴费清单，已跳过：{exc}")
-                continue
-            if file_lines:
-                used_files.append(str(source_file))
-            lines.extend(file_lines)
+            else:
+                if file_lines:
+                    used_files.append(str(source_file))
+                lines.extend(file_lines)
+            if progress_callback is not None:
+                progress_callback(
+                    file_index,
+                    progress_total,
+                    f"正在读取社保缴费清单：{file_index}/{len(source_files)}",
+                )
 
         detail_records = _build_detail_records(lines, roster_people, warnings)
         result = SocialSecurityResult(
@@ -374,6 +389,8 @@ def generate_social_security_reports(
             warnings=warnings,
         )
         if dry_run:
+            if progress_callback is not None:
+                progress_callback(progress_total, progress_total, "社保数据检查完成")
             return result
 
         _check_cancelled(cancelled)
@@ -386,6 +403,12 @@ def generate_social_security_reports(
             temp_dir,
             cancelled=cancelled,
         )
+        if progress_callback is not None:
+            progress_callback(
+                len(source_files) + 1,
+                progress_total,
+                "社保明细表已生成，正在生成拆分明细...",
+            )
         _check_cancelled(cancelled)
         split_detail_outputs = _write_split_detail_workbooks(
             detail_records,
@@ -393,6 +416,12 @@ def generate_social_security_reports(
             temp_dir,
             cancelled=cancelled,
         )
+        if progress_callback is not None:
+            progress_callback(
+                len(source_files) + 2,
+                progress_total,
+                "拆分明细已生成，正在生成社保汇总表...",
+            )
         _check_cancelled(cancelled)
         _write_summary_workbook(
             detail_records,
@@ -401,6 +430,8 @@ def generate_social_security_reports(
             warnings,
             cancelled=cancelled,
         )
+        if progress_callback is not None:
+            progress_callback(progress_total, progress_total, "社保报表生成完成")
         result.detail_output_file = detail_output
         result.detail_output_files = split_detail_outputs
         result.summary_output_file = summary_output

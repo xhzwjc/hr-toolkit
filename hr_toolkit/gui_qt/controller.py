@@ -939,9 +939,11 @@ class AppController(QObject):
     def _set_inputs(self, paths: list[Path], *, replace: bool) -> None:
         key = self._state_key()
         current = [] if replace else list(self._input_states[key])
+        known = set(current)
         for path in paths:
-            if path not in current:
+            if path not in known:
                 current.append(path)
+                known.add(path)
         self._input_states[key] = current
         self._sync_input_model()
 
@@ -2341,7 +2343,10 @@ class AppController(QObject):
         self.busyChanged.emit()
 
     def _start_preview(self, invocation: ToolInvocation) -> None:
-        from hr_toolkit.background_process import run_business_process
+        from hr_toolkit.background_process import (
+            BusinessProcessStartError,
+            run_business_process,
+        )
 
         self._set_busy(True)
         self._preview_cancel_event = threading.Event()
@@ -2351,17 +2356,36 @@ class AppController(QObject):
 
         def worker() -> None:
             try:
-                result = run_business_process(
-                    module_name=invocation.function_module,
-                    function_name=invocation.function_name,
-                    args=invocation.args,
-                    kwargs=invocation.kwargs,
-                    cancel_event=self._preview_cancel_event,
-                )
+                payload = None
+                if self._run_coordinator.process_isolation_available:
+                    try:
+                        result = run_business_process(
+                            module_name=invocation.function_module,
+                            function_name=invocation.function_name,
+                            args=invocation.args,
+                            kwargs=invocation.kwargs,
+                            cancel_event=self._preview_cancel_event,
+                        )
+                        payload = result.payload
+                    except BusinessProcessStartError as exc:
+                        self._run_coordinator.note_process_start_failure(exc)
+                        fallback_message = (
+                            "独立后台进程不可用，已自动切换兼容后台模式继续处理。"
+                        )
+                        runlog.log_line(f"{fallback_message} 原因：{exc}")
+                        self._logIncoming.emit(fallback_message, "warning")
+                if payload is None:
+                    call_kwargs = dict(invocation.kwargs)
+                    call_kwargs["cancelled"] = self._preview_cancel_event.is_set
+                    direct_result = invocation.resolve_function()(
+                        *invocation.args,
+                        **call_kwargs,
+                    )
+                    payload = ProjectRunCoordinator._payload(direct_result)
             except Exception as exc:
                 self._previewFailed.emit(str(exc))
                 return
-            self._previewReady.emit(result.payload)
+            self._previewReady.emit(payload)
 
         threading.Thread(target=worker, daemon=True, name="HRToolkit-rename-preview").start()
 

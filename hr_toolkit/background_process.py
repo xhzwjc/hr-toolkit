@@ -45,6 +45,10 @@ class BusinessProcessError(RuntimeError):
         self.remote_traceback = remote_traceback
 
 
+class BusinessProcessStartError(RuntimeError):
+    """Raised only when the isolated worker was not started successfully."""
+
+
 class BusinessProcessCancelled(RuntimeError):
     pass
 
@@ -118,26 +122,40 @@ def _child_entry(
             pass
 
     try:
-        module = importlib.import_module(module_name)
-        function = getattr(module, function_name)
-        call_kwargs = dict(kwargs)
-        parameters = inspect.signature(function).parameters
-        if "cancelled" in parameters:
-            call_kwargs["cancelled"] = process_cancel_event.is_set
-        if "progress_callback" in parameters:
-            call_kwargs["progress_callback"] = progress
-        result = function(*args, **call_kwargs)
-        terminal_message = (
-            "success",
-            _result_payload(result),
-            time.monotonic() - started,
-        )
-    except BaseException as exc:
-        terminal_message = (
-            "error",
-            f"{type(exc).__name__}: {exc}",
-            traceback.format_exc(),
-        )
+        try:
+            module = importlib.import_module(module_name)
+            function = getattr(module, function_name)
+            call_kwargs = dict(kwargs)
+            parameters = inspect.signature(function).parameters
+            if "cancelled" in parameters:
+                call_kwargs["cancelled"] = process_cancel_event.is_set
+            if "progress_callback" in parameters:
+                call_kwargs["progress_callback"] = progress
+        except BaseException as exc:
+            terminal_message = (
+                "startup_error",
+                f"{type(exc).__name__}: {exc}",
+                traceback.format_exc(),
+            )
+        else:
+            try:
+                # This handshake is the no-duplicate boundary.  Errors before
+                # it are worker/bootstrap failures and may safely fall back to
+                # the coordinator thread; errors after it are business errors
+                # and must never be retried automatically.
+                connection.send(("ready",))
+                result = function(*args, **call_kwargs)
+                terminal_message = (
+                    "success",
+                    _result_payload(result),
+                    time.monotonic() - started,
+                )
+            except BaseException as exc:
+                terminal_message = (
+                    "error",
+                    f"{type(exc).__name__}: {exc}",
+                    traceback.format_exc(),
+                )
     finally:
         try:
             # multiprocessing.Queue.put_nowait() hands records to a feeder
@@ -169,28 +187,70 @@ def run_business_process(
 ) -> ProcessCallResult:
     """Run exactly one business call in a spawned child and wait off the UI thread."""
 
-    context = multiprocessing.get_context("spawn")
-    process_cancel_event = context.Event()
-    receive_connection, send_connection = context.Pipe(duplex=False)
-    progress_queue = context.Queue(maxsize=64)
-    process = context.Process(
-        target=_child_entry,
-        args=(
-            send_connection,
-            progress_queue,
-            process_cancel_event,
-            module_name,
-            function_name,
-            args,
-            kwargs,
-        ),
-        daemon=False,
-        name=f"HRToolkit-{function_name}",
-    )
-    process.start()
-    send_connection.close()
+    receive_connection = None
+    send_connection = None
+    progress_queue = None
+    process = None
+    try:
+        context = multiprocessing.get_context("spawn")
+        process_cancel_event = context.Event()
+        receive_connection, send_connection = context.Pipe(duplex=False)
+        progress_queue = context.Queue(maxsize=64)
+        process = context.Process(
+            target=_child_entry,
+            args=(
+                send_connection,
+                progress_queue,
+                process_cancel_event,
+                module_name,
+                function_name,
+                args,
+                kwargs,
+            ),
+            daemon=False,
+            name=f"HRToolkit-{function_name}",
+        )
+        process.start()
+    except OSError as exc:
+        # Some Win7 installations cannot start a frozen multiprocessing child
+        # even though the main EXE starts normally.  At this point start() has
+        # not returned, so no business function has run and a caller may safely
+        # fall back to its existing background thread without duplicating work.
+        if process is not None:
+            try:
+                if process.is_alive():
+                    process.terminate()
+            except Exception:
+                pass
+            try:
+                process.join(timeout=1.0)
+            except Exception:
+                pass
+        for connection in (receive_connection, send_connection):
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+        if progress_queue is not None:
+            try:
+                progress_queue.close()
+            except Exception:
+                pass
+            try:
+                progress_queue.cancel_join_thread()
+            except Exception:
+                pass
+        raise BusinessProcessStartError(f"无法启动独立后台进程：{exc}") from exc
+
+    # All resources are guaranteed to exist after a successful start.
+    assert receive_connection is not None
+    assert send_connection is not None
+    assert progress_queue is not None
+    assert process is not None
     cancellation_started: float | None = None
     message: tuple[Any, ...] | None = None
+    business_started = False
 
     def drain_progress() -> None:
         while True:
@@ -201,11 +261,37 @@ def run_business_process(
             if on_progress is not None:
                 on_progress(current, total, text)
 
+    def receive_message() -> tuple[Any, ...] | None:
+        nonlocal business_started
+        try:
+            received = receive_connection.recv()
+        except (EOFError, OSError) as exc:
+            if cancel_event.is_set():
+                raise BusinessProcessCancelled("本次处理已停止。") from exc
+            exit_code = process.exitcode
+            if not business_started:
+                raise BusinessProcessStartError(
+                    "后台处理进程尚未就绪，通信已中断"
+                    + (f"（退出码 {exit_code}）。" if exit_code is not None else "。")
+                ) from exc
+            raise BusinessProcessError(
+                "后台处理已开始，但工作进程通信意外中断"
+                + (f"（退出码 {exit_code}）。" if exit_code is not None else "。")
+            ) from exc
+        if received and received[0] == "ready":
+            business_started = True
+            return None
+        return received
+
     try:
+        send_connection.close()
         while True:
             drain_progress()
             if receive_connection.poll(0):
-                message = receive_connection.recv()
+                received = receive_message()
+                if received is None:
+                    continue
+                message = received
                 # The child flushes its queue writer before sending this
                 # terminal message, so this final drain cannot race its feeder.
                 drain_progress()
@@ -220,10 +306,17 @@ def run_business_process(
                     raise BusinessProcessCancelled("本次处理已停止。")
             if not process.is_alive():
                 if receive_connection.poll(0.1):
-                    message = receive_connection.recv()
+                    received = receive_message()
+                    if received is None:
+                        continue
+                    message = received
                     break
                 if cancel_event.is_set():
                     raise BusinessProcessCancelled("本次处理已停止。")
+                if not business_started:
+                    raise BusinessProcessStartError(
+                        f"后台处理进程未就绪即退出（退出码 {process.exitcode}）。"
+                    )
                 raise BusinessProcessError(
                     f"后台处理进程异常退出（退出码 {process.exitcode}）。"
                 )
@@ -231,6 +324,8 @@ def run_business_process(
         process.join(timeout=1.0)
         if not message:
             raise BusinessProcessError("后台处理没有返回结果。")
+        if message[0] == "startup_error" or not business_started:
+            raise BusinessProcessStartError(str(message[1]))
         if message[0] == "success":
             return ProcessCallResult(
                 payload=dict(message[1]),
@@ -238,12 +333,28 @@ def run_business_process(
             )
         raise BusinessProcessError(str(message[1]), remote_traceback=str(message[2]))
     finally:
-        if process.is_alive():
-            process.terminate()
-        process.join(timeout=1.0)
-        receive_connection.close()
-        progress_queue.close()
-        progress_queue.join_thread()
+        try:
+            if process.is_alive():
+                process.terminate()
+        except Exception:
+            pass
+        try:
+            process.join(timeout=1.0)
+        except Exception:
+            pass
+        for connection in (receive_connection, send_connection):
+            try:
+                connection.close()
+            except Exception:
+                pass
+        try:
+            progress_queue.close()
+        except Exception:
+            pass
+        try:
+            progress_queue.join_thread()
+        except Exception:
+            pass
 
 
 def _process_smoke_probe(
