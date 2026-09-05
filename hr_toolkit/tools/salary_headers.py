@@ -175,7 +175,8 @@ def inspect_workbook(
             group.update(ready=False, problem="多张工作表匹配已保存设置，请选择本次工资明细")
         elif keyword not in preferred and role == "detail":
             group.update(ready=False, problem="未找到明细工作表，请确认工作表与对应列")
-        elif not candidates:
+        # 内置字段已明确识别时，旧模板的变化不应再次要求用户确认。
+        elif not candidates and not group["ready"]:
             current = Counter(c["key"] for c in group["columns"])
             for profile_key, profile in profiles.items():
                 if not isinstance(profile, dict) or profile.get("role") != role or profile.get("sheet") != group["sheet"]:
