@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 
 
@@ -8,7 +9,7 @@ import re
 _PERIOD_COMPACT = re.compile(r"(20\d{2})\D{0,3}([01]?\d)")
 _PERIOD_PLAIN = re.compile(r"(20\d{2})([01]\d)")
 import tempfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -28,6 +29,7 @@ from hr_toolkit.common.inputs import (
     is_supported_archive_file,
     normalize_input_paths,
 )
+from .salary_headers import inspect_workbook
 
 
 TOOL_NAME = "需求5-多月工资合并个人薪资汇总"
@@ -71,6 +73,7 @@ class SalaryMergeResult:
     applied_record_count: int = 0
     skipped_record_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    excluded_files: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +93,7 @@ class SalaryMergeResult:
             "applied_record_count": self.applied_record_count,
             "skipped_record_count": self.skipped_record_count,
             "warnings": self.warnings,
+            "excluded_files": self.excluded_files,
         }
 
 
@@ -108,6 +112,7 @@ class SalarySourceLayout:
     name_col: int
     id_card_col: int
     amount_col: int
+    legacy_amount_fallback: bool = True
 
 
 def merge_monthly_salary(
@@ -118,6 +123,11 @@ def merge_monthly_salary(
     year: int | None = None,
     dry_run: bool = False,
     cancelled: Callable[[], bool] | None = None,
+    header_profiles: dict[str, Any] | None = None,
+    strict_headers: bool = False,
+    skipped_source_keys: list[str] | None = None,
+    expected_sources: list[str] | None = None,
+    confirmed_layouts: dict[str, dict[str, Any]] | None = None,
 ) -> SalaryMergeResult:
     _check_cancelled(cancelled)
     input_paths = _normalize_input_paths(input_dir)
@@ -138,23 +148,47 @@ def merge_monthly_salary(
     with tempfile.TemporaryDirectory(prefix="hr_salary_merge_") as temp_root:
         temp_dir = Path(temp_root)
         working_summary_path = None if summary_path is None else ensure_xlsx_workbook(summary_path, temp_dir)
-        salary_files = _find_salary_files(input_paths, temp_dir, summary_path, warnings)
+        source_keys: dict[Path, str] = {}
+        identify_sources = strict_headers or expected_sources is not None or bool(skipped_source_keys) or bool(confirmed_layouts)
+        salary_files = _find_salary_files(
+            input_paths, temp_dir, summary_path, warnings,
+            source_keys=source_keys if identify_sources else None, cancelled=cancelled,
+        )
+        if strict_headers and warnings:
+            raise ValueError("部分输入未能完整读取，请处理后重新合并：\n" + "\n".join(warnings[:10]))
+        actual_sources = list(source_keys.values())
+        summary_key = ""
+        if identify_sources and summary_path is not None:
+            summary_key = "summary:" + _salary_source_key(summary_path, cancelled)
+            actual_sources.append(summary_key)
+        if expected_sources is not None and Counter(actual_sources) != Counter(expected_sources):
+            raise ValueError("所选资料在列头确认后发生变化，请重新点击开始合并并确认列头")
         _check_cancelled(cancelled)
         if not salary_files:
             raise ValueError("未在所选路径中找到 .xlsx 或 .xls 工资表")
 
         records: list[SalaryRecord] = []
         source_files: list[str] = []
+        excluded_files: list[str] = []
+        skipped_keys = set(skipped_source_keys or [])
         for file_path in salary_files:
             _check_cancelled(cancelled)
+            if source_keys.get(file_path) in skipped_keys:
+                excluded_files.append(file_path.name)
+                warnings.append(f"用户选择不合并：{file_path.name}")
+                continue
             try:
                 month = _detect_month(file_path)
                 file_records, file_warnings = _read_salary_file(
                     file_path,
                     month,
                     cancelled=cancelled,
+                    header_profiles=header_profiles,
+                    layout_hint=(confirmed_layouts or {}).get(source_keys.get(file_path, "")),
                 )
             except ValueError as exc:
+                if strict_headers:
+                    raise ValueError(f"{file_path.name} 未完成合并，本次未生成汇总结果：{exc}") from exc
                 warnings.append(f"{file_path.name} 不是有效月度工资表，已跳过：{exc}")
                 continue
             records.extend(file_records)
@@ -173,7 +207,10 @@ def merge_monthly_salary(
         existing_months: list[str] | None = None
         if working_summary_path is not None:
             _check_cancelled(cancelled)
-            existing_months, existing_employees, summary_warnings = _read_existing_summary(working_summary_path)
+            existing_months, existing_employees, summary_warnings = _read_existing_summary(
+                working_summary_path, header_profiles=header_profiles,
+                layout_hint=(confirmed_layouts or {}).get(summary_key),
+            )
             warnings.extend(summary_warnings)
 
         months = _build_output_months(records, year, existing_months)
@@ -196,6 +233,7 @@ def merge_monthly_salary(
             applied_record_count=applied_count,
             skipped_record_count=skipped_count,
             warnings=warnings,
+            excluded_files=excluded_files,
         )
 
         if dry_run:
@@ -210,6 +248,18 @@ def merge_monthly_salary(
             months,
             cancelled=cancelled,
         )
+        if excluded_files:
+            workbook = load_workbook(output_file)
+            try:
+                sheet = workbook.create_sheet("未合并文件")
+                sheet.append(["文件名", "原因"])
+                sheet.column_dimensions["A"].width = 60
+                sheet.column_dimensions["B"].width = 45
+                for filename in excluded_files:
+                    sheet.append([filename, "用户在列头对应窗口中明确选择不合并"])
+                workbook.save(output_file)
+            finally:
+                workbook.close()
         result.output_file = output_file
         return result
 
@@ -218,13 +268,18 @@ def _normalize_input_paths(input_path: str | Path | list[str | Path]) -> list[Pa
     return normalize_input_paths(input_path, "请选择工资表文件、压缩包或文件夹。")
 
 
-def _find_salary_files(input_paths: list[Path], temp_dir: Path, existing_summary_path: Path | None = None, warnings: list[str] | None = None) -> list[Path]:
+def _find_salary_files(
+    input_paths: list[Path], temp_dir: Path, existing_summary_path: Path | None = None,
+    warnings: list[str] | None = None, *, source_keys: dict[Path, str] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[Path]:
     warnings = [] if warnings is None else warnings
     excluded = None if existing_summary_path is None else existing_summary_path.resolve()
     files: list[Path] = []
     seen: set[Path] = set()
     for input_path in input_paths:
         for path in _iter_salary_files(input_path, temp_dir, warnings):
+            _check_cancelled(cancelled)
             if path.name == "个人薪资汇总表.xlsx":
                 continue
             if excluded is not None and path.resolve() == excluded:
@@ -235,7 +290,81 @@ def _find_salary_files(input_paths: list[Path], temp_dir: Path, existing_summary
                 continue
             seen.add(resolved)
             files.append(working_path)
+            if source_keys is not None:
+                source_keys[working_path] = _salary_source_key(path, cancelled)
     return sorted(files)
+
+
+def _salary_source_key(path: Path, cancelled=None) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            _check_cancelled(cancelled)
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    # 相同内容可能按不同文件名代表不同月份，跳过决定不能误伤另一月份。
+    return digest.hexdigest() + ":" + (_month_from_text(path.stem) or "")
+
+
+def inspect_salary_templates(
+    input_dir: str | Path | list[str | Path], *, existing_summary_path: str | Path | None = None,
+    header_profiles: dict[str, Any] | None = None, layout_hints: dict[str, Any] | None = None,
+    cancelled: Callable[[], bool] | None = None, progress_callback=None,
+) -> dict[str, Any]:
+    """后台顺序预检，返回表头与少量样例；不保留工作簿或生成工资结果。"""
+    profiles, hints = header_profiles or {}, layout_hints or {}
+    groups: dict[str, dict[str, Any]] = {}
+    issues, expected_sources = [], []
+    summary = Path(existing_summary_path).expanduser().resolve() if existing_summary_path else None
+    with tempfile.TemporaryDirectory(prefix="hr_salary_headers_") as temp_root:
+        temp = Path(temp_root)
+        source_keys: dict[Path, str] = {}
+        warnings: list[str] = []
+        files = _find_salary_files(_normalize_input_paths(input_dir), temp, summary, warnings,
+                                   source_keys=source_keys, cancelled=cancelled)
+        if not files:
+            raise ValueError("未在所选路径中找到 .xlsx 或 .xls 工资表")
+        if warnings:
+            raise ValueError("部分输入未能完整读取，请检查：\n" + "\n".join(warnings[:10]))
+        sources = [(path, source_keys[path], "detail") for path in files]
+        if summary is not None:
+            sources.append((ensure_xlsx_workbook(summary, temp), "summary:" + _salary_source_key(summary, cancelled), "summary"))
+        for index, (path, source_key, role) in enumerate(sources):
+            _check_cancelled(cancelled)
+            expected_sources.append(source_key)
+            if progress_callback:
+                progress_callback(index, len(sources), f"正在检查列头 {index + 1}/{len(sources)}：{path.name}")
+            try:
+                if role == "detail":
+                    _detect_month(path)
+                workbook = load_workbook(path, read_only=True, data_only=False)
+                try:
+                    group = inspect_workbook(workbook, role=role, profiles=profiles, hint=hints.get(source_key))
+                    if role == "summary" and not _read_month_columns(workbook[group["sheet"]], group["header_bottom"]):
+                        raise ValueError("已有汇总表未找到月份列，请确认表头包含 202601 这类月份")
+                finally:
+                    workbook.close()
+                key = group["key"]
+                # 同名列调整顺序后不得沿用另一文件中的物理列号。
+                if key in groups and group["order"] != groups[key]["order"]:
+                    counts = Counter(c["key"] for c in group["columns"])
+                    if any(count > 1 for count in counts.values()):
+                        key += ":" + group["order"]
+                if key not in groups:
+                    group["group_id"] = key
+                    groups[key] = group
+                groups[key]["files"].append({
+                    "key": source_key, "name": path.name,
+                    "layout": {field: group[field] for field in ("sheet", "header_row", "header_bottom")},
+                })
+            except Exception as exc:
+                _check_cancelled(cancelled)
+                issues.append({"key": source_key, "name": path.name, "message": str(exc), "skippable": role == "detail"})
+            if progress_callback:
+                progress_callback(index + 1, len(sources), f"已检查列头 {index + 1}/{len(sources)}")
+    return {"groups": list(groups.values()), "issues": issues, "expected_sources": expected_sources}
 
 
 def _iter_salary_files(input_path: Path, temp_dir: Path, warnings: list[str]) -> list[Path]:
@@ -268,13 +397,15 @@ def _read_salary_file(
     month: str,
     *,
     cancelled: Callable[[], bool] | None = None,
+    header_profiles: dict[str, Any] | None = None,
+    layout_hint: dict[str, Any] | None = None,
 ) -> tuple[list[SalaryRecord], list[str]]:
     warnings: list[str] = []
     formula_wb = load_workbook(file_path, data_only=False)
     try:
         value_wb = load_workbook(file_path, data_only=True, read_only=True)
         try:
-            layout = _detect_source_layout(formula_wb)
+            layout = _detect_source_layout(formula_wb, header_profiles=header_profiles, layout_hint=layout_hint)
             formula_ws = formula_wb[layout.detail_sheet_name]
             value_ws = SheetGrid(value_wb[layout.detail_sheet_name])
         finally:
@@ -293,6 +424,8 @@ def _read_salary_file(
                 continue
             amount = _amount_value(value_ws, formula_ws, row_index, layout)
             if amount is None:
+                if not layout.legacy_amount_fallback:
+                    raise ValueError(f"{layout.detail_sheet_name}!{get_column_letter(layout.amount_col)}{row_index} 未读到有效金额，请核对所选应发工资列及公式计算结果")
                 warnings.append(f"{file_path.name} 第 {row_index} 行未识别到应发工资，按 0 处理")
                 amount = 0
             records.append(
@@ -310,7 +443,19 @@ def _read_salary_file(
         formula_wb.close()
 
 
-def _detect_source_layout(workbook) -> SalarySourceLayout:
+def _detect_source_layout(
+    workbook, *, header_profiles: dict[str, Any] | None = None, layout_hint: dict[str, Any] | None = None,
+) -> SalarySourceLayout:
+    if header_profiles is not None:
+        group = inspect_workbook(workbook, profiles=header_profiles, hint=layout_hint)
+        if not group["ready"]:
+            raise ValueError(group["problem"])
+        selected = group["selections"]
+        return SalarySourceLayout(
+            group["sheet"], group["header_row"],
+            _find_data_start_row(workbook[group["sheet"]], group["header_bottom"]),
+            selected["name"], selected["id_card"], selected["amount"], not group["saved"],
+        )
     detail_sheet_name = _find_sheet_name(workbook.sheetnames, DETAIL_SHEET_KEYWORD)
     ws = workbook[detail_sheet_name]
     header_row = _find_header_row_any(ws, HEADER_ID_CARD_ALIASES, sheet_label="明细表")
@@ -437,7 +582,7 @@ def _amount_value(
     formula = formula_ws.cell(row_index, layout.amount_col).value
     if isinstance(formula, str) and formula.startswith("="):
         amount_header = _cell_text(formula_ws, layout.header_row, layout.amount_col)
-        if amount_header != HEADER_AMOUNT:
+        if amount_header != HEADER_AMOUNT or not layout.legacy_amount_fallback:
             return _monthly_amount_from_formula(value_ws, formula_ws, row_index, layout, formula)
         return _fallback_amount_from_row(value_ws, row_index)
     return None
@@ -598,16 +743,26 @@ def _build_output_months(
 
 def _read_existing_summary(
     summary_path: Path,
+    *, header_profiles: dict[str, Any] | None = None,
+    layout_hint: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[MergedEmployee], list[str]]:
     warnings: list[str] = []
     workbook = load_workbook(summary_path, data_only=True)
     try:
-        sheet_name = _find_sheet_name_or_active(workbook.sheetnames, SUMMARY_SHEET_KEYWORD)
-        ws = workbook[sheet_name]
-        header_row = _find_header_row_any(ws, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
-        headers = _read_headers(ws, header_row)
-        name_col = _first_header_col(headers, (HEADER_NAME,), sheet_label="汇总表")
-        id_card_col = _first_header_col(headers, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
+        if header_profiles is None:
+            sheet_name = _find_sheet_name_or_active(workbook.sheetnames, SUMMARY_SHEET_KEYWORD)
+            ws = workbook[sheet_name]
+            header_row = _find_header_row_any(ws, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
+            headers = _read_headers(ws, header_row)
+            name_col = _first_header_col(headers, (HEADER_NAME,), sheet_label="汇总表")
+            id_card_col = _first_header_col(headers, HEADER_ID_CARD_ALIASES, sheet_label="汇总表")
+        else:
+            group = inspect_workbook(workbook, role="summary", profiles=header_profiles, hint=layout_hint)
+            if not group["ready"]:
+                raise ValueError(group["problem"])
+            ws = workbook[group["sheet"]]
+            header_row = group["header_bottom"]
+            name_col, id_card_col = group["selections"]["name"], group["selections"]["id_card"]
         month_columns = _read_month_columns(ws, header_row)
         if not month_columns:
             raise ValueError("已有汇总表未找到月份列，请确认表头包含 202601 这类月份")

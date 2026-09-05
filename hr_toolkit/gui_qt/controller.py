@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import calendar
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,9 @@ class AppController(QObject):
     busyChanged = Signal()
     runButtonTextChanged = Signal()
     runProgressChanged = Signal()
+    salaryMappingChanged = Signal()
+    salaryMappingRequested = Signal()
+    salaryMappingClosed = Signal()
     workspaceBusyChanged = Signal()
     workspaceChanged = Signal()
     workspaceSelectionChanged = Signal()
@@ -133,6 +137,7 @@ class AppController(QObject):
     _runFinished = Signal()
     _previewReady = Signal(object)
     _previewFailed = Signal(str)
+    _salaryInspectionReady = Signal(object, str)
     _workspaceImportFinished = Signal(bool, str)
     _historyListReady = Signal(int, object, int, str)
     _historyDetailReady = Signal(int, object, str)
@@ -189,6 +194,16 @@ class AppController(QObject):
         self._run_coordinator = ProjectRunCoordinator()
         self._preview_cancel_event: threading.Event | None = None
         self._pending_preview: dict[str, Any] | None = None
+        self._salary_header_profiles: dict[str, dict[str, Any]] = {}
+        self._salary_pending: ToolInvocation | None = None
+        self._salary_project_key = ""
+        self._salary_inspection: dict[str, Any] = {}
+        self._salary_draft_profiles: dict[str, Any] = {}
+        self._salary_hints: dict[str, Any] = {}
+        self._salary_selection_drafts: dict[str, Any] = {}
+        self._salary_reset_profile_keys: set[str] = set()
+        self._salary_force_next = False
+        self._salary_force_dialog = False
         self._pending_confirmation: str | None = None
         self._pending_confirmation_action: tuple[str, Any] | None = None
         self._pending_text_action: str | None = None
@@ -244,6 +259,7 @@ class AppController(QObject):
         self._runFinished.connect(self._apply_run_finished)
         self._previewReady.connect(self._apply_preview)
         self._previewFailed.connect(self._apply_preview_error)
+        self._salaryInspectionReady.connect(self._apply_salary_inspection)
         self._workspaceImportFinished.connect(self._apply_workspace_import_result)
         self._historyListReady.connect(self._apply_history_list)
         self._historyDetailReady.connect(self._apply_history_detail)
@@ -1234,6 +1250,12 @@ class AppController(QObject):
         self._material_preferences = MaterialPreferences.from_payload(
             state.get("material_preferences")
         )
+        salary_profiles = state.get("salary_header_profiles")
+        if isinstance(salary_profiles, dict):
+            self._salary_header_profiles = {
+                str(project): {str(key): value for key, value in rules.items() if isinstance(value, dict)}
+                for project, rules in salary_profiles.items() if isinstance(rules, dict)
+            }
         preset_names = self._material_preferences.preset_names
         self._material_preset_name = preset_names[0] if preset_names else ""
         material_key = ("material_collector", "default")
@@ -1257,7 +1279,7 @@ class AppController(QObject):
         if update_check_enabled():
             QTimer.singleShot(600, self.requestStartupUpdateCheck)
 
-    def _save_workspace_preferences(self) -> None:
+    def _save_workspace_preferences(self) -> bool:
         path = self._settings_path()
         payload: dict[str, Any] = {}
         try:
@@ -1274,6 +1296,7 @@ class AppController(QObject):
                 "recent_projects": [str(item) for item in self._recent_projects[:8]],
                 "material_preferences": self._material_preferences.to_payload(),
                 "last_selected_dir": str(self._last_selected_dir) if self._last_selected_dir is not None else None,
+                "salary_header_profiles": self._salary_header_profiles,
             }
         )
         try:
@@ -1281,8 +1304,10 @@ class AppController(QObject):
             temp = path.with_suffix(".tmp")
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temp, path)
+            return True
         except Exception as exc:
             runlog.log_exception("保存项目界面设置失败", exc)
+            return False
 
     @Slot()
     def openProjectFolder(self) -> None:
@@ -2372,7 +2397,9 @@ class AppController(QObject):
         except FormValidationError as exc:
             self.notificationRequested.emit(exc.title, exc.message, "warning")
             return
-        if invocation.preview:
+        if invocation.tool_id == "salary_merge":
+            self._start_salary_inspection(invocation, force_dialog=self._salary_force_next)
+        elif invocation.preview:
             self._start_preview(invocation)
         else:
             self._start_project_run(invocation)
@@ -2396,6 +2423,224 @@ class AppController(QObject):
                 pass
             self._original_switch_interval = None
         self.busyChanged.emit()
+
+    @Property("QVariantMap", notify=salaryMappingChanged)
+    def salaryMappingData(self) -> dict[str, Any]:
+        return self._salary_inspection
+
+    @Slot()
+    def reviewSalaryHeaders(self) -> None:
+        if self._busy or self._spec.tool_id != "salary_merge":
+            return
+        self._salary_force_next = True
+        try:
+            self.runOrCancel()
+        finally:
+            self._salary_force_next = False
+
+    def _start_salary_inspection(self, invocation: ToolInvocation, *, force_dialog: bool = False) -> None:
+        self._salary_pending = invocation
+        self._salary_project_key = str(self._project_path)
+        self._salary_draft_profiles = json.loads(json.dumps(
+            self._salary_header_profiles.get(self._salary_project_key, {}), ensure_ascii=False,
+        ))
+        self._salary_hints = {}
+        self._salary_selection_drafts = {}
+        self._salary_reset_profile_keys = set()
+        self._salary_force_dialog = force_dialog
+        self._run_progress_visible = False
+        self._clear_logs()
+        self._inspect_salary_in_background()
+
+    def _inspect_salary_in_background(self) -> None:
+        from hr_toolkit.tools.salary_merge import inspect_salary_templates
+
+        invocation = self._salary_pending
+        if invocation is None:
+            return
+        self._set_busy(True)
+        event = threading.Event()
+        self._preview_cancel_event = event
+        kwargs = {
+            "existing_summary_path": invocation.kwargs.get("existing_summary_path"),
+            "header_profiles": dict(self._salary_draft_profiles), "layout_hints": dict(self._salary_hints),
+        }
+        request = RunRequest("salary_merge", invocation.tool_name, invocation.group_name,
+                             invocation.description, inspect_salary_templates, (invocation.args[0],), kwargs)
+        self._append_log("正在检查工资表列头；不会修改原表。", "info")
+        self._flush_logs()
+
+        def worker() -> None:
+            try:
+                payload, _isolated = self._run_coordinator._business_call(
+                    request, request.args, request.kwargs, event,
+                    RunCallbacks(log=lambda text: self._logIncoming.emit(str(text), "warning"),
+                                 progress=lambda c, t, text: self._logIncoming.emit(str(text), "info")),
+                )
+                if event.is_set():
+                    raise RuntimeError("已取消列头检查")
+            except Exception as exc:
+                self._salaryInspectionReady.emit({}, str(exc))
+                return
+            self._salaryInspectionReady.emit(payload, "")
+
+        threading.Thread(target=worker, daemon=True, name="HRToolkit-salary-headers").start()
+
+    @Slot(object, str)
+    def _apply_salary_inspection(self, payload: dict[str, Any], error: str) -> None:
+        cancelled = self._preview_cancel_event is not None and self._preview_cancel_event.is_set()
+        self._preview_cancel_event = None
+        self._set_busy(False)
+        if self._closed or self._shutdown_requested:
+            self._salary_pending = None
+            return
+        if self._salary_project_key != str(self._project_path):
+            self.cancelSalaryMappings()
+            return
+        if error or cancelled:
+            self._append_log("列头检查已停止。" if cancelled else error, "warning" if cancelled else "error")
+            self._flush_logs()
+            if not cancelled:
+                self.notificationRequested.emit("列头检查未完成", error, "error")
+            self.cancelSalaryMappings()
+            return
+        self._salary_inspection = payload
+        for group in payload.get("groups", []):
+            draft = self._salary_selection_drafts.get(group["group_id"])
+            if draft:
+                group["selections"] = draft.get("selections", group["selections"])
+                group["skip"] = bool(draft.get("skip"))
+        self.salaryMappingChanged.emit()
+        self._flush_logs()
+        if self._salary_force_dialog or payload.get("issues") or any(not group["ready"] for group in payload.get("groups", [])):
+            self.salaryMappingRequested.emit()
+        else:
+            self._launch_salary_with_profiles(self._salary_draft_profiles, [])
+
+    @Slot(str, str, int, int, str)
+    def rescanSalaryHeader(self, group_id: str, sheet: str, first: int, bottom: int, choices_json: str) -> None:
+        if self._busy or self._salary_pending is None:
+            return
+        try:
+            if not 1 <= first <= bottom <= 200 or bottom - first > 5:
+                raise ValueError("表头范围须在 1—200 行内，连续表头最多 6 行")
+            self._salary_selection_drafts = {x["group_id"]: x for x in json.loads(choices_json).get("groups", [])}
+            group = next(g for g in self._salary_inspection["groups"] if g["group_id"] == group_id)
+            if sheet not in group["sheet_names"]:
+                raise ValueError("请选择列表中的工作表")
+            for item in group["files"]:
+                self._salary_hints[item["key"]] = {"sheet": sheet, "header_row": first, "header_bottom": bottom}
+            self._salary_selection_drafts.pop(group_id, None)
+            self._salary_force_dialog = True
+            self._inspect_salary_in_background()
+        except (ValueError, KeyError, StopIteration, TypeError) as exc:
+            self.notificationRequested.emit("无法重新识别列头", str(exc), "warning")
+
+    @Slot(str, str)
+    def resetSalaryHeader(self, group_id: str, choices_json: str) -> None:
+        if self._busy or self._salary_pending is None:
+            return
+        try:
+            self._salary_selection_drafts = {x["group_id"]: x for x in json.loads(choices_json).get("groups", [])}
+            group = next(g for g in self._salary_inspection["groups"] if g["group_id"] == group_id)
+            self._salary_draft_profiles.pop(group["key"], None)
+            self._salary_reset_profile_keys.add(group["key"])
+            for key in group.get("related_profile_keys", []):
+                self._salary_draft_profiles.pop(key, None)
+                self._salary_reset_profile_keys.add(key)
+            self._salary_selection_drafts.pop(group_id, None)
+            for item in group["files"]:
+                self._salary_hints.pop(item["key"], None)
+            self._salary_force_dialog = True
+            self._inspect_salary_in_background()
+        except (ValueError, KeyError, StopIteration, TypeError) as exc:
+            self.notificationRequested.emit("无法恢复自动识别", str(exc), "warning")
+
+    @Slot(str, bool)
+    @Slot(str, bool, bool)
+    def applySalaryMappings(self, choices_json: str, remember: bool, start_merge: bool = True) -> None:
+        if self._busy or self._salary_pending is None:
+            return
+        if self._salary_project_key != str(self._project_path):
+            self.notificationRequested.emit("工作项目已变化", "请在当前项目重新选择工资表。", "warning")
+            self.cancelSalaryMappings()
+            return
+        from hr_toolkit.tools.salary_headers import MAX_PROFILES, profile_from_selection
+
+        try:
+            payload = json.loads(choices_json)
+            choices = {item["group_id"]: item for item in payload.get("groups", [])}
+            profiles = dict(self._salary_draft_profiles)
+            skipped: set[str] = set()
+            included = 0
+            for group in self._salary_inspection.get("groups", []):
+                choice = choices.get(group["group_id"], {})
+                if choice.get("skip"):
+                    if group["role"] != "detail":
+                        raise ValueError("已有汇总表不能跳过，请完成其列头对应或取消选择该汇总表")
+                    skipped.update(item["key"] for item in group["files"])
+                    continue
+                selections = choice.get("selections", {})
+                if not start_merge and (
+                    not any(selections.values())
+                    or (group["key"] in self._salary_reset_profile_keys and selections == group["builtin_selections"])
+                ):
+                    continue
+                profile = profile_from_selection(group, selections)
+                if group["saved"] or not group["ready"] or group.get("hinted") or selections != group["builtin_selections"]:
+                    profiles[group["key"]] = profile
+                if group["role"] == "detail":
+                    included += len(group["files"])
+            selected_issues = set(payload.get("skipped_issues", []))
+            for issue in self._salary_inspection.get("issues", []) if start_merge else []:
+                if not issue["skippable"] or issue["key"] not in selected_issues:
+                    raise ValueError(f"请处理 {issue['name']} 的问题，或明确选择本次不合并该文件")
+                skipped.add(issue["key"])
+            if start_merge and included == 0:
+                raise ValueError("至少保留一份工资明细表参与合并")
+            if len(profiles) > MAX_PROFILES:
+                raise ValueError("当前项目已达到 200 套对应设置，请先恢复不再使用模板的自动识别")
+            if remember:
+                previous = self._salary_header_profiles.get(self._salary_project_key)
+                self._salary_header_profiles[self._salary_project_key] = profiles
+                if not self._save_workspace_preferences():
+                    if previous is None:
+                        self._salary_header_profiles.pop(self._salary_project_key, None)
+                    else:
+                        self._salary_header_profiles[self._salary_project_key] = previous
+                    raise ValueError("设置未能保存；可取消勾选记住设置，仅用于本次合并")
+            if start_merge:
+                self._launch_salary_with_profiles(profiles, sorted(skipped))
+            else:
+                self.cancelSalaryMappings()
+                self.notificationRequested.emit("列头设置已保存", "对应设置已保存到当前项目。", "success")
+        except (ValueError, TypeError, KeyError) as exc:
+            self.notificationRequested.emit("请完善列头对应", str(exc), "warning")
+
+    def _launch_salary_with_profiles(self, profiles: dict[str, Any], skipped: list[str]) -> None:
+        invocation = self._salary_pending
+        if invocation is None:
+            return
+        kwargs = dict(invocation.kwargs)
+        kwargs.update(header_profiles=profiles, strict_headers=True, skipped_source_keys=skipped,
+                      expected_sources=self._salary_inspection.get("expected_sources", []),
+                      confirmed_layouts={item["key"]: item["layout"]
+                                         for group in self._salary_inspection.get("groups", [])
+                                         for item in group["files"] if item["key"] not in skipped})
+        self._salary_pending = None
+        self.salaryMappingClosed.emit()
+        self._start_project_run(replace(invocation, kwargs=kwargs))
+
+    @Slot()
+    def cancelSalaryMappings(self) -> None:
+        if self._busy:
+            if self._preview_cancel_event is not None:
+                self._preview_cancel_event.set()
+            return
+        self._salary_pending = None
+        self._salary_inspection = {}
+        self._salary_selection_drafts = {}
+        self.salaryMappingClosed.emit()
 
     def _start_preview(self, invocation: ToolInvocation) -> None:
         from hr_toolkit.background_process import (

@@ -832,6 +832,7 @@ ApplicationWindow {
                                 onClicked: controller.runOrCancel()
                             }
                             AppButton { text: "打开结果目录"; enabled: controller.canOpenLastResult; implicitWidth: 138; implicitHeight: 40; onClicked: controller.openLastResult() }
+                            AppButton { objectName: "salaryHeaderSettings"; text: "列头对应设置"; visible: controller.currentTool === "salary_merge"; enabled: !controller.busy && !controller.workspaceBusy; onClicked: controller.reviewSalaryHeaders() }
                             Text { visible: !!controller.lastRunText; text: controller.lastRunText; color: root.textMuted; font.pixelSize: 12 }
                             Item { Layout.fillWidth: true }
                         }
@@ -1854,8 +1855,12 @@ ApplicationWindow {
         }
     }
 
+    SalaryHeaderDialog { id: salaryHeaderDialog; backend: controller }
+
     Connections {
         target: controller
+        function onSalaryMappingRequested() { salaryHeaderDialog.showData(controller.salaryMappingData) }
+        function onSalaryMappingClosed() { salaryHeaderDialog.dismiss() }
         function onNotificationRequested(title, message, level) { notificationDialog.showMessage(title, message, level) }
         function onConfirmationRequested(title, message, token) {
             confirmationDialog.title = title
