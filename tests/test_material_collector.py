@@ -1000,9 +1000,23 @@ class TestOCRCacheHelpers(unittest.TestCase):
     """OCR 智能索引缓存：纯函数单测。"""
 
     def test_engine_signature_is_non_empty(self) -> None:
-        sig = _get_engine_signature()
-        self.assertTrue(sig)
-        self.assertIn("rapidocr_onnxruntime", sig)
+        from hr_toolkit.tools import material_collector as mc
+
+        for modern, expected in (
+            (False, "rapidocr_onnxruntime@1.4.4"),
+            (True, "rapidocr@3.9.2:ppocrv4-mobile:2"),
+        ):
+            with self.subTest(modern=modern), mock.patch.object(
+                mc, "_uses_modern_ocr", return_value=modern,
+            ), mock.patch.dict(
+                sys.modules,
+                {"rapidocr_onnxruntime": SimpleNamespace(__version__="1.4.4")},
+            ), mock.patch("importlib.metadata.version", return_value="3.9.2") as version:
+                self.assertEqual(_get_engine_signature(), expected)
+                if modern:
+                    version.assert_called_once_with("rapidocr")
+                else:
+                    version.assert_not_called()
 
     def test_visual_ocr_query_cache_is_bounded_and_does_not_store_names(self) -> None:
         from hr_toolkit.tools import material_collector as mc
@@ -3377,32 +3391,50 @@ class TestLargeBatchCandidateIndexes(unittest.TestCase):
     def test_low_core_ocr_reserves_one_cpu_for_the_ui_thread(self) -> None:
         from hr_toolkit.tools import material_collector as mc
 
-        calls: list[dict[str, int]] = []
+        for modern in (False, True):
+            calls: list[dict] = []
 
-        class FakeRapidOCR:
-            def __init__(self, **kwargs):
-                calls.append(kwargs)
+            class FakeRapidOCR:
+                def __init__(self, **kwargs):
+                    calls.append(kwargs)
 
-        original_engine = mc._OCR_ENGINE
-        original_attempted = mc._OCR_ATTEMPTED
-        try:
-            mc._OCR_ENGINE = None
-            mc._OCR_ATTEMPTED = False
-            fake_module = SimpleNamespace(RapidOCR=FakeRapidOCR)
-            with mock.patch.object(mc.os, "cpu_count", return_value=2), mock.patch.dict(
+            package = "rapidocr" if modern else "rapidocr_onnxruntime"
+            fake_modules = {
+                package: SimpleNamespace(RapidOCR=FakeRapidOCR),
+                "rapidocr.utils.typings": SimpleNamespace(
+                    ModelType=SimpleNamespace(MOBILE="mobile"),
+                    OCRVersion=SimpleNamespace(PPOCRV4="ppocrv4"),
+                ),
+            }
+            with self.subTest(modern=modern), mock.patch.multiple(
+                mc, _OCR_ENGINE=None, _OCR_ATTEMPTED=False, _OCR_ENGINE_ERROR="",
+            ), mock.patch.object(
+                mc, "_uses_modern_ocr", return_value=modern,
+            ), mock.patch.object(mc.os, "cpu_count", return_value=2), mock.patch.dict(
                 sys.modules,
-                {"rapidocr_onnxruntime": fake_module},
+                fake_modules,
+            ), mock.patch.object(
+                mc, "_rapidocr_low_memory_session_options",
             ):
                 engine = mc._get_ocr_engine()
-        finally:
-            mc._OCR_ENGINE = original_engine
-            mc._OCR_ATTEMPTED = original_attempted
 
-        self.assertIsInstance(engine, FakeRapidOCR)
-        self.assertEqual(calls, [{
-            "intra_op_num_threads": 1,
-            "inter_op_num_threads": 1,
-        }])
+                self.assertIsInstance(engine, FakeRapidOCR)
+                if modern:
+                    self.assertEqual(calls, [{"params": {
+                        "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+                        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+                        "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
+                        "Global.log_level": "warning",
+                        "Det.ocr_version": "ppocrv4",
+                        "Det.model_type": "mobile",
+                        "Rec.ocr_version": "ppocrv4",
+                        "Rec.model_type": "mobile",
+                    }}])
+                else:
+                    self.assertEqual(calls, [{
+                        "intra_op_num_threads": 1,
+                        "inter_op_num_threads": 1,
+                    }])
 
     def test_ocr_engine_disables_memory_pattern_only_during_session_creation(self) -> None:
         from hr_toolkit.tools import material_collector as mc
@@ -3424,39 +3456,46 @@ class TestLargeBatchCandidateIndexes(unittest.TestCase):
                 options = FakeOrtInferSession._init_sess_opts({})
                 observed_memory_patterns.append(options.enable_mem_pattern)
 
-        rapidocr_module = ModuleType("rapidocr_onnxruntime")
-        rapidocr_module.__path__ = []
-        rapidocr_module.RapidOCR = FakeRapidOCR
-        utils_module = ModuleType("rapidocr_onnxruntime.utils")
-        utils_module.__path__ = []
-        infer_module = ModuleType("rapidocr_onnxruntime.utils.infer_engine")
-        infer_module.OrtInferSession = FakeOrtInferSession
-        fake_modules = {
-            "rapidocr_onnxruntime": rapidocr_module,
-            "rapidocr_onnxruntime.utils": utils_module,
-            "rapidocr_onnxruntime.utils.infer_engine": infer_module,
-        }
+        for modern in (False, True):
+            observed_memory_patterns.clear()
+            package = "rapidocr" if modern else "rapidocr_onnxruntime"
+            infer_name = (
+                "rapidocr.inference_engine.onnxruntime.main" if modern
+                else "rapidocr_onnxruntime.utils.infer_engine"
+            )
+            module_names = [package, f"{package}.utils", infer_name]
+            if modern:
+                module_names.extend([
+                    "rapidocr.utils.typings",
+                    "rapidocr.inference_engine",
+                    "rapidocr.inference_engine.onnxruntime",
+                ])
+            fake_modules = {name: ModuleType(name) for name in module_names}
+            for module in fake_modules.values():
+                module.__path__ = []
+            fake_modules[package].RapidOCR = FakeRapidOCR
+            fake_modules[infer_name].OrtInferSession = FakeOrtInferSession
+            if modern:
+                typings = fake_modules["rapidocr.utils.typings"]
+                typings.ModelType = SimpleNamespace(MOBILE="mobile")
+                typings.OCRVersion = SimpleNamespace(PPOCRV4="ppocrv4")
 
-        original_engine = mc._OCR_ENGINE
-        original_attempted = mc._OCR_ATTEMPTED
-        try:
-            mc._OCR_ENGINE = None
-            mc._OCR_ATTEMPTED = False
-            with mock.patch.dict(sys.modules, fake_modules):
+            with self.subTest(modern=modern), mock.patch.multiple(
+                mc, _OCR_ENGINE=None, _OCR_ATTEMPTED=False, _OCR_ENGINE_ERROR="",
+            ), mock.patch.object(
+                mc, "_uses_modern_ocr", return_value=modern,
+            ), mock.patch.dict(sys.modules, fake_modules):
                 engine = mc._get_ocr_engine()
-        finally:
-            mc._OCR_ENGINE = original_engine
-            mc._OCR_ATTEMPTED = original_attempted
 
-        self.assertIsInstance(engine, FakeRapidOCR)
-        self.assertEqual(observed_memory_patterns, [False])
-        self.assertIs(
-            FakeOrtInferSession.__dict__["_init_sess_opts"],
-            original_descriptor,
-        )
-        self.assertTrue(
-            FakeOrtInferSession._init_sess_opts({}).enable_mem_pattern
-        )
+                self.assertIsInstance(engine, FakeRapidOCR)
+                self.assertEqual(observed_memory_patterns, [False])
+                self.assertIs(
+                    FakeOrtInferSession.__dict__["_init_sess_opts"],
+                    original_descriptor,
+                )
+                self.assertTrue(
+                    FakeOrtInferSession._init_sess_opts({}).enable_mem_pattern
+                )
 
 
 if __name__ == "__main__":
