@@ -15,6 +15,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -56,15 +57,94 @@ _OCR_LOCK = threading.Lock()
 _PDF_LOCK = threading.RLock()
 
 
+class OCRResourceLimitError(RuntimeError):
+    """输入超出单次 OCR 资源预算；保留原件，不写负识别缓存。"""
+
+
+class OCRMemoryPressureError(RuntimeError):
+    """系统内存紧张时停止任务，避免继续识别触发持续换页。"""
+
+
+@lru_cache(maxsize=1)
+def _windows_memory_reader() -> Callable[[], int | None] | None:
+    # ctypes 会缓存 POINTER 类型；只创建一次结构类型和 DLL 绑定。
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
+            (name, ctypes.c_uint64) for name in (
+                "total_physical", "available_physical", "total_commit", "available_commit",
+                "total_virtual", "available_virtual", "extended_virtual",
+            )
+        ]
+
+    try:
+        query = ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx
+        query.argtypes = [ctypes.POINTER(MemoryStatus)]
+        query.restype = ctypes.c_int
+    except (OSError, AttributeError):
+        return None
+
+    def read() -> int | None:
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if query(ctypes.byref(status)):
+            return min(status.available_physical, status.available_commit, status.available_virtual)
+        return None
+
+    return read
+
+
+def _available_ocr_memory() -> int | None:
+    if os.name != "nt":
+        return None
+    read = _windows_memory_reader()
+    return read() if read is not None else None
+
+
+def _ensure_ocr_memory_headroom(required_bytes: int = 512 * 1024 * 1024) -> None:
+    available = _available_ocr_memory()
+    if available is not None and available < required_bytes:
+        required_mb = math.ceil(required_bytes / (1024 * 1024))
+        raise OCRMemoryPressureError(f"本页安全识别需预留约 {required_mb} MB，当前可用内存不足，已停止继续识别；请关闭其他程序或缩小图片后重试，原始资料未修改")
+
+
+_OCR_MAX_INPUT_BYTES = 32 * 1024 * 1024
+_OCR_MAX_INPUT_PIXELS = 12_000_000
+_OCR_MAX_INPUT_ASPECT = 4
+
+
+def _check_ocr_input_budget(source: str | bytes) -> int:
+    # Pillow 仅读图片头，不解码像素；拦截压缩体积很小但展开极大的图片。
+    from PIL import Image
+
+    size = len(source) if isinstance(source, bytes) else Path(source).stat().st_size
+    if size > _OCR_MAX_INPUT_BYTES:
+        raise OCRResourceLimitError("图片超过 32 MB 安全上限，未执行 OCR；请缩小或拆页后重试")
+    try:
+        image = Image.open(BytesIO(source) if isinstance(source, bytes) else source)
+    except Image.DecompressionBombError as exc:
+        raise OCRResourceLimitError("图片展开尺寸超过安全上限，未执行 OCR；请缩小或拆页后重试") from exc
+    with image:
+        width, height = image.size
+        if width <= 0 or height <= 0 or width * height > _OCR_MAX_INPUT_PIXELS:
+            raise OCRResourceLimitError("图片超过 1200 万像素安全上限，未执行 OCR；请缩小或拆页后重试")
+        if max(width, height) > min(width, height) * _OCR_MAX_INPUT_ASPECT:
+            raise OCRResourceLimitError("图片过长，未执行 OCR；请将长图拆成普通页面后重试")
+        # 沿用 RapidOCR 1.4.4 的 2000 长边 / 736 检测短边；只估算预算，
+        # 不改传给模型的图像。为原图、张量及中间特征图保守预留空间。
+        scale = min(1.0, 2000 / max(width, height))
+        scale *= max(1.0, 736 / (min(width, height) * scale))
+        detector_pixels = math.ceil(width * scale / 32) * 32 * math.ceil(height * scale / 32) * 32
+        return max(512 * 1024 * 1024, detector_pixels * 1024 + width * height * 4)
+
+
 def _ocr_runtime_options() -> dict[str, int]:
-    """Reserve one CPU for the desktop event loop on supported low-core machines."""
+    """限制单次推理线程，为 Win7 桌面预留 CPU。保持原有识别批次。"""
 
     cpu_count = max(1, int(os.cpu_count() or 1))
-    if cpu_count > 4:
-        # Keep the OCR package's tuned defaults on modern hardware.
-        return {}
     return {
-        "intra_op_num_threads": max(1, cpu_count - 1),
+        "intra_op_num_threads": min(2, max(1, cpu_count - 1)),
         "inter_op_num_threads": 1,
     }
 
@@ -98,6 +178,9 @@ def _rapidocr_low_memory_session_options() -> Iterator[None]:
         session_options = original_factory(config)
         try:
             session_options.enable_mem_pattern = False
+            session_options.enable_cpu_mem_arena = False
+            session_options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            session_options.add_session_config_entry("session.inter_op.allow_spinning", "0")
         except Exception:
             pass
         return session_options
@@ -142,7 +225,7 @@ _OCR_CACHE_VERSION = 6
 _OCR_CACHE_TEXT_SNIPPET_MAX = 4096
 _OCR_CACHE_FILE_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_FILE_TRIM_BYTES = 48 * 1024 * 1024
-_OCR_CACHE_FILE_LOAD_MAX_BYTES = 256 * 1024 * 1024
+_OCR_CACHE_FILE_LOAD_MAX_BYTES = 64 * 1024 * 1024
 _OCR_CACHE_ENTRY_MAX_AGE_DAYS = 90
 _OCR_CACHE_HASH_WINDOW = 1 * 1024 * 1024
 _OCR_CACHE_HASH_TRIGGER_SIZE = 10 * 1024 * 1024
@@ -484,7 +567,7 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
         stat_result = cache_path.stat()
         if stat_result.st_size > _OCR_CACHE_FILE_LOAD_MAX_BYTES:
             _clear_ocr_memory_cache(cache_path)
-            return _new_ocr_cache()
+            raise OCRResourceLimitError("OCR 索引超过 64 MB 安全读取上限，已停止处理并保留原缓存；请按资料批次分库")
         signature = _ocr_cache_file_signature(stat_result)
         with _OCR_MEMORY_CACHE_LOCK:
             if _OCR_MEMORY_CACHE_PATH is not None and _OCR_MEMORY_CACHE_PATH != path_key:
@@ -501,6 +584,7 @@ def _load_ocr_cache(cache_path: Path) -> dict[str, Any]:
                 _clear_ocr_memory_cache()
         # Avoid retaining a second full-size text copy after decoding a large
         # cache.  The parsed dictionary remains exactly the same.
+        _ensure_ocr_memory_headroom()
         with cache_path.open("r", encoding="utf-8") as cache_file:
             data = json.load(cache_file)
     except (OSError, UnicodeError, json.JSONDecodeError):
@@ -1826,12 +1910,13 @@ def _iter_pdfium_ocr_images(
                         f"PDF 累计估算解码内存超过安全上限：{file_path.name}"
                     )
 
+                _ensure_ocr_memory_headroom()
                 bitmap = page.render(scale=_PDF_PAGE_RENDER_SCALE)
                 image = bitmap.to_pil()
                 with BytesIO() as output:
                     image.save(output, format="PNG", compress_level=1)
                     payload = output.getvalue()
-            except (MaterialCollectionCancelled, PDFRecognitionError):
+            except (MaterialCollectionCancelled, PDFRecognitionError, OCRMemoryPressureError):
                 raise
             except Exception as exc:
                 raise PDFRecognitionError(
@@ -1865,6 +1950,7 @@ def _iter_pdfium_ocr_images(
                     f"{len(payload)} > {_PDF_MAX_ENCODED_IMAGE_BYTES} bytes"
                 )
             yield payload
+            del payload
         _raise_if_cancelled(cancelled)
 
 
@@ -1940,8 +2026,11 @@ def _iter_pdf_ocr_images(
                 image_key = image_path[0] if len(image_path) == 1 else image_path
                 image_file = None
                 try:
+                    _ensure_ocr_memory_headroom()
                     image_file = page.images[image_key]
                     payload = bytes(image_file.data)
+                except OCRMemoryPressureError:
+                    raise
                 except ImportError as exc:
                     raise PDFRecognitionError(
                         "PDF 图片解码组件不可用，请重新安装完整版本后重试"
@@ -1970,7 +2059,9 @@ def _iter_pdf_ocr_images(
                         f"{len(payload)} > {_PDF_MAX_ENCODED_IMAGE_BYTES} bytes"
                     )
                 image_count += 1
+                image_file = None
                 yield payload
+                del payload
         _raise_if_cancelled(cancelled)
     if image_count == 0 and pdfium is not None:
         # 无可提取内嵌图时整页渲染兜底，覆盖标题为图形的电子证书等场景。
@@ -2475,11 +2566,8 @@ def _collect_ocr_texts(
     render_pages: bool = False,
 ) -> tuple[list[str], bool]:
     """逐页 OCR，只累计文字；页面坐标结果在下一页前即可释放。"""
-    engine = _get_ocr_engine()
-    if engine is None:
-        return [], False
-
     texts: list[str] = []
+    character_count = 0
     try:
         for target_input in _iter_ocr_targets(
             file_path,
@@ -2488,13 +2576,29 @@ def _collect_ocr_texts(
             render_pages=render_pages,
         ):
             _raise_if_cancelled(cancelled)
+            required_memory = _check_ocr_input_budget(target_input)
+            _ensure_ocr_memory_headroom(required_memory)
+            engine = _get_ocr_engine()
+            if engine is None:
+                return [], False
+            _ensure_ocr_memory_headroom(required_memory)
             with _OCR_LOCK:
                 result, _ = engine(target_input)
             if result:
-                texts.extend(_extract_ocr_result_texts(result))
-    except (MaterialCollectionCancelled, PDFRecognitionError):
+                page_texts = _extract_ocr_result_texts(result)
+                character_count += sum(len(text) for text in page_texts)
+                if character_count > _PDF_MAX_TEXT_CHARS:
+                    raise OCRResourceLimitError("单份资料的 OCR 文字超过安全上限，请拆分后重试")
+                texts.extend(page_texts)
+                del page_texts
+            del result, target_input
+    except (MaterialCollectionCancelled, PDFRecognitionError, OCRResourceLimitError, OCRMemoryPressureError):
         raise
-    except Exception:
+    except MemoryError as exc:
+        raise OCRMemoryPressureError("当前内存不足，已停止识别；请关闭其他程序或拆分资料后重试") from exc
+    except Exception as exc:
+        if any(token in str(exc).lower() for token in ("bad_alloc", "out of memory", "failed to allocate memory", "not enough memory")):
+            raise OCRMemoryPressureError("OCR 引擎内存不足，已停止识别；请关闭其他程序或拆分资料后重试") from exc
         return [], False
     return texts, True
 
@@ -4126,8 +4230,8 @@ def _build_flat_ocr_index(
                 )
             except MaterialCollectionCancelled:
                 raise
-            except PDFRecognitionError as exc:
-                warnings.append(f"PDF 识别失败，已跳过 {rel_path}：{exc}")
+            except (PDFRecognitionError, OCRResourceLimitError) as exc:
+                warnings.append(f"资料识别失败，已跳过 {rel_path}：{exc}")
                 continue
             if fingerprint is None:
                 fingerprint = _compute_full_file_fingerprint(source_path)
@@ -5266,7 +5370,13 @@ def _collect_all_from_folders(
                             if cache_stats is not None:
                                 cache_stats["hits"] += 1
                         else:
-                            ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id = _classify_by_ocr(src)
+                            try:
+                                ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id = _classify_by_ocr(
+                                    src,
+                                )
+                            except OCRResourceLimitError as exc:
+                                warnings.append(f"已复制原件但未完成身份核对：{rel_p}；{exc}")
+                                ocr_mat, ocr_method, ocr_sub = None, "", ""
                             if cache_stats is not None:
                                 cache_stats["misses"] += 1
                             if use_ocr_cache and ocr_cache is not None and ocr_mat:
@@ -5290,6 +5400,8 @@ def _collect_all_from_folders(
                         mismatch_warning=mismatch,
                         cache_hit=cache_hit,
                     ))
+        except (MaterialCollectionCancelled, OCRMemoryPressureError):
+            raise
         except Exception as e:
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")
 
@@ -5447,7 +5559,7 @@ def _collect_specific_materials(
                 cancelled=cancelled,
                 analysis_records=analysis_records if contract_labels else None,
             )
-        except MaterialCollectionCancelled:
+        except (MaterialCollectionCancelled, OCRMemoryPressureError):
             raise
         except Exception as exc:
             warnings.append(f"文件读取异常 {f_path.name}: {exc}")
