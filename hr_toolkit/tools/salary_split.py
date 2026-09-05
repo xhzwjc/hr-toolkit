@@ -36,6 +36,12 @@ _SHEET_CELL_REFERENCE = re.compile(
     r"(\$?[A-Za-z]{1,3})(\$?)(\d+)"
     r"(?::(\$?[A-Za-z]{1,3})(\$?)(\d+))?"
 )
+_COLUMN_TOTAL_FORMULA = re.compile(
+    r"=(?P<rounded>ROUND\()?SUM\("
+    r"(?P<first_col>\$?[A-Z]{1,3})(?P<first_row>\$?\d+):"
+    r"(?P<last_col>\$?[A-Z]{1,3})(?P<last_row>\$?\d+)\)"
+    r"(?(rounded),2\))"
+)
 TRAILING_METADATA_EXACT = {
     "区域",
     "所属区域",
@@ -85,6 +91,7 @@ class LeafSection:
     subtotal_snapshot: RowSnapshot | None
     category_label: str | None = None
     merged_ranges: tuple[tuple[int, int], ...] = ()
+    inferred_subtotal: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +126,7 @@ class RenderedLeaf:
     data_start_row: int
     data_end_row: int
     employee_count: int
+    inferred_subtotal: bool = False
 
 
 @dataclass(frozen=True)
@@ -398,6 +406,56 @@ def _get_row_merged_ranges(ws: Worksheet, row_index: int) -> tuple[tuple[int, in
     return tuple(sorted(ranges))
 
 
+def _column_total_formula(value: Any, col_index: int):
+    if not isinstance(value, str):
+        return None
+    match = _COLUMN_TOTAL_FORMULA.fullmatch(re.sub(r"\s+", "", value).upper())
+    col = get_column_letter(col_index)
+    if match and match["first_col"].lstrip("$") == col and match["last_col"].lstrip("$") == col:
+        return match
+    return None
+
+
+def _is_project_subtotal(
+    ws: Worksheet, layout: SalarySheetLayout, row_index: int, section_start: int,
+) -> bool:
+    """仅补识别无小计字样、但具有本段求和及汇总表对应证据的行。"""
+    label = ws.cell(row_index, 1).value
+    if not isinstance(label, str) or not label.strip() or label.startswith("="):
+        return False
+    if any(_cell_text(ws, row_index, col) for col in (layout.name_col, layout.id_card_col, layout.company_col)):
+        return False
+    matched_columns = 0
+    for col in range(5, layout.amount_end_col + 1):
+        match = _column_total_formula(ws.cell(row_index, col).value, col)
+        if match and int(match["first_row"].lstrip("$")) == section_start and int(match["last_row"].lstrip("$")) == row_index - 1:
+            matched_columns += 1
+            if matched_columns >= 2:
+                break
+    if matched_columns < 2:
+        return False
+    if not any(
+        _cell_text(ws, row, layout.company_col)
+        and (_cell_text(ws, row, layout.name_col) or _cell_text(ws, row, layout.id_card_col))
+        for row in range(section_start, row_index)
+    ):
+        return False
+    summary = ws.parent[layout.summary_sheet_name]
+    for cells in summary.iter_rows():
+        if str(cells[0].value or "").strip() == label.strip():
+            return True
+        for cell in cells[1:]:
+            if cell.data_type != "f":
+                continue
+            if any(
+                (ref[1] or ref[2]) == layout.detail_sheet_name
+                and int(ref[5]) == row_index and ref[8] is None
+                for ref in _SHEET_CELL_REFERENCE.finditer(cell.value)
+            ):
+                return True
+    return False
+
+
 def _detect_detail_hierarchy(ws: Worksheet, layout: SalarySheetLayout) -> DetailHierarchy:
     """Classify rows in detail sheet into hierarchical leaf sections and totals."""
     grand_total_row: int | None = None
@@ -427,7 +485,11 @@ def _detect_detail_hierarchy(ws: Worksheet, layout: SalarySheetLayout) -> Detail
         if not label:
             continue
 
-        if _is_subtotal_label(label):
+        inferred_subtotal = (
+            not _is_subtotal_label(label) and not _is_category_total_label(label)
+            and _is_project_subtotal(ws, layout, row_index, section_start)
+        )
+        if _is_subtotal_label(label) or inferred_subtotal:
             leaf = LeafSection(
                 label=label,
                 source_start_row=section_start,
@@ -435,6 +497,7 @@ def _detect_detail_hierarchy(ws: Worksheet, layout: SalarySheetLayout) -> Detail
                 subtotal_row=row_index,
                 subtotal_snapshot=snapshot_row(ws, row_index, layout.max_column),
                 merged_ranges=_get_row_merged_ranges(ws, row_index),
+                inferred_subtotal=inferred_subtotal,
             )
             leaves.append(leaf)
             current_category_leaves.append(leaf)
@@ -562,7 +625,7 @@ def _apply_row_merged_ranges(
     ws: Worksheet,
     target_row: int,
     source_merged_ranges: tuple[tuple[int, int], ...],
-    default_end_col: int,
+    default_end_col: int | None,
 ) -> None:
     if source_merged_ranges:
         for min_col, max_col in source_merged_ranges:
@@ -572,7 +635,7 @@ def _apply_row_merged_ranges(
                 end_row=target_row,
                 end_column=max_col,
             )
-    else:
+    elif default_end_col is not None:
         ws.merge_cells(
             start_row=target_row,
             start_column=1,
@@ -661,8 +724,8 @@ def _rebuild_detail_sheet(
                     subtotal_row = current_row
                     apply_row_snapshot(ws, subtotal_row, leaf.subtotal_snapshot, translate_formulas=False)
                     ws.cell(subtotal_row, 1).value = leaf.label
-                    _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row)
-                    _apply_row_merged_ranges(ws, subtotal_row, leaf.merged_ranges, default_merge_end)
+                    _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row, preserve_rounding=leaf.inferred_subtotal)
+                    _apply_row_merged_ranges(ws, subtotal_row, leaf.merged_ranges, None if leaf.inferred_subtotal else default_merge_end)
                     if leaf.subtotal_row is not None:
                         row_map[leaf.subtotal_row] = subtotal_row
                     current_row += 1
@@ -675,6 +738,7 @@ def _rebuild_detail_sheet(
                     data_start_row=data_start_row,
                     data_end_row=data_end_row,
                     employee_count=len(section_rows),
+                    inferred_subtotal=leaf.inferred_subtotal,
                 )
                 rendered_leaves.append(r_leaf)
                 cat_rendered_leaves.append(r_leaf)
@@ -715,8 +779,8 @@ def _rebuild_detail_sheet(
                 subtotal_row = current_row
                 apply_row_snapshot(ws, subtotal_row, leaf.subtotal_snapshot, translate_formulas=False)
                 ws.cell(subtotal_row, 1).value = leaf.label
-                _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row)
-                _apply_row_merged_ranges(ws, subtotal_row, leaf.merged_ranges, default_merge_end)
+                _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row, preserve_rounding=leaf.inferred_subtotal)
+                _apply_row_merged_ranges(ws, subtotal_row, leaf.merged_ranges, None if leaf.inferred_subtotal else default_merge_end)
                 if leaf.subtotal_row is not None:
                     row_map[leaf.subtotal_row] = subtotal_row
                 current_row += 1
@@ -729,6 +793,7 @@ def _rebuild_detail_sheet(
                 data_start_row=data_start_row,
                 data_end_row=data_end_row,
                 employee_count=len(section_rows),
+                inferred_subtotal=leaf.inferred_subtotal,
             )
             rendered_leaves.append(r_leaf)
     else:
@@ -748,8 +813,8 @@ def _rebuild_detail_sheet(
                 subtotal_row = current_row
                 apply_row_snapshot(ws, subtotal_row, leaf.subtotal_snapshot, translate_formulas=False)
                 ws.cell(subtotal_row, 1).value = leaf.label
-                _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row)
-                _apply_row_merged_ranges(ws, subtotal_row, leaf.merged_ranges, default_merge_end)
+                _write_detail_section_total_formulas(ws, layout, subtotal_row, data_start_row, data_end_row, preserve_rounding=leaf.inferred_subtotal)
+                _apply_row_merged_ranges(ws, subtotal_row, leaf.merged_ranges, None if leaf.inferred_subtotal else default_merge_end)
                 if leaf.subtotal_row is not None:
                     row_map[leaf.subtotal_row] = subtotal_row
                 current_row += 1
@@ -762,6 +827,7 @@ def _rebuild_detail_sheet(
                 data_start_row=data_start_row,
                 data_end_row=data_end_row,
                 employee_count=len(section_rows),
+                inferred_subtotal=leaf.inferred_subtotal,
             )
             rendered_leaves.append(r_leaf)
 
@@ -801,6 +867,7 @@ def _write_detail_section_total_formulas(
     subtotal_row: int,
     first_data_row: int,
     last_data_row: int,
+    *, preserve_rounding: bool = False,
 ) -> None:
     for col_index in range(4, layout.max_column + 1):
         col_letter = get_column_letter(col_index)
@@ -811,7 +878,9 @@ def _write_detail_section_total_formulas(
             cell.value = None
         elif col_index <= layout.amount_end_col:
             if last_data_row >= first_data_row:
-                cell.value = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})"
+                original = _column_total_formula(cell.value, col_index) if preserve_rounding else None
+                total = f"SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})"
+                cell.value = f"=ROUND({total},2)" if original and original["rounded"] else f"={total}"
             else:
                 cell.value = None
         else:
@@ -1114,7 +1183,7 @@ def _translate_summary_leaf_formulas(
             continue
 
         if isinstance(val, str) and val.startswith("="):
-            # 无小计的单项目模板以序号整列匹配项目整列时，改为本公司员工区间。
+            # 无小计或补识别的小计模板以序号整列匹配项目整列时，保持本公司员工区间。
             # 只处理这一模板形式，保留带其他筛选条件的 SUMIFS。
             sheet_pattern = rf"(?:'{re.escape(detail_sheet_name)}'|{re.escape(detail_sheet_name)})"
             sumifs = re.fullmatch(
@@ -1123,7 +1192,7 @@ def _translate_summary_leaf_formulas(
                 val,
                 re.IGNORECASE,
             )
-            if subtotal_row is None and target_leaf is not None and sumifs is not None:
+            if target_leaf is not None and sumifs is not None and (subtotal_row is None or target_leaf.inferred_subtotal):
                 amount_col = sumifs.group(1)
                 ws.cell(current_row, col_index).value = (
                     f"=SUM({detail_ref}!{amount_col}{target_leaf.data_start_row}:"
