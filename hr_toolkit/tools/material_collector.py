@@ -807,6 +807,7 @@ _DOCUMENT_GROUPABLE_MATERIALS = frozenset({"劳动合同"})
 _DOCUMENT_GROUP_MAX_PAGES = 32
 _DOCUMENT_GROUP_MAX_TIME_GAP_SECONDS = 5 * 60
 _DOCUMENT_GROUP_TEXT_MAX_CHARS = 20_000
+_DOCUMENT_GROUP_MAX_CANDIDATES = 64
 
 _IGNORED_FILENAMES = {
     ".ds_store", "thumbs.db", "desktop.ini", ".localized", "ehthumbs.db",
@@ -865,7 +866,8 @@ class TargetEmployee:
     @property
     def identity_key(self) -> str:
         """员工唯一复合主键，防止同名员工覆盖。"""
-        return f"{self.name}_{self.id_card}_{self.phone}"
+        suffix = f"_{self.employee_no}" if self.employee_no else ""
+        return f"{self.name}_{self.id_card}_{self.phone}{suffix}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -938,6 +940,7 @@ class MaterialCollectResult:
     # TODO: 当 HR 提报隐私报送需求时启用，本次保持 None / False 以保证报送数据完整
     zip_password: str | None = None
     mask_sensitive: bool = False
+    review_path: Path | None = None
 
     @property
     def total_employees(self) -> int:
@@ -954,7 +957,15 @@ class MaterialCollectResult:
             if len(self.employee_result_keys) == len(self.target_employees)
             else [employee.name for employee in self.target_employees]
         )
-        return sum(1 for key in keys if not self.missing_records.get(key))
+        pending = {
+            match.employee_identity_key or match.employee_name
+            for match in self.matches if "待确认" in match.mismatch_warning
+        }
+        return sum(
+            1 for key, employee in zip(keys, self.target_employees)
+            if not self.missing_records.get(key)
+            and employee.identity_key not in pending and employee.name not in pending
+        )
 
     def to_dict(self, *, include_matches: bool = True) -> dict[str, Any]:
         payload = {
@@ -963,6 +974,7 @@ class MaterialCollectResult:
             "output_dir": str(self.output_dir),
             "zip_path": str(self.zip_path) if self.zip_path else None,
             "report_path": str(self.report_path) if self.report_path else None,
+            "review_path": str(self.review_path) if self.review_path else None,
             "mode": self.mode,
             "library_mode": self.library_mode,
             "total_employees": self.total_employees,
@@ -1404,8 +1416,8 @@ def _match_folder_to_employee(folder_name: str, emp: TargetEmployee) -> str | No
     if re.search(pattern, f_name):
         return "name"
 
-    if len(emp_name) >= 2 and emp_name in f_name:
-        return "name_sub"
+    if re.fullmatch(re.escape(emp_name) + r"(?:的)?(?:资料|材料|档案)(?:夹)?", f_name):
+        return "name"
 
     return None
 
@@ -2106,6 +2118,7 @@ def _store_ocr_cache(
         entry["analysis_state"] = "complete" if analysis_complete else "incomplete"
         entry["ocr_text"] = _sanitize_cached_text(extracted_text)
         entry["index_scope"] = LIBRARY_MODE_PERSON_FOLDER
+        entry["document_page_marker"] = _footer_page_marker(extracted_text)
     entries: dict[str, Any] = cache.setdefault("entries", {})
     previous_entry = entries.get(cache_key)
     previous_queries = (
@@ -2166,13 +2179,15 @@ def _extract_person_names(text: str) -> list[str]:
         "电话", "手机号", "合同", "岗位", "部门", "文化程度", "有效期",
     )
     for label in labels:
-        pattern = rf"{re.escape(label)}\s*(?:名称)?\s*[:：]?\s*([\u3400-\u9fff·•・]{{2,10}})"
+        pattern = rf"{re.escape(label)}\s*(?:名称|[（(](?:签名|签字)[）)])?\s*[:：]?\s*([\u3400-\u9fff·•・]{{2,10}})"
         for match in re.finditer(pattern, normalized):
             candidate = match.group(1).strip()
             for suffix in suffix_noise:
                 if suffix in candidate:
                     candidate = candidate.split(suffix, 1)[0]
             candidate = candidate.strip()
+            if candidate in {"签字", "签名", "签字姓名", "年月日", "甲方", "乙方"}:
+                continue
             if not (2 <= len(_normalize_person_name(candidate)) <= 8):
                 continue
             if not _is_valid_person_name(candidate):
@@ -2500,7 +2515,7 @@ def _read_ocr_text(
     )
     if not texts:
         return "", [], analysis_complete
-    return " ".join(texts), texts, analysis_complete
+    return "\n".join(texts), texts, analysis_complete
 
 
 def _analyze_ocr_file(
@@ -2657,6 +2672,7 @@ def _classify_material_type(
     cache_stats: dict[str, int] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    analysis_records: dict[Path, dict[str, Any]] | None = None,
 ) -> tuple[str | None, str, str, str, str, bool]:
     """Classify file into a material type using filenames, document contents, and local OCR.
 
@@ -2750,6 +2766,8 @@ def _classify_material_type(
                     analysis_complete,
                     cached_entry,
                 ) = hit
+                if analysis_records is not None:
+                    analysis_records[file_path] = cached_entry
                 weak_cached_result = _is_weak_cached_material_result(
                     mat,
                     method,
@@ -2885,6 +2903,14 @@ def _classify_material_type(
                 method_prefix="ocr",
                 allow_weak_id_fallback=True,
             )
+        if analysis_records is not None and analysis_complete:
+            analysis_records[file_path] = {
+                "material_type": ocr_mat or "其他材料", "match_method": ocr_method,
+                "extracted_names": _extract_person_names(ocr_text),
+                "extracted_id_hash": _hash_id_card(ocr_id),
+                "ocr_text": _sanitize_cached_text(ocr_text),
+                "document_page_marker": _footer_page_marker(ocr_text),
+            }
         if use_cache and cache is not None and analysis_complete:
             stores_standard_result = ocr_mat in MATERIAL_SYNONYMS
             _store_ocr_cache(
@@ -2964,6 +2990,12 @@ class _FlatIndexedFile:
     document_group_id: str = ""
     document_page_number: int = 0
     document_page_count: int = 0
+    document_warning: str = ""
+    filename_names: tuple[str, ...] = ()
+    filename_id_hash: str = ""
+    filename_employee_no: str = ""
+    ocr_page_marker: tuple[int, int | None] | None = None
+    confirmed_employee_key: str = ""
 
 
 def _scan_flat_library_files(
@@ -3143,6 +3175,39 @@ def _flat_cache_entry_usable(entry: Any) -> bool:
     return bool(entry.get("material_type") and entry.get("extracted_name"))
 
 
+def _is_portrait_material(material: str) -> bool:
+    return material in {"证件照片", "证件照", "一寸照", "二寸照", "登记照", "个人照片"}
+
+
+def _portrait_filename_identity(filename: str) -> tuple[tuple[str, ...], str, str]:
+    """只解析照片名称中的完整身份词；结果随路径重算，不能写入内容 OCR 缓存。"""
+    stem = Path(filename).stem
+    for keyword in sorted(MATERIAL_SYNONYMS["证件照片"], key=len, reverse=True):
+        stem = re.sub(re.escape(keyword), " ", stem, flags=re.IGNORECASE)
+    identity = _extract_id_card(stem)
+    if identity:
+        stem = stem.replace(identity, " ")
+    names = tuple(dict.fromkeys(
+        _normalize_person_name(token) for token in re.findall(r"[\u3400-\u9fff·]{2,10}", stem)
+        if _is_valid_person_name(token)
+        and token not in {"入职", "正面", "反面", "原图", "副本", "扫描件", "电子版"}
+    ))
+    numbers = re.findall(r"(?:工号|员工编号)\s*[:：]?\s*(\d{3,16})(?!\d)", stem)
+    if not numbers and not names:
+        numbers = re.findall(r"(?<!\w)\d{3,16}(?!\w)", re.sub(r"[_（）()\-]", " ", stem))
+    employee_no = numbers[0] if len(numbers) == 1 else ""
+    return names, _hash_id_card(identity), employee_no
+
+
+def _named_portrait(file_path: Path, requested_types: list[str]) -> tuple[str | None, str]:
+    if file_path.suffix.lower() not in IMAGE_EXTENSIONS:
+        return None, ""
+    material, _method = _classify_material_from_filename(file_path.name, requested_types)
+    if material and _is_portrait_material(material) and any(_portrait_filename_identity(file_path.name)):
+        return material, "filename_portrait"
+    return None, ""
+
+
 def _flat_path_metadata(file_path: Path) -> tuple[int, int, int | None] | None:
     try:
         stat = file_path.stat()
@@ -3245,6 +3310,7 @@ def _store_flat_index_entry(
         "source_relpath": rel_path,
         "analysis_state": "complete",
         "index_scope": LIBRARY_MODE_FLAT_OCR,
+        "document_page_marker": _footer_page_marker(extracted_text),
     }
     cache.setdefault("entries", {})[cache_key] = entry
     return entry
@@ -3258,6 +3324,9 @@ def _analyze_flat_source(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[str, str, str, list[str], str, str, bool]:
     """分析单个无序库文件，返回类型、方式、子类型、姓名列表、证件号和正文。"""
+    portrait, portrait_method = _named_portrait(file_path, requested_types)
+    if portrait:
+        return portrait, portrait_method, "", [], "", "", True
     text = _extract_flat_document_text(
         file_path,
         progress_callback=progress_callback,
@@ -3402,11 +3471,23 @@ def _entry_to_flat_indexed_file(
         str(name).strip() for name in raw_names
         if str(name or "").strip()
     )
+    material = str(entry.get("material_type") or "其他材料")
+    photo_names, photo_id, photo_no = (
+        _portrait_filename_identity(file_path.name)
+        if _is_portrait_material(material) else ((), "", "")
+    )
+    raw_marker = entry.get("document_page_marker")
+    page_marker = None
+    if isinstance(raw_marker, (list, tuple)) and len(raw_marker) == 2:
+        if isinstance(raw_marker[0], int) and 0 < raw_marker[0] <= _DOCUMENT_GROUP_MAX_PAGES:
+            total = raw_marker[1]
+            if total is None or isinstance(total, int) and raw_marker[0] <= total <= _DOCUMENT_GROUP_MAX_PAGES:
+                page_marker = (raw_marker[0], total)
     return _FlatIndexedFile(
         source_path=file_path,
         relative_path=rel_path,
         cache_key=cache_key,
-        material_type=str(entry.get("material_type") or "其他材料"),
+        material_type=material,
         match_method=str(entry.get("match_method") or "unrecognized"),
         subtype=str(entry.get("subtype") or ""),
         extracted_names=names,
@@ -3415,6 +3496,10 @@ def _entry_to_flat_indexed_file(
         text_snippet=str(entry.get("ocr_text") or ""),
         extracted_id_card=extracted_id_card,
         cache_hit=cache_hit,
+        filename_names=photo_names,
+        filename_id_hash=photo_id,
+        filename_employee_no=photo_no,
+        ocr_page_marker=page_marker,
     )
 
 
@@ -3429,6 +3514,8 @@ def _natural_file_key(path: Path) -> tuple[Any, ...]:
 def _filename_page_sequence(path: Path) -> tuple[str, int] | None:
     """提取连续扫描文件名末尾的短序号；身份证号等长数字不会被当页码。"""
     stem = path.stem.casefold()
+    if re.fullmatch(r"[0-9a-f]{20,64}", stem):
+        return None
     match = re.search(r"(?<!\d)(\d{1,6})$", stem)
     if match is None:
         return None
@@ -3436,9 +3523,22 @@ def _filename_page_sequence(path: Path) -> tuple[str, int] | None:
     return prefix, int(match.group(1))
 
 
+def _footer_page_marker(text: str) -> tuple[int, int | None] | None:
+    """单独的尾行数字只作页码线索，不以正文数字或日期充当页码。"""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    match = re.fullmatch(r"[-—–]?\s*(\d{1,2})\s*[-—–]?", lines[-1])
+    if match and 0 < int(match.group(1)) <= _DOCUMENT_GROUP_MAX_PAGES:
+        return int(match.group(1)), None
+    return None
+
+
 def _explicit_page_marker(item: _FlatIndexedFile) -> tuple[int, int | None] | None:
     """从文件名和 OCR 摘要提取“第 N 页”或“N/总页数”标记。"""
-    sample = f"{item.source_path.stem} {item.text_snippet[:2000]}"
+    if item.ocr_page_marker is not None:
+        return item.ocr_page_marker
+    sample = f"{item.source_path.stem} {item.text_snippet}"
     patterns = (
         r"第\s*(\d{1,3})\s*页(?:\s*[/共]\s*(\d{1,3})\s*页?)?",
         r"(?<![\d/.-])(\d{1,3})\s*/\s*(\d{1,3})(?![\d/.-])",
@@ -3455,7 +3555,7 @@ def _explicit_page_marker(item: _FlatIndexedFile) -> tuple[int, int | None] | No
         ):
             continue
         return page_number, total_pages
-    return None
+    return _footer_page_marker(item.text_snippet)
 
 
 def _effective_group_material(item: _FlatIndexedFile) -> str:
@@ -3477,7 +3577,8 @@ def _looks_like_document_start(item: _FlatIndexedFile) -> bool:
     if marker is not None:
         return marker[0] == 1
     text = item.text_snippet
-    return "劳动合同" in text
+    compact = re.sub(r"\s+", "", text)
+    return compact.startswith(("劳动合同", "用工合同", "劳务合同", "聘用合同"))
 
 
 def _has_document_end_evidence(item: _FlatIndexedFile) -> bool:
@@ -3490,6 +3591,7 @@ def _has_document_end_evidence(item: _FlatIndexedFile) -> bool:
         for keyword in (
             "乙方签字", "乙方（签字", "乙方(签字", "劳动者签字",
             "本人签字", "签字盖章", "签署日期", "合同签订日期",
+            "乙方（签名", "乙方(签名", "乙方签名",
         )
     )
 
@@ -3607,10 +3709,12 @@ def _image_group_continuity(
     return ()
 
 
-def _enrich_flat_index_with_document_groups(
+def _enrich_ordered_document_groups(
     indexed: list[_FlatIndexedFile],
     warnings: list[str],
     requested_types: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[_FlatIndexedFile]:
     """以 O(n log n) 有界窗口合并独立合同图片的组级识别证据。"""
     canonical_requests = {
@@ -3628,51 +3732,17 @@ def _enrich_flat_index_with_document_groups(
 
     replacement_groups: dict[str, list[_FlatIndexedFile]] = {}
     path_to_group: dict[Path, str] = {}
-    dimensions: dict[Path, tuple[int, int] | None] = {}
-    mtimes: dict[Path, float | None] = {}
 
     for directory_items in by_directory.values():
         if not any(_looks_like_document_start(item) for item in directory_items):
             continue
-        natural_ordered = sorted(
+        ordered = sorted(
             directory_items,
             key=lambda item: _natural_file_key(item.source_path),
         )
-        filename_sequences = {
-            item.source_path: _filename_page_sequence(item.source_path)
-            for item in natural_ordered
-        }
-        sequence_edges = sum(
-            1
-            for previous, current in zip(natural_ordered, natural_ordered[1:])
-            if (
-                filename_sequences[previous.source_path] is not None
-                and filename_sequences[current.source_path] is not None
-                and filename_sequences[previous.source_path][0]
-                == filename_sequences[current.source_path][0]
-                and filename_sequences[current.source_path][1]
-                == filename_sequences[previous.source_path][1] + 1
-            )
-        )
-        if sequence_edges >= 2:
-            ordered = natural_ordered
-        else:
-            # 没有可靠连续文件名时按扫描文件时间排列；相同时间再以文件名稳定排序。
-            def _scan_order(item: _FlatIndexedFile) -> tuple[float, tuple[Any, ...]]:
-                if item.source_path not in mtimes:
-                    try:
-                        mtimes[item.source_path] = item.source_path.stat().st_mtime
-                    except OSError:
-                        mtimes[item.source_path] = None
-                timestamp = mtimes[item.source_path]
-                return (
-                    timestamp if timestamp is not None else float("inf"),
-                    _natural_file_key(item.source_path),
-                )
-
-            ordered = sorted(directory_items, key=_scan_order)
         position = 0
         while position < len(ordered):
+            _raise_if_cancelled(cancelled)
             start = ordered[position]
             if start.source_path in path_to_group or not _looks_like_document_start(start):
                 position += 1
@@ -3736,18 +3806,18 @@ def _enrich_flat_index_with_document_groups(
                         f"{group[0].relative_path} 与 {candidate.relative_path}"
                     )
                     break
-                continuity = _image_group_continuity(
-                    group[-1],
-                    candidate,
-                    dimensions=dimensions,
-                    mtimes=mtimes,
-                )
-                if not continuity:
-                    break
+                previous_sequence = _filename_page_sequence(group[-1].source_path)
+                candidate_sequence = _filename_page_sequence(candidate.source_path)
                 if (
-                    "page_number" not in continuity
-                    and "filename_sequence" not in continuity
-                    and not _has_contract_continuation_evidence(candidate)
+                    previous_sequence is None or candidate_sequence is None
+                    or previous_sequence[0] != candidate_sequence[0]
+                    or candidate_sequence[1] != previous_sequence[1] + 1
+                ):
+                    break
+                previous_marker = _explicit_page_marker(group[-1])
+                if (
+                    previous_marker and candidate_marker
+                    and candidate_marker[0] != previous_marker[0] + 1
                 ):
                     break
 
@@ -3778,6 +3848,14 @@ def _enrich_flat_index_with_document_groups(
                         "已确认多页劳动合同边界，但未识别到可核对的姓名、证件号或手机号，"
                         f"未自动归属员工：{group[0].relative_path}"
                     )
+                group_warning = ""
+                last_marker = _explicit_page_marker(group[-1])
+                if not _has_document_end_evidence(group[-1]) or (
+                    last_marker and last_marker[1] and len(group) != last_marker[1]
+                ):
+                    group_warning = "合同完整性待确认：结束页或总页数不完整"
+                if not combined_names and not group_id_hash and not group_phone_hash:
+                    group_warning = "合同人员归属待确认：未可靠识别姓名或证件号码"
                 enriched: list[_FlatIndexedFile] = []
                 for page_number, item in enumerate(group, start=1):
                     method = item.match_method or "unrecognized"
@@ -3794,6 +3872,7 @@ def _enrich_flat_index_with_document_groups(
                         document_group_id=group_key,
                         document_page_number=page_number,
                         document_page_count=len(group),
+                        document_warning=group_warning,
                     ))
                     path_to_group[item.source_path] = group_key
                 replacement_groups[group_key] = enriched
@@ -3818,6 +3897,165 @@ def _enrich_flat_index_with_document_groups(
         if group_key not in emitted_groups:
             result.extend(replacement_groups[group_key])
             emitted_groups.add(group_key)
+    return result
+
+
+def _contract_chapters(item: _FlatIndexedFile) -> tuple[int, ...]:
+    digits = {char: number for number, char in enumerate("零一二三四五六七八九")}
+    def number(text: str) -> int:
+        if text.isdigit():
+            return int(text)
+        if "十" in text:
+            left, right = text.split("十", 1)
+            return digits.get(left, 1) * 10 + digits.get(right, 0)
+        return digits.get(text, 0)
+    return tuple(sorted({
+        value for token in re.findall(r"第\s*([一二三四五六七八九十零\d]{1,3})\s*[条章]", item.text_snippet)
+        if 0 < (value := number(token)) < 100
+    }))
+
+
+def _document_identity_conflicts(left: _FlatIndexedFile, right: _FlatIndexedFile) -> bool:
+    if left.extracted_id_hash and right.extracted_id_hash:
+        return left.extracted_id_hash != right.extracted_id_hash
+    if left.extracted_phone_hash and right.extracted_phone_hash:
+        if left.extracted_phone_hash != right.extracted_phone_hash:
+            return True
+    left_names, right_names = _normalized_group_names(left), _normalized_group_names(right)
+    return bool(left_names and right_names and left_names.isdisjoint(right_names))
+
+
+def _enrich_flat_index_with_document_groups(
+    indexed: list[_FlatIndexedFile],
+    warnings: list[str],
+    requested_types: list[str],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[_FlatIndexedFile]:
+    """连续文件名走线性分组；无序图片只在最多 64 页的候选块中关联。
+
+    时间/尺寸不决定人员归属。多个合同竞争同一页时整组待确认，避免贪心串人。
+    仅使用已有 OCR 摘要，不再次打开图片或调用模型。
+    """
+    if not any((_canonical_material_for_request_label(t) or t) in _DOCUMENT_GROUPABLE_MATERIALS for t in requested_types):
+        return indexed
+    blocks: dict[tuple[Path, str], list[_FlatIndexedFile]] = {}
+    for position, item in enumerate(indexed):
+        if position % 256 == 0:
+            _raise_if_cancelled(cancelled)
+        if item.source_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        material = _effective_group_material(item)
+        if material and material not in _DOCUMENT_GROUPABLE_MATERIALS:
+            continue
+        sequence = _filename_page_sequence(item.source_path)
+        if sequence is None and not (
+            _has_contract_continuation_evidence(item) or _explicit_page_marker(item)
+        ):
+            continue
+        prefix = "sequence:" + sequence[0] if sequence else ""
+        blocks.setdefault((item.source_path.parent, prefix), []).append(item)
+
+    replacements: dict[Path, _FlatIndexedFile] = {}
+    for (_directory, prefix), items in blocks.items():
+        _raise_if_cancelled(cancelled)
+        if not any(_looks_like_document_start(item) for item in items):
+            continue
+        if prefix:
+            ordered = _enrich_ordered_document_groups(items, warnings, requested_types, cancelled=cancelled)
+            for item in ordered:
+                if item.document_group_id:
+                    replacements[item.source_path] = item
+            items = [item for item in items if item.source_path not in replacements]
+            if not items:
+                continue
+        starts = [item for item in items if _looks_like_document_start(item)]
+        if not starts:
+            continue
+        if len(items) > _DOCUMENT_GROUP_MAX_CANDIDATES:
+            for item in items:
+                replacements[item.source_path] = replace(item, document_warning="合同分组待确认：同目录相似候选过多，请按人员或合同批次分开")
+            warnings.append(f"合同分组待确认：{_directory} 有 {len(items)} 张候选，未进行全量两两比较")
+            continue
+        chapters = {item.source_path: _contract_chapters(item) for item in items}
+        markers = {item.source_path: _explicit_page_marker(item) for item in items}
+        proposals: list[list[_FlatIndexedFile]] = []
+        for start in starts:
+            _raise_if_cancelled(cancelled)
+            candidates = [start] + [
+                item for item in items if item is not start
+                and not _looks_like_document_start(item)
+                and not _document_identity_conflicts(start, item)
+            ]
+            if len(candidates) < 2 or len(candidates) > _DOCUMENT_GROUP_MAX_PAGES:
+                replacements[start.source_path] = replace(start, document_warning="合同完整性待确认：未确认续页及结束页")
+                continue
+            if all(chapters[item.source_path] for item in candidates):
+                candidates.sort(key=lambda item: chapters[item.source_path][0])
+                continuous = all(
+                    chapters[left.source_path][-1] < chapters[right.source_path][0]
+                    for left, right in zip(candidates, candidates[1:])
+                )
+            elif all(markers[item.source_path] for item in candidates):
+                candidates.sort(key=lambda item: markers[item.source_path][0])
+                continuous = all(
+                    markers[right.source_path][0] == markers[left.source_path][0] + 1
+                    for left, right in zip(candidates, candidates[1:])
+                )
+            else:
+                continuous = False
+            if (
+                not continuous or candidates[0] is not start
+                or not _has_document_end_evidence(candidates[-1])
+                or any(_has_document_end_evidence(item) for item in candidates[1:-1])
+                or any(_document_identity_conflicts(left, right) for left in candidates for right in candidates)
+            ):
+                for item in candidates:
+                    replacements[item.source_path] = replace(item, document_warning="合同分组待确认：页序、结束位置或人员信息不唯一")
+                continue
+            proposals.append(candidates)
+        uses: dict[Path, int] = {}
+        for group in proposals:
+            for item in group:
+                uses[item.source_path] = uses.get(item.source_path, 0) + 1
+        for group in proposals:
+            if any(uses[item.source_path] > 1 for item in group):
+                for item in group:
+                    replacements[item.source_path] = replace(item, document_warning="合同分组待确认：同一页面存在多个可能归属")
+                continue
+            names = tuple(dict.fromkeys(name for item in group for name in item.extracted_names))
+            identity = next((item.extracted_id_hash for item in group if item.extracted_id_hash), "")
+            phone = next((item.extracted_phone_hash for item in group if item.extracted_phone_hash), "")
+            key = hashlib.sha256("\0".join(item.cache_key for item in group).encode()).hexdigest()[:24]
+            page_numbers = [markers[item.source_path] for item in group]
+            complete = (
+                all(page_numbers) and [marker[0] for marker in page_numbers] == list(range(1, len(group) + 1))
+                and page_numbers[-1][1] == len(group)
+            )
+            warning = "" if complete else "合同完整性待确认：已关联页面，但未识别完整的总页数"
+            if not names and not identity and not phone:
+                warning = "合同人员归属待确认：未可靠识别姓名或证件号码"
+            for page, item in enumerate(group, 1):
+                replacements[item.source_path] = replace(
+                    item, material_type=group[0].material_type,
+                    match_method=item.match_method + "+document_group",
+                    extracted_names=names, extracted_id_hash=identity, extracted_phone_hash=phone,
+                    document_group_id=key, document_page_number=page, document_page_count=len(group),
+                    document_warning=warning,
+                )
+    replaced = [replacements.get(item.source_path, item) for item in indexed]
+    groups = _flat_document_groups(replaced)
+    result: list[_FlatIndexedFile] = []
+    emitted: set[str] = set()
+    for item in replaced:
+        if not item.document_group_id:
+            result.append(item)
+        elif item.document_group_id not in emitted:
+            emitted.add(item.document_group_id)
+            result.extend(sorted(groups[item.document_group_id], key=lambda page: page.document_page_number))
+    pending = sum(bool(item.document_warning) for item in result)
+    if pending:
+        warnings.append(f"有 {pending} 张合同页面需要确认归属或完整性，详见待确认资料清单")
     return result
 
 
@@ -3863,6 +4101,20 @@ def _build_flat_ocr_index(
             continue
 
         cache_hit = entry is not None
+        portrait, _portrait_method = _named_portrait(source_path, requested_types)
+        if entry is not None and portrait and not (
+            entry.get("ocr_text") or entry.get("extracted_names") or entry.get("extracted_name")
+            or entry.get("extracted_id_hash") or entry.get("extracted_phone_hash")
+        ) and entry.get("material_type") in ("其他材料", "证件照片", portrait):
+            entry = dict(entry, material_type=portrait, match_method="filename_portrait")
+        if entry is not None and entry.get("match_method") == "filename_portrait":
+            # 文件名证据不随内容缓存继承；改成随机名或其他材料后需重新分析。
+            current_portrait, _ = _named_portrait(source_path, requested_types)
+            if current_portrait != entry.get("material_type"):
+                entry = None
+                cache_hit = False
+                cache_stats["hits"] = max(0, cache_stats.get("hits", 0) - 1)
+                cache_stats["misses"] = cache_stats.get("misses", 0) + 1
         extracted_id = ""
         if entry is None:
             try:
@@ -4044,7 +4296,7 @@ def _build_flat_ocr_index(
         if not _save_ocr_cache(cache_path, cache):
             checkpoint_ok = False
     return _enrich_flat_index_with_document_groups(
-        indexed, warnings, requested_types,
+        indexed, warnings, requested_types, cancelled=cancelled,
     ), checkpoint_ok
 
 
@@ -4053,6 +4305,8 @@ def _flat_file_matches_employee(
     employee: TargetEmployee,
     duplicate_target_names: set[str],
 ) -> bool:
+    if indexed_file.confirmed_employee_key:
+        return indexed_file.confirmed_employee_key == _review_employee_key(employee)
     target_name = _normalize_person_name(employee.name)
     target_id_hash = _hash_id_card(employee.id_card)
     target_phone_hash = _hash_phone(employee.phone)
@@ -4063,6 +4317,19 @@ def _flat_file_matches_employee(
         return target_id_hash == indexed_file.extracted_id_hash
     if target_phone_hash and indexed_file.extracted_phone_hash:
         return target_phone_hash == indexed_file.extracted_phone_hash
+    if _is_portrait_material(indexed_file.material_type) and not (
+        indexed_file.extracted_names or indexed_file.extracted_id_hash or indexed_file.extracted_phone_hash
+    ):
+        if indexed_file.filename_names and indexed_file.filename_names != (target_name,):
+            return False
+        if indexed_file.filename_id_hash:
+            return bool(target_id_hash and target_id_hash == indexed_file.filename_id_hash)
+        if indexed_file.filename_employee_no:
+            return bool(employee.employee_no and employee.employee_no == indexed_file.filename_employee_no)
+        return (
+            target_name not in duplicate_target_names
+            and indexed_file.filename_names == (target_name,)
+        )
     if not target_name or target_name in duplicate_target_names:
         return False
     names = {_normalize_person_name(name) for name in indexed_file.extracted_names}
@@ -4070,7 +4337,7 @@ def _flat_file_matches_employee(
         return True
 
     # 部分证书只印姓名本身而没有“姓名：”标签；以非中文边界做全文精确匹配，
-    # 避免把“张三”错误命中“张三丰”。文件名始终不参与人员判断。
+    # 避免把“张三”错误命中“张三丰”；照片文件名由上方独立分支处理。
     raw_target = str(employee.name or "").strip()
     if raw_target and indexed_file.text_snippet:
         return bool(re.search(
@@ -4081,7 +4348,7 @@ def _flat_file_matches_employee(
 
 
 class _FlatEmployeeCandidateIndex:
-    """Inverted OCR-person index with the original predicate as final filter."""
+    """人员倒排索引；文件名、正文和人工确认均由最终谓词核对。"""
 
     __slots__ = ("_indexed_files", "_candidate_positions")
 
@@ -4095,10 +4362,15 @@ class _FlatEmployeeCandidateIndex:
     ) -> None:
         id_targets: dict[str, set[int]] = {}
         phone_targets: dict[str, set[int]] = {}
+        number_targets: dict[str, set[int]] = {}
+        confirmed_targets: dict[str, set[int]] = {}
         name_targets: dict[str, set[int]] = {}
         text_targets: dict[str, set[int]] = {}
 
         for employee_index, employee in enumerate(employees):
+            confirmed_targets.setdefault(_review_employee_key(employee), set()).add(employee_index)
+            if employee.employee_no:
+                number_targets.setdefault(employee.employee_no, set()).add(employee_index)
             target_id_hash = _hash_id_card(employee.id_card)
             if not target_id_hash and _ID_CARD_RE.fullmatch(employee.name.strip()):
                 target_id_hash = _hash_id_card(employee.name.strip())
@@ -4123,6 +4395,17 @@ class _FlatEmployeeCandidateIndex:
             if file_position % 256 == 0:
                 _raise_if_cancelled(cancelled)
             candidate_employees: set[int] = set()
+            if indexed_file.confirmed_employee_key:
+                candidate_employees.update(confirmed_targets.get(indexed_file.confirmed_employee_key, ()))
+            if _is_portrait_material(indexed_file.material_type):
+                if indexed_file.filename_id_hash:
+                    candidate_employees.update(id_targets.get(indexed_file.filename_id_hash, ()))
+                if indexed_file.filename_employee_no:
+                    positions = number_targets.get(indexed_file.filename_employee_no, ())
+                    if len(positions) == 1:
+                        candidate_employees.update(positions)
+                for name in indexed_file.filename_names:
+                    candidate_employees.update(name_targets.get(name, ()))
             if indexed_file.extracted_id_hash:
                 candidate_employees.update(
                     id_targets.get(indexed_file.extracted_id_hash, ())
@@ -4170,6 +4453,166 @@ def _flat_document_groups(
     return groups
 
 
+def _review_employee_key(employee: TargetEmployee) -> str:
+    return hashlib.sha256((employee.identity_key + "_" + employee.employee_no).encode()).hexdigest()
+
+
+def _review_source_hash(item: _FlatIndexedFile) -> str | None:
+    match = re.fullmatch(r"([0-9a-f]{64})_\d+", item.cache_key)
+    return match.group(1) if match else _stream_full_sha256(item.source_path)
+
+
+def _load_document_reviews(
+    cache: dict[str, Any] | None, employees: list[TargetEmployee], warnings: list[str],
+    *, cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """每次任务只读取一次用户填写的清单；未明确填写“是”不构成确认。"""
+    if not cache or not isinstance(cache.get("review_workbook"), str):
+        return
+    path = Path(cache["review_workbook"])
+    try:
+        if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
+            return
+        by_name: dict[str, list[TargetEmployee]] = {}
+        for employee in employees:
+            by_name.setdefault(employee.name, []).append(employee)
+        choices: dict[str, set[str]] = {}
+        with path.open("rb") as stream:
+            workbook = load_workbook(stream, read_only=True, data_only=False)
+            try:
+                if "待确认归属" not in workbook.sheetnames:
+                    return
+                for index, row in enumerate(workbook["待确认归属"].iter_rows(min_row=2, max_col=7, values_only=True)):
+                    if index % 128 == 0:
+                        _raise_if_cancelled(cancelled)
+                    if index >= 20000:
+                        warnings.append("待确认清单超过 20000 行，本次仅处理前 20000 行")
+                        break
+                    group, name, qualifier, confirmed = (str(value or "").strip() for value in row[:4])
+                    if confirmed != "是" or not name or name.startswith("="):
+                        continue
+                    candidates = by_name.get(name, [])
+                    if qualifier:
+                        candidates = [e for e in candidates if qualifier in (e.employee_no, e.id_card[-4:] if e.id_card else "")]
+                    if len(candidates) != 1:
+                        warnings.append(f"待确认清单中的人员无法唯一对应当前名单，未应用：{group}")
+                        continue
+                    choices.setdefault(group, set()).add(_review_employee_key(candidates[0]))
+            finally:
+                workbook.close()
+        approved = cache.setdefault("approved_document_groups", {})
+        if not isinstance(approved, dict):
+            return
+        sources = cache.get("review_sources") or {}
+        for group, people in choices.items():
+            if len(people) != 1 or group not in sources:
+                warnings.append(f"待确认清单存在相互冲突或失效的选择，未应用：{group}")
+                continue
+            approved[group] = {"employee": next(iter(people)), "sources": sources[group]}
+    except MaterialCollectionCancelled:
+        raise
+    except Exception as exc:
+        warnings.append(f"待确认清单无法读取，保留待确认状态：{exc}")
+
+
+def _apply_document_reviews(
+    indexed: list[_FlatIndexedFile], cache: dict[str, Any] | None,
+    employees: list[TargetEmployee], warnings: list[str],
+    *, cancelled: Callable[[], bool] | None = None,
+) -> list[_FlatIndexedFile]:
+    approved = (cache or {}).get("approved_document_groups") or {}
+    if not isinstance(approved, dict) or not approved:
+        return indexed
+    people = {_review_employee_key(employee): employee for employee in employees}
+    groups: dict[str, list[_FlatIndexedFile]] = {}
+    for item in indexed:
+        key = item.document_group_id or hashlib.sha256(str(item.source_path).encode()).hexdigest()[:24]
+        groups.setdefault(key, []).append(item)
+    replacements: dict[Path, _FlatIndexedFile] = {}
+    for key, group in groups.items():
+        _raise_if_cancelled(cancelled)
+        record = approved.get(key)
+        if not isinstance(record, dict) or record.get("employee") not in people:
+            continue
+        sources = record.get("sources") or []
+        expected = {source.get("path"): source.get("sha256") for source in sources if isinstance(source, dict)}
+        if set(expected) != {str(item.source_path) for item in group}:
+            continue
+        if any(_review_source_hash(item) != expected[str(item.source_path)] for item in group):
+            warnings.append("确认过的资料内容已变化，确认记录失效，请重新核对")
+            approved.pop(key, None)
+            continue
+        employee = people[record["employee"]]
+        for item in group:
+            replacements[item.source_path] = replace(
+                item, extracted_names=(employee.name,), extracted_id_hash=_hash_id_card(employee.id_card),
+                extracted_phone_hash=_hash_phone(employee.phone), document_warning="",
+                match_method=item.match_method + "+manual_review",
+                material_type="劳动合同" if item.document_warning.startswith("合同") else item.material_type,
+                confirmed_employee_key=_review_employee_key(employee),
+            )
+    return [replacements.get(item.source_path, item) for item in indexed]
+
+
+def _write_document_review(
+    output_dir: Path, indexed: list[_FlatIndexedFile], cache: dict[str, Any] | None,
+    warnings: list[str], *, cancelled: Callable[[], bool] | None = None,
+) -> Path | None:
+    """清单可编辑确认；预览按组加载原图，避免 Win7 一次解码几千张图片。"""
+    if not indexed:
+        return None
+    path = output_dir / "资料待确认.xlsx"
+    workbook = Workbook(write_only=True)
+    sheet = workbook.create_sheet("待确认归属")
+    for column, width in (("A", 29), ("B", 16), ("C", 20), ("D", 29), ("E", 8), ("F", 75), ("G", 65)):
+        sheet.column_dimensions[column].width = width
+    sheet.column_dimensions["C"].number_format = "@"
+    sheet.append(["确认编号", "确认员工", "工号或证件尾号", "已核对归属及完整性（填是）", "页序", "源文件", "待确认原因"])
+    groups: dict[str, list[_FlatIndexedFile]] = {}
+    for item in indexed:
+        key = item.document_group_id or hashlib.sha256(str(item.source_path).encode()).hexdigest()[:24]
+        groups.setdefault(key, []).append(item)
+    source_records: dict[str, list[dict[str, str]]] = {}
+    previews = []
+    for key, group in groups.items():
+        _raise_if_cancelled(cancelled)
+        source_records[key] = []
+        urls = []
+        for item in group:
+            _raise_if_cancelled(cancelled)
+            digest = _review_source_hash(item)
+            if digest is None:
+                continue
+            source_records[key].append({"path": str(item.source_path), "sha256": digest})
+            sheet.append([key, "", "", "", item.document_page_number or "", str(item.source_path), item.document_warning])
+            urls.append({"url": item.source_path.as_uri(), "name": item.source_path.name})
+        previews.append({"key": key, "files": urls, "reason": group[0].document_warning})
+    workbook.save(path)
+    workbook.close()
+    if cache is not None:
+        cache["review_workbook"] = str(path)
+        cache["review_sources"] = source_records
+    payload = json.dumps(previews, ensure_ascii=True).replace("<", "\\u003c")
+    preview = output_dir / "资料待确认预览.html"
+    preview.write_text(
+        '<!doctype html><meta charset="utf-8"><title>资料待确认</title>'
+        '<style>body{font:16px sans-serif;margin:24px}button{display:block;margin:8px 0;padding:8px}img{max-width:320px;max-height:500px;margin:8px;vertical-align:top}</style>'
+        '<h2>资料待确认</h2><p>点击分组查看原图。核对后在资料待确认.xlsx 中填写确认员工、必要的工号或证件尾号，并在确认列填“是”。同组填写一行即可。保存后重新运行资料打包，系统核对原文件未变后复用确认。</p>'
+        '<p>只填写单页确认编号时仅确认该页，不会将其他待确认页面一起归属。</p>'
+        '<div id="groups"></div><div id="pages"></div><script>var data=' + payload + ';'
+        'function show(i){var box=document.getElementById("pages");box.innerHTML="";'
+        'var p=document.createElement("p");p.textContent=data[i].key+"："+data[i].reason;box.appendChild(p);'
+        'for(var j=0;j<data[i].files.length;j++){var a=document.createElement("a");a.href=data[i].files[j].url;a.target="_blank";'
+        'var im=document.createElement("img");im.src=a.href;im.alt=data[i].files[j].name;a.appendChild(im);box.appendChild(a);}}'
+        'for(var i=0;i<data.length;i++){var b=document.createElement("button");b.textContent=data[i].key+"（"+data[i].files.length+"页）";'
+        '(function(n){b.onclick=function(){show(n);};})(i);document.getElementById("groups").appendChild(b);}</script>',
+        encoding="utf-8",
+    )
+    reuse_hint = "填写并保存确认后，重新运行可复用。" if cache is not None else "当前关闭缓存，清单仅供核对；启用缓存后生成的清单才可复用确认。"
+    warnings.append(f"待确认清单：{path}；原图预览：{preview}。{reuse_hint}")
+    return path
+
+
 def _flat_employee_result_key(
     employee: TargetEmployee,
     duplicate_target_names: set[str],
@@ -4211,6 +4654,7 @@ def _collect_from_flat_index(
     *,
     candidate_files: list[_FlatIndexedFile] | None = None,
     document_groups: dict[str, list[_FlatIndexedFile]] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[str], int]:
     person_files = candidate_files if candidate_files is not None else [
         item for item in indexed_files
@@ -4227,6 +4671,7 @@ def _collect_from_flat_index(
             if group_id not in relevant_group_ids:
                 continue
             for member in members:
+                _raise_if_cancelled(cancelled)
                 fingerprint = _compute_full_file_fingerprint(member.source_path)
                 if fingerprint is not None:
                     verified_group_fingerprints[member.source_path] = fingerprint
@@ -4275,6 +4720,7 @@ def _collect_from_flat_index(
     )
 
     for item, material in person_files_with_material:
+        _raise_if_cancelled(cancelled)
         clean_material = safe_filename(material)
         material_sequences[material] = material_sequences.get(material, 0) + 1
         sequence = material_sequences[material]
@@ -4342,6 +4788,7 @@ def _collect_from_flat_index(
             target_path=destination,
             extracted_person_name=employee.name,
             extracted_id_card=item.extracted_id_card,
+            mismatch_warning=item.document_warning,
             cache_hit=item.cache_hit,
             employee_identity_key=employee.identity_key,
         ))
@@ -4455,6 +4902,8 @@ def collect_employee_materials(
     warnings: list[str] = []
     folder_match_counts: dict[str, int] = {}
     employee_result_keys: list[str] = []
+    review_candidates: list[_FlatIndexedFile] = []
+    _load_document_reviews(ocr_cache, employees, warnings, cancelled=cancelled)
 
     if legacy_pdf_cache_invalidated:
         warnings.append(
@@ -4522,6 +4971,15 @@ def collect_employee_materials(
             warnings.append(
                 f"OCR 索引缓存写入失败：{cache_path}；本次仍使用内存索引完成检索，下次会重新建立。"
             )
+        flat_index = _apply_document_reviews(flat_index, ocr_cache, employees, warnings, cancelled=cancelled)
+        for item in flat_index:
+            if item.document_warning:
+                review_candidates.append(item)
+            elif _is_portrait_material(item.material_type) and not (
+                item.extracted_names or item.extracted_id_hash or item.extracted_phone_hash
+                or item.filename_names or item.filename_id_hash or item.filename_employee_no
+            ):
+                review_candidates.append(replace(item, document_warning="照片人员归属待确认：名称只有材料类型，缺少人员依据"))
         flat_candidate_index = _FlatEmployeeCandidateIndex(
             flat_index,
             employees,
@@ -4570,6 +5028,7 @@ def collect_employee_materials(
                     duplicate_target_names,
                 ),
                 document_groups=flat_document_groups,
+                cancelled=cancelled,
             )
             folder_match_counts[emp_key] = 1 if matched_count else 0
             if emp_missing:
@@ -4613,9 +5072,12 @@ def collect_employee_materials(
                 cache_stats=cache_stats,
                 progress_callback=progress_callback,
                 cancelled=cancelled,
+                review_candidates=review_candidates,
             )
             if emp_missing:
                 missing_records[emp_key] = emp_missing
+
+    review_path = _write_document_review(out_path, review_candidates, ocr_cache, warnings, cancelled=cancelled)
 
     # === OCR 缓存：跑完一轮后汇总写一次（而非每张图片即写）"""
     if (
@@ -4664,6 +5126,8 @@ def collect_employee_materials(
                     if _is_junk_or_temp_file(f):
                         continue
                     full_p = Path(root) / f
+                    if f in {"资料待确认.xlsx", "资料待确认预览.html"}:
+                        continue
                     arcname = full_p.relative_to(out_path)
                     zf.write(full_p, arcname=str(arcname))
 
@@ -4685,6 +5149,7 @@ def collect_employee_materials(
         output_dir=out_path,
         zip_path=zip_path,
         report_path=report_path,
+        review_path=review_path,
         mode=mode,
         library_mode=library_mode,
         target_employees=employees,
@@ -4912,17 +5377,23 @@ def _collect_specific_materials(
     cache_stats: dict[str, int] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    review_candidates: list[_FlatIndexedFile] | None = None,
 ) -> list[str]:
     """指定材料模式：在匹配到的文件夹中精准搜集对应材料类型的文件。
 
     使用 启发式优先级排序 + 文件名特征 + 文档内容检索 + 离线视觉 OCR 进行识别：
     1. 优先将高疑似度的文件（如明确命名或含证件编号特征的文件）排在前面进行 OCR / 正文识别；
-    2. 一旦目标员工所需材料全部找齐，且无后续高置信度同名候选文件，立即短路早停，跳过后续无谓识别，极速省时；
-    3. 若前序文件未找齐，绝不遗漏，自动兜底继续逐个识别后续所有文件，直到找齐或扫描完毕。
+    2. 劳动合同检查全部候选并关联续页；其他材料在找齐且无高置信度候选后保留早停；
+    3. 页面证据在本次扫描内复用，既有持久缓存命中时不重复 OCR。
     """
     clean_emp = safe_filename(emp.name)
     found: dict[str, list[tuple[Path, str, str, str, str, str, bool]]] = {m: [] for m in requested_materials}
     seen_hashes: set[tuple[int, str]] = set()
+    contract_labels = [m for m in requested_materials if (_canonical_material_for_request_label(m) or m) == "劳动合同"]
+    analysis_records: dict[Path, dict[str, Any]] = {}
+    contract_candidates: list[_FlatIndexedFile] = []
+    candidate_context: dict[Path, tuple[str, str, str, str, bool]] = {}
+    document_warnings: dict[Path, str] = {}
 
     # 1. 扫描匹配到的所有文件夹，收集所有候选文件
     raw_candidates: list[tuple[Path, str, str]] = []
@@ -4974,6 +5445,7 @@ def _collect_specific_materials(
                 cache_stats=cache_stats,
                 progress_callback=progress_callback,
                 cancelled=cancelled,
+                analysis_records=analysis_records if contract_labels else None,
             )
         except MaterialCollectionCancelled:
             raise
@@ -4995,6 +5467,39 @@ def _collect_specific_materials(
         requested_label = _requested_label_for_detected_material(
             classified_mat_type or "", requested_materials,
         )
+        if classified_mat_type and _is_portrait_material(classified_mat_type):
+            photo_names, photo_id, photo_no = _portrait_filename_identity(f_path.name)
+            conflict = (
+                bool(photo_names and photo_names != (_normalize_person_name(emp.name),))
+                or bool(photo_id and emp.id_card and photo_id != _hash_id_card(emp.id_card))
+                or bool(photo_no and emp.employee_no and photo_no != emp.employee_no)
+            )
+            if conflict:
+                photo = _FlatIndexedFile(
+                    f_path, rel_p, str(f_path), classified_mat_type, match_method, subtype, (), "",
+                    document_warning="照片人员归属待确认：文件名与人员目录冲突",
+                )
+                reviewed = _apply_document_reviews([photo], ocr_cache, [emp], warnings, cancelled=cancelled)[0]
+                if reviewed.document_warning:
+                    if review_candidates is not None:
+                        review_candidates.append(reviewed)
+                    warnings.append(f"照片人员归属冲突，未提取：{rel_p}")
+                    continue
+                match_method = reviewed.match_method
+        if contract_labels and f_path.suffix.lower() in IMAGE_EXTENSIONS and classified_mat_type in (None, "其他材料", "劳动合同"):
+            entry = analysis_records.get(f_path) or {
+                "material_type": classified_mat_type or "其他材料", "match_method": match_method,
+                "extracted_name": ocr_name, "extracted_id_hash": _hash_id_card(ocr_id),
+            }
+            item = _entry_to_flat_indexed_file(f_path, rel_p, str(f_path), entry, cache_hit=cache_hit)
+            folder_identity = _FlatIndexedFile(f_path, rel_p, "", "劳动合同", "folder", "", (emp.name,), _hash_id_card(emp.id_card))
+            if _document_identity_conflicts(folder_identity, item):
+                warnings.append(f"合同人员归属冲突，未提取：{rel_p}")
+                continue
+            if not item.extracted_names:
+                item = replace(item, extracted_names=(emp.name,))
+            contract_candidates.append(item)
+            candidate_context[f_path] = (rel_p, match_method, ocr_name, ocr_id, cache_hit)
         if requested_label is not None:
             if not any(existing[0] == f_path for existing in found[requested_label]):
                 seen_hashes.add(sig)
@@ -5003,10 +5508,25 @@ def _collect_specific_materials(
                 )
 
         # 4. 短路早停：如果所有请求的材料都已经找齐，且后续没有高置信度同名候选文件（如多页合同/多个证书），立即停止扫描后续文件！
-        if _is_all_requested_materials_satisfied(found, requested_materials):
+        if not contract_labels and _is_all_requested_materials_satisfied(found, requested_materials):
             next_score = scored_candidates[idx_cand + 1][0] if idx_cand + 1 < len(scored_candidates) else 0
             if next_score < 80:
                 break
+
+    if contract_candidates:
+        grouped = _enrich_flat_index_with_document_groups(contract_candidates, warnings, contract_labels, cancelled=cancelled)
+        grouped = _apply_document_reviews(grouped, ocr_cache, [emp], warnings, cancelled=cancelled)
+        for item in grouped:
+            if item.document_warning:
+                document_warnings[item.source_path] = item.document_warning
+                if review_candidates is not None:
+                    review_candidates.append(item)
+            if not item.document_group_id and "+manual_review" not in item.match_method:
+                continue
+            label = contract_labels[0]
+            rel_p, method, name, identity, hit = candidate_context[item.source_path]
+            found[label] = [row for row in found[label] if row[0] != item.source_path]
+            found[label].append((item.source_path, rel_p, item.match_method, "", name, identity, hit))
 
     # 复制匹配到的真实文件到输出目录
     missing_list: list[str] = []
@@ -5055,6 +5575,7 @@ def _collect_specific_materials(
                 continue
 
             mismatch = _check_mismatch_warning(emp, ocr_name, ocr_id, duplicate_warning)
+            mismatch = "；".join(filter(None, (mismatch, document_warnings.get(src_path, ""))))
 
             matches.append(MaterialFileMatch(
                 employee_name=emp.name,
@@ -5122,6 +5643,7 @@ def _write_excel_report(
     emp_cache_hits: dict[str, int] = {}
     emp_mismatch_warnings: dict[str, list[str]] = {}
     emp_material_counts: dict[str, dict[str, int]] = {}
+    emp_pending_materials: dict[str, set[str]] = {}
     uses_identity_keys = any(match.employee_identity_key for match in all_matches)
 
     def _report_match_key(match: MaterialFileMatch) -> str:
@@ -5139,6 +5661,8 @@ def _write_excel_report(
             emp_cache_hits[match_key] = emp_cache_hits.get(match_key, 0) + 1
         if m.mismatch_warning:
             emp_mismatch_warnings.setdefault(match_key, []).append(m.mismatch_warning)
+            if "待确认" in m.mismatch_warning:
+                emp_pending_materials.setdefault(match_key, set()).add(m.material_type)
         if m.material_type in requested_materials:
             material_counts = emp_material_counts.setdefault(match_key, {})
             material_counts[m.material_type] = material_counts.get(m.material_type, 0) + 1
@@ -5248,8 +5772,13 @@ def _write_excel_report(
             found_count = sum(1 for m in requested_materials if emp_matches_by_type.get(m, 0) > 0)
             total_req = len(requested_materials)
             status_cell = ws_summary.cell(current_r, 4, f"{found_count}/{total_req}")
+            if emp_pending_materials.get(employee_report_key):
+                status_cell.value = f"{found_count}/{total_req}（待确认）"
             status_cell.alignment = Alignment(horizontal="center", vertical="center")
-            if found_count == total_req:
+            if emp_pending_materials.get(employee_report_key):
+                status_cell.fill = warning_fill
+                status_cell.font = warning_font
+            elif found_count == total_req:
                 status_cell.fill = ok_fill
                 status_cell.font = ok_font
             else:
@@ -5271,6 +5800,10 @@ def _write_excel_report(
                     cell.value = f"已提取({count}份)"
                     cell.fill = ok_fill
                     cell.font = ok_font
+                    if mat_type in emp_pending_materials.get(employee_report_key, set()):
+                        cell.value += "，待确认"
+                        cell.fill = warning_fill
+                        cell.font = warning_font
                 else:
                     cell.value = "缺失"
                     cell.fill = missing_fill
