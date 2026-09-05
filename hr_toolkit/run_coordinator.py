@@ -242,9 +242,12 @@ class ProjectRunCoordinator:
             batch_id = draft.summary.id
             with self._lock:
                 self._active_batch_id = batch_id
-            callbacks.log(
-                f"开始 {request.tool_name}（{len(sources)} 个资料来源，自动留存在当前项目）"
-            )
+            if request.tool_id == "material_collector":
+                callbacks.log(f"开始 {request.tool_name}（资料库只读检索，原件保留在原目录）")
+            else:
+                callbacks.log(
+                    f"开始 {request.tool_name}（{len(sources)} 个资料来源，自动留存在当前项目）"
+                )
 
             progress_state = {"last": 0.0, "phase": ""}
 

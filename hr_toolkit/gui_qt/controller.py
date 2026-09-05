@@ -2624,12 +2624,19 @@ class AppController(QObject):
         warnings = list(payload.get("warnings", [])) if isinstance(payload, dict) else []
         mode_text = "独立进程" if isolated else "后台线程"
         self._append_log(f"处理完成，用时 {elapsed:.1f} 秒（{mode_text}）。", "success")
+        completion_message = "结果已安全保存到当前项目。"
+        if self._run_progress_visible and isinstance(payload, dict):
+            copied_count = sum(bool(item.get("target_path")) for item in payload.get("matches", []))
+            completion_message = f"已提取 {copied_count} 个资料文件。"
+            if payload.get("review_path"):
+                completion_message += "另有资料待核对，请打开结果中的《资料待确认.xlsx》。"
+            self._append_log(completion_message, "warning" if payload.get("review_path") else "info")
         if warnings:
             self._append_log(f"共有 {len(warnings)} 条提醒。", "warning")
             for warning in warnings[:30]:
                 self._append_log(str(warning), "warning")
         self._flush_logs()
-        self.notificationRequested.emit("处理完成", "结果已安全保存到当前项目。", "success")
+        self.notificationRequested.emit("处理完成", completion_message, "success")
         self.refreshWorkspace()
 
     @Slot(str)
