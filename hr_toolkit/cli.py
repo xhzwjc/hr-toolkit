@@ -55,7 +55,7 @@ def _build_data_statistics_parser(subparsers: argparse._SubParsersAction) -> Non
     p.add_argument("--week-end", help="可选周报统计结束日期（如 2026-06-30）；需与 --week-start 同时使用")
     p.add_argument("--month-start", help="可选月报统计开始日期（如 2026-06-01）；只统计落在该范围内的月报，需与 --month-end 同时使用")
     p.add_argument("--month-end", help="可选月报统计结束日期（如 2026-06-30）；需与 --month-start 同时使用")
-    p.add_argument("--remark-unit", choices=["day", "hour"], default="day", help="考勤统计表备注中加班/调休的单位：day 按天（默认），hour 按小时")
+    p.add_argument("--remark-unit", choices=["day", "hour"], default="day", help="考勤统计表调休、各月加班及备注的单位：day 按天（默认），hour 按小时；累计剩余加班仍按天")
     p.add_argument("--include-business-trip", action="store_true", help="在考勤统计表中新增公出列；默认不勾选（不加该列）")
     p.add_argument(
         "--include-workday-business-trip",

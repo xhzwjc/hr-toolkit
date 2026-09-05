@@ -40,7 +40,7 @@ OUTPUT_FILENAME = "考勤周月报汇总表.xlsx"
 STANDARD_HOURS_PER_DAY = 7
 DEFAULT_COMPANY = "总部"
 
-# 考勤统计表备注中加班/调休的展示单位
+# 考勤统计表中加班/调休及其备注的展示单位
 REMARK_UNIT_DAY = "day"
 REMARK_UNIT_HOUR = "hour"
 _VALID_REMARK_UNITS = (REMARK_UNIT_DAY, REMARK_UNIT_HOUR)
@@ -61,7 +61,7 @@ class AttendanceSourceRow:
     rest_days: float = 0.0
     overtime_days: float = 0.0
     # 与 rest_days/overtime_days 来自同一单元格，换算为小时后的数值，
-    # 供"按小时"备注展示使用（避免从天数反算引入舍入误差）
+    # 供"按小时"统计与备注展示使用（避免从天数反算引入舍入误差）
     rest_hours: float = 0.0
     overtime_hours: float = 0.0
     absence_days: float = 0.0
@@ -100,6 +100,8 @@ class AttendancePersonSummary:
     workday_business_trip_days: float = 0.0
     missing_punch_count: int = 0
     remarks: list[str] = field(default_factory=list)
+    rest_hours: float = 0.0
+    month_overtime_hours: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -229,7 +231,7 @@ def generate_data_statistics_reports(
 ) -> DataStatisticsResult:
     _check_cancelled(cancelled)
     if remark_unit not in _VALID_REMARK_UNITS:
-        raise ValueError("备注单位只支持 day（按天）或 hour（按小时）。")
+        raise ValueError("加班/调休单位只支持 day（按天）或 hour（按小时）。")
     input_paths = _normalize_input_paths(input_path)
     display_input = input_paths[0] if len(input_paths) == 1 else input_paths[0].parent
     output = Path(output_dir).expanduser().resolve()
@@ -331,6 +333,7 @@ def generate_data_statistics_reports(
             month_range=month_range,
             include_business_trip=include_business_trip,
             include_workday_business_trip=include_workday_business_trip,
+            remark_unit=remark_unit,
             cancelled=cancelled,
         )
         result.output_file = output_file
@@ -1027,6 +1030,8 @@ def _summarize_attendance(
         summary.paid_leave_days += row.paid_leave_days
         summary.rest_days += row.rest_days
         summary.month_overtime_days[row.day.month] = summary.month_overtime_days.get(row.day.month, 0.0) + row.overtime_days
+        summary.rest_hours += row.rest_hours
+        summary.month_overtime_hours[row.day.month] = summary.month_overtime_hours.get(row.day.month, 0.0) + row.overtime_hours
         summary.absence_days += row.absence_days
         summary.late_early_count += row.late_count + row.early_count
         summary.late_minutes += row.late_minutes
@@ -1615,6 +1620,7 @@ def _write_output_workbook(
     include_business_trip: bool = False,
     include_workday_business_trip: bool = False,
     cancelled: Callable[[], bool] | None = None,
+    remark_unit: str = REMARK_UNIT_DAY,
 ) -> None:
     template_path = _copy_template(temp_dir)
     workbook = load_workbook(template_path)
@@ -1628,6 +1634,7 @@ def _write_output_workbook(
             attendance_summaries,
             include_business_trip=include_business_trip,
             include_workday_business_trip=include_workday_business_trip,
+            remark_unit=remark_unit,
             cancelled=cancelled,
         )
         _write_report_sheet(
@@ -1668,14 +1675,18 @@ def _write_attendance_sheet(
     include_business_trip: bool = False,
     include_workday_business_trip: bool = False,
     *,
+    remark_unit: str = REMARK_UNIT_DAY,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
+    by_hour = remark_unit == REMARK_UNIT_HOUR
     max_month = max([4] + [month for summary in summaries for month in summary.month_overtime_days])
     if max_month > 4:
         insert_cols(ws, 13, max_month - 4)
     stat_start_col = 9 + max_month
-    headers = ["序号", "公司", "部门（片区）", "姓名", "事假（天）", "病假（天）", "带薪休假（天）", "调休（天）"]
-    headers.extend(f"{month}月份加班天数" for month in range(1, max_month + 1))
+    rest_header = "调休（小时）" if by_hour else "调休（天）"
+    overtime_unit = "小时数" if by_hour else "天数"
+    headers = ["序号", "公司", "部门（片区）", "姓名", "事假（天）", "病假（天）", "带薪休假（天）", rest_header]
+    headers.extend(f"{month}月份加班{overtime_unit}" for month in range(1, max_month + 1))
     headers.extend(["旷工", "迟到/早退（分钟）", "漏打卡", "累计剩余加班天数", "备注"])
     for col_index, header in enumerate(headers, start=1):
         ws.cell(2, col_index).value = header
@@ -1713,15 +1724,16 @@ def _write_attendance_sheet(
         ws.cell(row_index, 5).value = _zero_blank(summary.personal_leave_days)
         ws.cell(row_index, 6).value = _zero_blank(summary.sick_leave_days)
         ws.cell(row_index, 7).value = _zero_blank(summary.paid_leave_days)
-        ws.cell(row_index, 8).value = _zero_blank(summary.rest_days)
+        ws.cell(row_index, 8).value = _zero_blank(summary.rest_hours if by_hour else summary.rest_days)
         if out_col_index is not None:
             ws.cell(row_index, out_col_index).value = _zero_blank(summary.out_minutes / 480)
         if workday_business_trip_col_index is not None:
             ws.cell(row_index, workday_business_trip_col_index).value = _zero_blank(
                 summary.workday_business_trip_days
             )
+        month_overtime = summary.month_overtime_hours if by_hour else summary.month_overtime_days
         for month in range(1, max_month + 1):
-            ws.cell(row_index, first_overtime_col + month - 1).value = _zero_blank(summary.month_overtime_days.get(month, 0.0))
+            ws.cell(row_index, first_overtime_col + month - 1).value = _zero_blank(month_overtime.get(month, 0.0))
         ws.cell(row_index, stat_start_col).value = _zero_blank(summary.absence_days)
         # 迟到/早退以"分钟"展示：源表有分钟数据则写分钟，否则留空（不再把"次"兜底为"分钟"）
         late_early_minutes = summary.late_minutes + summary.early_minutes
@@ -1733,7 +1745,12 @@ def _write_attendance_sheet(
         start_ref = f"{get_column_letter(first_overtime_col)}{row_index}"
         end_ref = f"{get_column_letter(first_overtime_col + max_month - 1)}{row_index}"
         rest_ref = f"{get_column_letter(8)}{row_index}"
-        ws.cell(row_index, stat_start_col + 3).value = f"=SUM({start_ref}:{end_ref})-{rest_ref}"
+        if by_hour:
+            # 加班、调休列按小时展示时，累计余额仍按现有 7 小时/天换算。
+            balance_formula = f"=ROUND((SUM({start_ref}:{end_ref})-{rest_ref})/{STANDARD_HOURS_PER_DAY},2)"
+        else:
+            balance_formula = f"=SUM({start_ref}:{end_ref})-{rest_ref}"
+        ws.cell(row_index, stat_start_col + 3).value = balance_formula
         ws.cell(row_index, stat_start_col + 4).value = "；".join(summary.remarks) + ("；" if summary.remarks else "")
         _format_row(ws, row_index, worksheet_max_column)
     if not summaries:

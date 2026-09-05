@@ -658,9 +658,24 @@ class DataStatisticsTest(unittest.TestCase):
                 hour_remark.replace("晚上加班3.5小时", "晚上加班0.5天").replace("上午调休3.5小时", "上午调休0.5天"),
                 day_remark,
             )
-            # 备注之外的所有列不受单位影响
+            self.assertEqual(day_ws.cell(2, 8).value, "调休（天）")
+            self.assertEqual(hour_ws.cell(2, 8).value, "调休（小时）")
+            self.assertEqual(day_ws.cell(3, 8).value, 0.5)
+            self.assertEqual(hour_ws.cell(3, 8).value, 3.5)
+            for month in range(1, 5):
+                self.assertEqual(day_ws.cell(2, 8 + month).value, f"{month}月份加班天数")
+                self.assertEqual(hour_ws.cell(2, 8 + month).value, f"{month}月份加班小时数")
+            self.assertEqual(day_ws.cell(3, 12).value, 0.5)
+            self.assertEqual(hour_ws.cell(3, 12).value, 3.5)
+            self.assertEqual(day_ws.cell(2, 16).value, "累计剩余加班天数")
+            self.assertEqual(hour_ws.cell(2, 16).value, "累计剩余加班天数")
+            self.assertEqual(day_ws.cell(3, 16).value, "=SUM(I3:L3)-H3")
+            self.assertEqual(hour_ws.cell(3, 16).value, "=ROUND((SUM(I3:L3)-H3)/7,2)")
+            # 其余列不受单位影响。
             for row in range(3, 4):
                 for col in range(1, 17):
+                    if col in (8, 12, 16):
+                        continue
                     self.assertEqual(day_ws.cell(row, col).value, hour_ws.cell(row, col).value)
             day_wb.close()
             hour_wb.close()

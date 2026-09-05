@@ -146,7 +146,7 @@ SPECS: tuple[ToolUiSpec, ...] = (
                     {"label": "清空", "value": "clear"},
                 ],
             },
-            {"id": "remark_unit", "kind": "choice", "label": "加班/调休备注", "default": "day", "options": [
+            {"id": "remark_unit", "kind": "choice", "label": "加班/调休单位", "default": "day", "options": [
                 {"label": "按天", "value": "day"}, {"label": "按小时", "value": "hour"}
             ]},
             {"id": "include_business_trip", "kind": "check", "label": "新增「公出」列", "default": False},
