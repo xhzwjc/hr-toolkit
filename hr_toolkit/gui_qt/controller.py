@@ -97,6 +97,7 @@ class AppController(QObject):
     projectChanged = Signal()
     busyChanged = Signal()
     runButtonTextChanged = Signal()
+    runProgressChanged = Signal()
     workspaceBusyChanged = Signal()
     workspaceChanged = Signal()
     workspaceSelectionChanged = Signal()
@@ -175,6 +176,15 @@ class AppController(QObject):
         self._project_generation = 0
         self._recent_projects: list[Path] = []
         self._busy = False
+        self._run_progress_visible = False
+        self._run_progress_current = 0
+        self._run_progress_total = 0
+        self._run_progress_message = ""
+        self._run_progress_started = 0.0
+        self._run_progress_updated = 0.0
+        self._run_progress_elapsed = 0
+        self._run_progress_wait = 0
+        self._run_progress_pending: tuple[int, int, str] | None = None
         self._run_coordinator = ProjectRunCoordinator()
         self._preview_cancel_event: threading.Event | None = None
         self._pending_preview: dict[str, Any] | None = None
@@ -248,6 +258,13 @@ class AppController(QObject):
         self._search_timer.timeout.connect(self.refreshWorkspace)
         self.specChanged.connect(self.runButtonTextChanged.emit)
         self.busyChanged.connect(self.runButtonTextChanged.emit)
+        self._run_progress_timer = QTimer(self)
+        self._run_progress_timer.setInterval(1000)
+        self._run_progress_timer.timeout.connect(self._refresh_run_progress_clock)
+        self._run_progress_flush_timer = QTimer(self)
+        self._run_progress_flush_timer.setSingleShot(True)
+        self._run_progress_flush_timer.setInterval(100)
+        self._run_progress_flush_timer.timeout.connect(self._flush_material_progress)
 
     def _state_key(self) -> tuple[str, str]:
         return self._spec.nav_id, self._spec.variant
@@ -501,6 +518,40 @@ class AppController(QObject):
     @Property(bool, notify=busyChanged)
     def busy(self) -> bool:
         return self._busy
+
+    @Property(bool, notify=runProgressChanged)
+    def runProgressVisible(self) -> bool:
+        return self._run_progress_visible
+
+    @Property(int, notify=runProgressChanged)
+    def runProgressCurrent(self) -> int:
+        return self._run_progress_current
+
+    @Property(int, notify=runProgressChanged)
+    def runProgressTotal(self) -> int:
+        return self._run_progress_total
+
+    @Property(str, notify=runProgressChanged)
+    def runProgressMessage(self) -> str:
+        return self._run_progress_message
+
+    @Property(int, notify=runProgressChanged)
+    def runProgressElapsed(self) -> int:
+        return self._run_progress_elapsed
+
+    @Property(int, notify=runProgressChanged)
+    def runProgressWaitSeconds(self) -> int:
+        return self._run_progress_wait
+
+    @Slot()
+    def _refresh_run_progress_clock(self) -> None:
+        if not self._run_progress_visible or not self._busy:
+            return
+        now = time.monotonic()
+        self._run_progress_elapsed = int(now - self._run_progress_started)
+        self._run_progress_wait = int(now - self._run_progress_updated)
+        # 时钟只解释等待时间，绝不驱动完成数或百分比。
+        self.runProgressChanged.emit()
 
     @Property(str, notify=runButtonTextChanged)
     def runButtonText(self) -> str:
@@ -2290,6 +2341,9 @@ class AppController(QObject):
             if self._preview_cancel_event is not None:
                 self._preview_cancel_event.set()
             self._run_coordinator.cancel()
+            if self._run_progress_visible:
+                self._run_progress_message = "已请求停止，等待当前步骤安全退出…"
+                self.runProgressChanged.emit()
             self._append_log("已请求停止，正在安全结束…", "warning")
             return
         if self._workspace_busy:
@@ -2507,6 +2561,14 @@ class AppController(QObject):
             kwargs=invocation.kwargs,
         )
         self._set_busy(True)
+        self._run_progress_visible = invocation.tool_id == "material_collector"
+        self._run_progress_current = self._run_progress_total = 0
+        self._run_progress_message = "正在准备项目资料，总量尚未确定"
+        self._run_progress_started = self._run_progress_updated = time.monotonic()
+        self._run_progress_elapsed = self._run_progress_wait = 0
+        self.runProgressChanged.emit()
+        if self._run_progress_visible:
+            self._run_progress_timer.start()
         self._clear_logs()
         self._append_log(f"开始{invocation.tool_name}，请稍候…", "info")
         self._flush_logs()
@@ -2519,15 +2581,41 @@ class AppController(QObject):
             finished=self._runFinished.emit,
         )
         if not self._run_coordinator.start(store, request, callbacks):
+            self._run_progress_timer.stop()
             self._set_busy(False)
             self.notificationRequested.emit("已有任务正在处理", "请等待当前任务结束。", "warning")
 
     @Slot(int, int, str)
     def _apply_run_progress(self, current: int, total: int, message: str) -> None:
+        if self._run_progress_visible:
+            self._run_progress_pending = (current, total, message)
+            if not self._run_progress_flush_timer.isActive():
+                self._run_progress_flush_timer.start()
+            return
+        self._append_log(message, "info")
+
+    @Slot()
+    def _flush_material_progress(self) -> None:
+        self._run_progress_flush_timer.stop()
+        payload = self._run_progress_pending
+        if payload is None:
+            return
+        self._run_progress_pending = None
+        current, total, message = payload
+        self._run_progress_current = max(0, current)
+        self._run_progress_total = max(0, total)
+        self._run_progress_message = message
+        self._run_progress_updated = time.monotonic()
+        self._run_progress_wait = 0
+        self.runProgressChanged.emit()
         self._append_log(message, "info")
 
     @Slot(object, str, float, bool)
     def _apply_run_success(self, payload, result_dir: str, elapsed: float, isolated: bool) -> None:
+        self._flush_material_progress()
+        if self._run_progress_visible:
+            self._run_progress_message = "全部处理完成，结果已登记保存。"
+            self.runProgressChanged.emit()
         self._last_result_dir = Path(result_dir)
         self.lastResultChanged.emit()
         self._last_run_by_key[self._state_key()] = (datetime.now().strftime("%H:%M"), True)
@@ -2545,6 +2633,10 @@ class AppController(QObject):
 
     @Slot(str)
     def _apply_run_error(self, message: str) -> None:
+        self._flush_material_progress()
+        if self._run_progress_visible:
+            self._run_progress_message = "处理失败：" + message
+            self.runProgressChanged.emit()
         self._last_run_by_key[self._state_key()] = (datetime.now().strftime("%H:%M"), False)
         self.specChanged.emit()
         self._append_log(f"处理失败：{message}", "error")
@@ -2554,6 +2646,10 @@ class AppController(QObject):
 
     @Slot()
     def _apply_run_stopped(self) -> None:
+        self._flush_material_progress()
+        if self._run_progress_visible:
+            self._run_progress_message = "已停止，保留最后实际完成的进度。"
+            self.runProgressChanged.emit()
         self._append_log("本次处理已安全停止。", "warning")
         self._flush_logs()
         self.notificationRequested.emit("已停止", "本次处理已安全结束，未完成批次可在项目中追溯。", "info")
@@ -2561,6 +2657,9 @@ class AppController(QObject):
 
     @Slot()
     def _apply_run_finished(self) -> None:
+        self._flush_material_progress()
+        self._refresh_run_progress_clock()
+        self._run_progress_timer.stop()
         self._flush_logs()
         self._set_busy(False)
 

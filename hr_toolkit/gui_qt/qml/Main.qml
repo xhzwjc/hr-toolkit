@@ -836,6 +836,17 @@ ApplicationWindow {
                             Item { Layout.fillWidth: true }
                         }
 
+                        MaterialRunProgress {
+                            Layout.fillWidth: true
+                            visible: controller.currentTool === "material_collector" && controller.runProgressVisible
+                            completed: controller.runProgressCurrent
+                            total: controller.runProgressTotal
+                            message: controller.runProgressMessage
+                            elapsedSeconds: controller.runProgressElapsed
+                            waitSeconds: controller.runProgressWaitSeconds
+                            active: controller.busy
+                        }
+
                         Card {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 220

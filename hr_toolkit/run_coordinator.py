@@ -148,19 +148,23 @@ class ProjectRunCoordinator:
         call_kwargs = dict(kwargs)
         call_kwargs.pop("cancelled", None)
         call_kwargs.pop("progress_callback", None)
-        progress_state: dict[str, Any] = {"last": 0.0, "pending": None}
+        progress_state: dict[str, Any] = {"last": 0.0, "pending": None, "phase": ""}
 
         def report_progress(current: int, total: int, message: str) -> None:
             payload = (int(current), int(total), str(message))
             progress_state["pending"] = payload
             now = time.monotonic()
             complete = payload[1] > 0 and payload[0] >= payload[1]
+            phase = payload[2].partition("】")[0] if payload[2].startswith("【") else ""
+            phase_changed = request.tool_id == "material_collector" and phase != progress_state["phase"]
             if (
                 not complete
+                and not phase_changed
                 and now - float(progress_state["last"]) < PROGRESS_UI_INTERVAL_SECONDS
             ):
                 return
             progress_state["last"] = now
+            progress_state["phase"] = phase
             progress_state["pending"] = None
             callbacks.progress(*payload)
 
@@ -305,10 +309,17 @@ class ProjectRunCoordinator:
             )
             if cancel_event.is_set():
                 raise BusinessProcessCancelled("本次处理已停止。")
+            material_progress = request.tool_id == "material_collector"
+            if material_progress:
+                callbacks.progress(0, 2, "【登记结果】已完成 0/2 项；正在登记结果文件")
             store.register_results(batch_id, result_dir)
+            if material_progress:
+                callbacks.progress(1, 2, "【登记结果】已完成 1/2 项；正在保存批次状态")
             if cancel_event.is_set():
                 raise BusinessProcessCancelled("本次处理已停止。")
             store.mark_success(batch_id)
+            if material_progress:
+                callbacks.progress(2, 2, "【登记结果】已完成 2/2 项；结果文件和批次状态均已保存")
             try:
                 upload_path = Path(store.root) / running.directories["uploads"]
                 if upload_path.is_dir() and not any(upload_path.iterdir()):

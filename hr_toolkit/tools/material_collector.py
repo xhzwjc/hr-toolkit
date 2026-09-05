@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - 现代构建使用纯 Python pypdf
 from ..common.excel import SheetGrid
 from ..common.excel_compat import ensure_xlsx_workbook, is_supported_excel_file
 from ..common.filenames import safe_filename
+from .material_progress import MaterialProgress
 
 try:
     from zoneinfo import ZoneInfo
@@ -4173,9 +4174,12 @@ def _build_flat_ocr_index(
     warnings: list[str],
     progress_callback: Callable[[int, int, str], None] | None,
     cancelled: Callable[[], bool] | None = None,
+    progress: MaterialProgress | None = None,
 ) -> tuple[list[_FlatIndexedFile], bool]:
     """建立/复用全局 OCR 索引；小批次密集、超大批次分段持久化。"""
     resolved_cache_path = cache_path.resolve()
+    progress = progress or MaterialProgress(progress_callback)
+    progress.begin("扫描资料")
     source_files = [
         path
         for path in _scan_flat_library_files(
@@ -4190,12 +4194,11 @@ def _build_flat_ocr_index(
     checkpoint_ok = True
     cache_changed_since_checkpoint = False
 
-    for index, source_path in enumerate(source_files, start=1):
+    progress.begin("识别资料", len(source_files), "个文件")
+    for index, source_path in enumerate(progress.items(source_files, lambda path: path.name), start=1):
         _raise_if_cancelled(cancelled)
         rel_path = source_path.relative_to(lib_path).as_posix()
         active_paths.add(rel_path)
-        if progress_callback:
-            progress_callback(index, len(source_files), f"正在建立无序资料 OCR 索引：{index}/{len(source_files)}")
 
         entry, cache_key, fingerprint = _lookup_flat_index_cache(
             cache, source_path, rel_path, cache_stats,
@@ -4225,7 +4228,7 @@ def _build_flat_ocr_index(
                 material, method, subtype, names, extracted_id, text, analysis_complete = _analyze_flat_source(
                     source_path,
                     requested_types,
-                    progress_callback=progress_callback,
+                    progress_callback=progress.detail,
                     cancelled=cancelled,
                 )
             except MaterialCollectionCancelled:
@@ -4333,7 +4336,7 @@ def _build_flat_ocr_index(
                 ) = _analyze_flat_source(
                     source_path,
                     requested_types,
-                    progress_callback=progress_callback,
+                    progress_callback=progress.detail,
                     cancelled=cancelled,
                 )
                 cache_hit = False
@@ -4370,6 +4373,7 @@ def _build_flat_ocr_index(
             or (index > 1000 and index % 1000 == 0)
         )
         if should_checkpoint and cache_changed_since_checkpoint:
+            progress.emit("正在保存已完成的索引", force=True)
             _trim_cache_by_age_and_size(cache)
             if not _save_ocr_cache(cache_path, cache):
                 checkpoint_ok = False
@@ -4399,9 +4403,12 @@ def _build_flat_ocr_index(
         _trim_cache_by_age_and_size(cache)
         if not _save_ocr_cache(cache_path, cache):
             checkpoint_ok = False
-    return _enrich_flat_index_with_document_groups(
+    progress.begin("关联合同页面", 1)
+    grouped = _enrich_flat_index_with_document_groups(
         indexed, warnings, requested_types, cancelled=cancelled,
-    ), checkpoint_ok
+    )
+    progress.advance()
+    return grouped, checkpoint_ok
 
 
 def _flat_file_matches_employee(
@@ -4759,7 +4766,10 @@ def _collect_from_flat_index(
     candidate_files: list[_FlatIndexedFile] | None = None,
     document_groups: dict[str, list[_FlatIndexedFile]] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    progress: MaterialProgress | None = None,
 ) -> tuple[list[str], int]:
+    progress = progress or MaterialProgress(None)
+    progress.begin("核对人员材料")
     person_files = candidate_files if candidate_files is not None else [
         item for item in indexed_files
         if _flat_file_matches_employee(item, employee, duplicate_target_names)
@@ -4823,7 +4833,8 @@ def _collect_from_flat_index(
         _flat_employee_result_key(employee, duplicate_target_names)
     )
 
-    for item, material in person_files_with_material:
+    progress.begin("提取资料", len(person_files_with_material), "个文件")
+    for item, material in progress.items(person_files_with_material, lambda pair: pair[0].source_path.name):
         _raise_if_cancelled(cancelled)
         clean_material = safe_filename(material)
         material_sequences[material] = material_sequences.get(material, 0) + 1
@@ -4930,6 +4941,8 @@ def collect_employee_materials(
 ) -> MaterialCollectResult:
     """Search, match, extract, and package employee materials from the repository."""
     _raise_if_cancelled(cancelled)
+    progress = MaterialProgress(progress_callback)
+    progress.begin("准备资料")
     lib_path = Path(library_dir).expanduser().resolve()
     out_path = Path(output_dir).expanduser().resolve()
 
@@ -5035,8 +5048,7 @@ def collect_employee_materials(
     duplicate_target_names: set[str] = set()
     if library_mode == LIBRARY_MODE_PERSON_FOLDER:
         _raise_if_cancelled(cancelled)
-        if progress_callback:
-            progress_callback(0, len(employees), "正在扫描资料库文件夹索引...")
+        progress.begin("扫描人员目录")
         folder_index = _scan_folder_index(lib_path, max_depth=scan_depth, skip_dir=out_path)
         folder_candidate_index = _FolderEmployeeCandidateIndex(
             folder_index,
@@ -5068,6 +5080,7 @@ def collect_employee_materials(
             warnings,
             progress_callback,
             cancelled,
+            progress=progress,
         )
         if not checkpoint_ok:
             cache_write_ok = False
@@ -5101,12 +5114,8 @@ def collect_employee_materials(
         )
         employee_result_keys.append(emp_key)
         employee_key = _build_employee_key(emp)
-        if progress_callback:
-            progress_callback(
-                idx + 1, total_steps,
-                f"[{idx + 1}/{total_steps}] 正在检索与匹配：{emp.name}"
-                + (f"（缓存命中 {cache_stats['hits']}）" if cache_stats["hits"] else ""),
-            )
+        progress.context = f"人员 {idx + 1}/{total_steps}：{emp.name}；"
+        progress.begin("匹配人员资料")
 
         if collect_all:
             emp_materials: list[str] | None = None
@@ -5133,6 +5142,7 @@ def collect_employee_materials(
                 ),
                 document_groups=flat_document_groups,
                 cancelled=cancelled,
+                progress=progress,
             )
             folder_match_counts[emp_key] = 1 if matched_count else 0
             if emp_missing:
@@ -5165,6 +5175,8 @@ def collect_employee_materials(
                 use_ocr_cache=effective_use_ocr_cache,
                 cache_stats=cache_stats,
                 verify_image_identity=not skip_folder_all_ocr,
+                cancelled=cancelled,
+                progress=progress,
             )
         else:
             emp_missing = _collect_specific_materials(
@@ -5174,14 +5186,18 @@ def collect_employee_materials(
                 ocr_cache=ocr_cache,
                 use_ocr_cache=effective_use_ocr_cache,
                 cache_stats=cache_stats,
-                progress_callback=progress_callback,
+                progress_callback=progress.detail,
                 cancelled=cancelled,
                 review_candidates=review_candidates,
+                progress=progress,
             )
             if emp_missing:
                 missing_records[emp_key] = emp_missing
 
+    progress.context = ""
+    progress.begin("保存待确认清单", 1)
     review_path = _write_document_review(out_path, review_candidates, ocr_cache, warnings, cancelled=cancelled)
+    progress.advance()
 
     # === OCR 缓存：跑完一轮后汇总写一次（而非每张图片即写）"""
     if (
@@ -5194,6 +5210,7 @@ def collect_employee_materials(
             or legacy_pdf_cache_invalidated
         )
     ):
+        progress.begin("保存识别缓存", 1)
         _trim_cache_by_age_and_size(ocr_cache)
         if not _save_ocr_cache(cache_path, ocr_cache):
             if cache_write_ok:
@@ -5202,6 +5219,7 @@ def collect_employee_materials(
                 )
             cache_write_ok = False
             cache_skipped_reason = "资料库目录只读或无写入权限"
+        progress.advance()
 
     # 缓存指标摘要写进 warnings
     if effective_use_ocr_cache and cache_write_ok and ocr_cache is not None:
@@ -5221,19 +5239,19 @@ def collect_employee_materials(
     zip_path: Path | None = None
     if create_zip:
         _raise_if_cancelled(cancelled)
+        progress.begin("扫描压缩文件")
         zip_path = out_path.parent / f"{out_path.name}.zip"
+        archive_files: list[Path] = []
+        for root, dirs, files in os.walk(out_path):
+            _raise_if_cancelled(cancelled)
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            archive_files.extend(Path(root) / f for f in files if not _is_junk_or_temp_file(f) and f not in {"资料待确认.xlsx", "资料待确认预览.html"})
+        progress.begin("压缩资料", len(archive_files), "个文件")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(out_path):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for f in files:
-                    _raise_if_cancelled(cancelled)
-                    if _is_junk_or_temp_file(f):
-                        continue
-                    full_p = Path(root) / f
-                    if f in {"资料待确认.xlsx", "资料待确认预览.html"}:
-                        continue
-                    arcname = full_p.relative_to(out_path)
-                    zf.write(full_p, arcname=str(arcname))
+            for full_p in progress.items(archive_files, lambda path: path.name):
+                _raise_if_cancelled(cancelled)
+                arcname = full_p.relative_to(out_path)
+                zf.write(full_p, arcname=str(arcname))
 
     report_path: Path | None = None
     if collect_all:
@@ -5241,13 +5259,18 @@ def collect_employee_materials(
     else:
         report_materials = global_materials
     if generate_report:
+        progress.begin("保存汇总报告", 1)
         report_path = out_path / "《员工资料提取汇总与缺失清单》.xlsx"
         _write_excel_report(
             report_path, employees, report_materials, matches, collect_all, warnings,
             cache_stats=cache_stats, cache_path=cache_path,
             content_verification_skipped=skip_folder_all_ocr,
         )
+        progress.advance()
 
+    _raise_if_cancelled(cancelled)
+    progress.begin("资料处理结束", 1)
+    progress.advance("结果文件已写入，正在交回项目登记")
     return MaterialCollectResult(
         library_dir=lib_path,
         output_dir=out_path,
@@ -5302,10 +5325,27 @@ def _collect_all_from_folders(
     use_ocr_cache: bool = True,
     cache_stats: dict[str, int] | None = None,
     verify_image_identity: bool = True,
+    cancelled: Callable[[], bool] | None = None,
+    progress: MaterialProgress | None = None,
 ) -> None:
     """全部材料模式：将匹配到的文件夹整体拷贝到输出目录。"""
     clean_emp = safe_filename(emp.name)
     seen_hashes: set[tuple[int, str]] = set()
+    progress = progress or MaterialProgress(None)
+    progress.begin("扫描待提取资料")
+    file_count = 0
+    folder_snapshots: list[list[tuple[str, list[str]]]] = []
+    for folder_path, _reason in matched_folders:
+        snapshot: list[tuple[str, list[str]]] = []
+        for root, dirs, files in os.walk(folder_path):
+            _raise_if_cancelled(cancelled)
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            files = [f for f in files if not _is_junk_or_temp_file(f)]
+            snapshot.append((root, files))
+            file_count += len(files)
+            progress.emit(f"已发现 {file_count} 个文件")
+        folder_snapshots.append(snapshot)
+    progress.begin("提取全部资料", file_count, "个文件")
 
     for folder_idx, (folder_path, match_reason) in enumerate(matched_folders):
         suffix = f"_同名{folder_idx + 1}" if len(matched_folders) > 1 else ""
@@ -5315,15 +5355,13 @@ def _collect_all_from_folders(
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            for root, dirs, files in os.walk(folder_path):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for root, files in folder_snapshots[folder_idx]:
                 rel_root = Path(root).relative_to(folder_path)
                 target_root = dest_dir / rel_root
                 target_root.mkdir(parents=True, exist_ok=True)
 
-                for f in files:
-                    if _is_junk_or_temp_file(f):
-                        continue
+                for f in progress.items(files, str):
+                    _raise_if_cancelled(cancelled)
                     src = Path(root) / f
 
                     # 同一员工内部跨目录重复文件 Hash 去重
@@ -5372,7 +5410,7 @@ def _collect_all_from_folders(
                         else:
                             try:
                                 ocr_mat, ocr_method, ocr_sub, ocr_name, ocr_id = _classify_by_ocr(
-                                    src,
+                                    src, progress_callback=progress.detail, cancelled=cancelled,
                                 )
                             except OCRResourceLimitError as exc:
                                 warnings.append(f"已复制原件但未完成身份核对：{rel_p}；{exc}")
@@ -5490,6 +5528,7 @@ def _collect_specific_materials(
     progress_callback: Callable[[int, int, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
     review_candidates: list[_FlatIndexedFile] | None = None,
+    progress: MaterialProgress | None = None,
 ) -> list[str]:
     """指定材料模式：在匹配到的文件夹中精准搜集对应材料类型的文件。
 
@@ -5506,6 +5545,8 @@ def _collect_specific_materials(
     contract_candidates: list[_FlatIndexedFile] = []
     candidate_context: dict[Path, tuple[str, str, str, str, bool]] = {}
     document_warnings: dict[Path, str] = {}
+    progress = progress or MaterialProgress(progress_callback)
+    progress.begin("扫描待识别资料")
 
     # 1. 扫描匹配到的所有文件夹，收集所有候选文件
     raw_candidates: list[tuple[Path, str, str]] = []
@@ -5527,6 +5568,7 @@ def _collect_specific_materials(
                     except ValueError:
                         rel_p = f_path.name
                     raw_candidates.append((f_path, rel_p, folder_reason))
+                    progress.emit(f"已发现 {len(raw_candidates)} 个文件")
         except MaterialCollectionCancelled:
             raise
         except Exception as e:
@@ -5540,7 +5582,8 @@ def _collect_specific_materials(
     scored_candidates.sort(key=lambda item: item[0], reverse=True)
 
     # 3. 按优先级顺序逐个进行精准识别（支持短路早停）
-    for idx_cand, (_cand_score, f_path, rel_p, folder_reason) in enumerate(scored_candidates):
+    progress.begin("识别资料", len(scored_candidates), "个文件")
+    for idx_cand, (_cand_score, f_path, rel_p, folder_reason) in progress.items(enumerate(scored_candidates), lambda pair: pair[1][1].name):
         _raise_if_cancelled(cancelled)
         sig = _get_file_signature(f_path)
         if sig in seen_hashes:
@@ -5555,7 +5598,7 @@ def _collect_specific_materials(
                 cache=ocr_cache,
                 use_cache=use_ocr_cache,
                 cache_stats=cache_stats,
-                progress_callback=progress_callback,
+                progress_callback=progress.detail,
                 cancelled=cancelled,
                 analysis_records=analysis_records if contract_labels else None,
             )
@@ -5623,9 +5666,12 @@ def _collect_specific_materials(
         if not contract_labels and _is_all_requested_materials_satisfied(found, requested_materials):
             next_score = scored_candidates[idx_cand + 1][0] if idx_cand + 1 < len(scored_candidates) else 0
             if next_score < 80:
+                progress.advance()
+                progress.skipped_tail(len(scored_candidates) - idx_cand - 1)
                 break
 
     if contract_candidates:
+        progress.begin("关联合同页面", 1)
         grouped = _enrich_flat_index_with_document_groups(contract_candidates, warnings, contract_labels, cancelled=cancelled)
         grouped = _apply_document_reviews(grouped, ocr_cache, [emp], warnings, cancelled=cancelled)
         for item in grouped:
@@ -5639,16 +5685,18 @@ def _collect_specific_materials(
             rel_p, method, name, identity, hit = candidate_context[item.source_path]
             found[label] = [row for row in found[label] if row[0] != item.source_path]
             found[label].append((item.source_path, rel_p, item.match_method, "", name, identity, hit))
+        progress.advance()
 
     # 复制匹配到的真实文件到输出目录
     missing_list: list[str] = []
+    progress.begin("提取资料", sum(len(items) for items in found.values()), "个文件")
     for mat_type in requested_materials:
         m_list = found[mat_type]
         if not m_list:
             missing_list.append(mat_type)
             continue
 
-        for seq, (src_path, rel_p, match_reason, subtype, ocr_name, ocr_id, cache_hit) in enumerate(m_list, start=1):
+        for seq, (src_path, rel_p, match_reason, subtype, ocr_name, ocr_id, cache_hit) in enumerate(progress.items(m_list, lambda row: row[0].name), start=1):
             _raise_if_cancelled(cancelled)
             ext = src_path.suffix
             clean_mat = safe_filename(mat_type)
