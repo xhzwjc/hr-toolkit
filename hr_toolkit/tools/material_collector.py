@@ -3769,7 +3769,7 @@ def _has_contract_continuation_evidence(item: _FlatIndexedFile) -> bool:
             "工作内容", "劳动报酬", "工资", "社会保险", "合同期限",
             "违约责任", "劳动争议", "签字", "签署",
         )
-    )
+    ) or ("工作时间" in text and bool(_contract_chapters(item)))
 
 
 def _normalized_group_names(item: _FlatIndexedFile) -> set[str]:

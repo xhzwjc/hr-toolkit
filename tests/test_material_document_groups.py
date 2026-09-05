@@ -46,6 +46,17 @@ class MaterialDocumentGroupsTest(unittest.TestCase):
         self.assertIsNone(mc._match_folder_to_employee("张三丰", mc.TargetEmployee("张三")))
         self.assertEqual(mc._match_folder_to_employee("张三资料", mc.TargetEmployee("张三")), "name")
 
+    def test_work_schedule_without_contract_clause_is_not_absorbed(self):
+        first = self.page("first", "劳动合同 第1页 共2页", "张三")
+        last = self.page("last", "乙方签字 第2页 共2页", "张三")
+        unrelated = self.page("schedule", "工作时间：9:00-18:00 公司活动安排")
+        result = mc._enrich_flat_index_with_document_groups([first, unrelated, last], [], ["劳动合同"])
+        schedule = next(item for item in result if item.source_path == unrelated.source_path)
+        self.assertIs(schedule, unrelated)
+        self.assertFalse(schedule.document_group_id)
+        self.assertFalse(schedule.document_warning)
+        self.assertTrue(all(item.document_group_id for item in result if item is not schedule))
+
     def test_footer_and_random_filename_are_not_scan_sequence(self):
         self.assertEqual(mc._footer_page_marker("第一条 工作内容\n4"), (4, None))
         self.assertIsNone(mc._footer_page_marker("签署日期\n2026年9月5日"))
