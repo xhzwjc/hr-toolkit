@@ -4631,57 +4631,135 @@ def _review_source_hash(item: _FlatIndexedFile) -> str | None:
     return match.group(1) if match else _stream_full_sha256(item.source_path)
 
 
+def _document_review_signature(path: Path) -> list[int]:
+    stat = path.stat()
+    return [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
+def _document_review_records(cache: dict[str, Any]) -> list[dict[str, Any]]:
+    """只读取登记过的近期清单，不扫描项目目录或资料库。"""
+    history = cache.get("review_workbooks")
+    records = list(history[:16]) if isinstance(history, list) else []
+    legacy_path = cache.get("review_workbook")
+    if isinstance(legacy_path, str) and not any(
+        isinstance(record, dict) and record.get("path") == legacy_path for record in records
+    ):
+        records.insert(0, {"path": legacy_path, "sources": cache.get("review_sources") or {}})
+    seen: set[str] = set()
+    result = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            continue
+        if record["path"] in seen or not isinstance(record.get("sources"), dict):
+            continue
+        seen.add(record["path"])
+        result.append(record)
+        if len(result) >= 16:
+            break
+    return result
+
+
+def _remember_document_review(
+    cache: dict[str, Any], path: Path, sources: dict[str, Any], warnings: list[str],
+) -> None:
+    records = [{"path": str(path), "sources": sources,
+                "signature": _document_review_signature(path)}]
+    source_count = sum(len(items) for items in sources.values())
+    for record in _document_review_records(cache):
+        if record["path"] == str(path):
+            continue
+        count = sum(len(items) for items in record["sources"].values() if isinstance(items, list))
+        if len(records) >= 16 or source_count + count > 20000:
+            warnings.append("确认表历史达到保留上限，请在最近一次结果的《资料待确认.xlsx》中填写确认")
+            break
+        records.append(record)
+        source_count += count
+    cache["review_workbooks"] = records
+    cache["review_workbook"] = str(path)
+    cache["review_sources"] = sources
+
+
 def _load_document_reviews(
     cache: dict[str, Any] | None, employees: list[TargetEmployee], warnings: list[str],
     *, cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """每次任务只读取一次用户填写的清单；未明确填写“是”不构成确认。"""
-    if not cache or not isinstance(cache.get("review_workbook"), str):
+    """重试后仍读取已登记旧表的修改；空白新表不会覆盖用户的确认。"""
+    if not cache:
         return
-    path = Path(cache["review_workbook"])
-    try:
-        if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
-            return
-        by_name: dict[str, list[TargetEmployee]] = {}
-        for employee in employees:
-            by_name.setdefault(employee.name, []).append(employee)
-        choices: dict[str, set[str]] = {}
-        with path.open("rb") as stream:
-            workbook = load_workbook(stream, read_only=True, data_only=False)
-            try:
-                if "待确认归属" not in workbook.sheetnames:
-                    return
-                for index, row in enumerate(workbook["待确认归属"].iter_rows(min_row=2, max_col=7, values_only=True)):
-                    if index % 128 == 0:
-                        _raise_if_cancelled(cancelled)
-                    if index >= 20000:
-                        warnings.append("待确认清单超过 20000 行，本次仅处理前 20000 行")
-                        break
-                    group, name, qualifier, confirmed = (str(value or "").strip() for value in row[:4])
-                    if confirmed != "是" or not name or name.startswith("="):
-                        continue
-                    candidates = by_name.get(name, [])
-                    if qualifier:
-                        candidates = [e for e in candidates if qualifier in (e.employee_no, e.id_card[-4:] if e.id_card else "")]
-                    if len(candidates) != 1:
-                        warnings.append(f"待确认清单中的人员无法唯一对应当前名单，未应用：{group}")
-                        continue
-                    choices.setdefault(group, set()).add(_review_employee_key(candidates[0]))
-            finally:
-                workbook.close()
-        approved = cache.setdefault("approved_document_groups", {})
-        if not isinstance(approved, dict):
-            return
-        sources = cache.get("review_sources") or {}
-        for group, people in choices.items():
-            if len(people) != 1 or group not in sources:
-                warnings.append(f"待确认清单存在相互冲突或失效的选择，未应用：{group}")
+    records = _document_review_records(cache)
+    cache["review_workbooks"] = records
+    by_name: dict[str, list[TargetEmployee]] = {}
+    for employee in employees:
+        by_name.setdefault(employee.name, []).append(employee)
+    choices: dict[str, list[dict[str, Any]]] = {}
+    row_count = 0
+    for record in records:
+        _raise_if_cancelled(cancelled)
+        path = Path(record["path"])
+        try:
+            if not path.is_file():
                 continue
-            approved[group] = {"employee": next(iter(people)), "sources": sources[group]}
-    except MaterialCollectionCancelled:
-        raise
-    except Exception as exc:
-        warnings.append(f"待确认清单无法读取，保留待确认状态：{exc}")
+            signature = _document_review_signature(path)
+            if signature == record.get("signature"):
+                continue
+            if signature[0] > 8 * 1024 * 1024:
+                warnings.append(f"待确认清单超过 8 MB，未读取：{path}")
+                continue
+            file_choices: dict[str, list[dict[str, Any]]] = {}
+            with path.open("rb") as stream:
+                workbook = load_workbook(stream, read_only=True, data_only=False)
+                try:
+                    if "待确认归属" not in workbook.sheetnames:
+                        continue
+                    for row in workbook["待确认归属"].iter_rows(min_row=2, max_col=7, values_only=True):
+                        if row_count % 128 == 0:
+                            _raise_if_cancelled(cancelled)
+                        if row_count >= 20000:
+                            warnings.append("待确认清单累计超过 20000 行，请在最近一次清单中分批确认")
+                            break
+                        row_count += 1
+                        group, name, qualifier, confirmed = (str(value or "").strip() for value in row[:4])
+                        if confirmed != "是" or not name or name.startswith("="):
+                            continue
+                        candidates = by_name.get(name, [])
+                        if qualifier:
+                            candidates = [e for e in candidates if qualifier in (e.employee_no, e.id_card[-4:] if e.id_card else "")]
+                        if len(candidates) != 1:
+                            warnings.append(f"待确认清单中的人员无法唯一对应当前名单，未应用：{group}")
+                            continue
+                        sources = record["sources"].get(group)
+                        if not isinstance(sources, list) or not sources:
+                            warnings.append(f"待确认清单存在失效的选择，未应用：{group}")
+                            continue
+                        choice = {"employee": _review_employee_key(candidates[0]), "sources": sources}
+                        group_choices = file_choices.setdefault(group, [])
+                        if choice not in group_choices:
+                            group_choices.append(choice)
+                finally:
+                    workbook.close()
+            if signature != _document_review_signature(path):
+                warnings.append(f"确认表在读取时发生修改，请保存关闭后重试：{path}")
+                continue
+            for group, people in file_choices.items():
+                combined = choices.setdefault(group, [])
+                combined.extend(person for person in people if person not in combined)
+            # 保留生成时的签名：填写过的表仍需读取，以便切换目标名单
+            # 后应用其余人员，并持续阻止不同表中的冲突确认。
+            if row_count >= 20000:
+                break
+        except MaterialCollectionCancelled:
+            raise
+        except Exception as exc:
+            warnings.append(f"待确认清单无法读取，保留待确认状态：{path}；{exc}")
+    approved = cache.setdefault("approved_document_groups", {})
+    if not isinstance(approved, dict):
+        return
+    for group, people in choices.items():
+        if len(people) != 1:
+            approved.pop(group, None)
+            warnings.append(f"待确认清单存在相互冲突的选择，未应用：{group}")
+            continue
+        approved[group] = people[0]
 
 
 def _apply_document_reviews(
@@ -4759,8 +4837,7 @@ def _write_document_review(
     workbook.save(path)
     workbook.close()
     if cache is not None:
-        cache["review_workbook"] = str(path)
-        cache["review_sources"] = source_records
+        _remember_document_review(cache, path, source_records, warnings)
     payload = json.dumps(previews, ensure_ascii=True).replace("<", "\\u003c")
     preview = output_dir / "资料待确认预览.html"
     preview.write_text(
