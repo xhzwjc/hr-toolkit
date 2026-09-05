@@ -35,7 +35,7 @@ pyside2==5.15.2.1
 # Windows 10 PE subsystem. Keep this frozen until the Win7 lane is retired.
 pypdfium2==4.27.0
 pyppmd==1.1.0
-pywin32==306; platform_system == "Windows"
+pywin32==312; platform_system == "Windows"
 pywin32-ctypes==0.2.3; platform_system == "Windows"
 pyyaml==6.0.2
 pyzstd==0.16.1
