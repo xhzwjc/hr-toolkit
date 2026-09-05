@@ -31,6 +31,11 @@ HEADER_PROJECT_SYNONYMS = ("项目", "项目名称", "所属项目", "区域", "
 HEADER_NAME_SYNONYMS = ("姓名", "员工姓名", "人员姓名")
 HEADER_ID_CARD_SYNONYMS = ("身份证号码", "身份证号", "证件号码", "身份证")
 HEADER_SEQ_SYNONYMS = ("序号", "行号", "No", "NO", "NO.", "no")
+_SHEET_CELL_REFERENCE = re.compile(
+    r"(?:'([^']+)'|([A-Za-z0-9_\u4e00-\u9fa5\(\)\uff08\uff09-]+))!"
+    r"(\$?[A-Za-z]{1,3})(\$?)(\d+)"
+    r"(?::(\$?[A-Za-z]{1,3})(\$?)(\d+))?"
+)
 TRAILING_METADATA_EXACT = {
     "区域",
     "所属区域",
@@ -129,7 +134,7 @@ class RebuiltDetailResult:
     rendered_leaves: list[RenderedLeaf]
     rendered_groups: list[RenderedGroup]
     rendered_grand_total_row: int | None
-    row_map: dict[int, int]
+    row_map: dict[int, int | None]
 
 
 @dataclass
@@ -617,6 +622,9 @@ def _rebuild_detail_sheet(
     *,
     cancelled: Callable[[], bool] | None = None,
 ) -> RebuiltDetailResult:
+    row_map: dict[int, int | None] = {
+        row: None for row in range(layout.data_start_row, ws.max_row + 1)
+    }
     unmerge_ranges_from_row(ws, layout.data_start_row)
     ws.delete_rows(layout.data_start_row, ws.max_row - layout.data_start_row + 1)
 
@@ -624,7 +632,6 @@ def _rebuild_detail_sheet(
     employee_seq = 1
     rendered_leaves: list[RenderedLeaf] = []
     rendered_groups: list[RenderedGroup] = []
-    row_map: dict[int, int] = {}
 
     rows_by_leaf = _group_sections(rows)
     leaf_by_label = {leaf.label: leaf for leaf in hierarchy.leaves}
@@ -640,14 +647,13 @@ def _rebuild_detail_sheet(
                 if leaf is None:
                     continue
                 section_rows = rows_by_leaf.get(leaf.label, [])
-                if not section_rows:
-                    continue
                 data_start_row = current_row
                 for emp in section_rows:
                     if employee_seq % 500 == 0:
                         _check_cancelled(cancelled)
                     apply_row_snapshot(ws, current_row, emp.snapshot, translate_formulas=True)
                     ws.cell(current_row, layout.seq_col).value = employee_seq
+                    row_map[emp.source_row] = current_row
                     current_row += 1
                     employee_seq += 1
                 data_end_row = current_row - 1
@@ -695,14 +701,13 @@ def _rebuild_detail_sheet(
             if leaf.label in leaves_in_categories:
                 continue
             section_rows = rows_by_leaf.get(leaf.label, [])
-            if not section_rows:
-                continue
             data_start_row = current_row
             for emp in section_rows:
                 if employee_seq % 500 == 0:
                     _check_cancelled(cancelled)
                 apply_row_snapshot(ws, current_row, emp.snapshot, translate_formulas=True)
                 ws.cell(current_row, layout.seq_col).value = employee_seq
+                row_map[emp.source_row] = current_row
                 current_row += 1
                 employee_seq += 1
             data_end_row = current_row - 1
@@ -729,14 +734,13 @@ def _rebuild_detail_sheet(
     else:
         for leaf in hierarchy.leaves:
             section_rows = rows_by_leaf.get(leaf.label, [])
-            if not section_rows:
-                continue
             data_start_row = current_row
             for emp in section_rows:
                 if employee_seq % 500 == 0:
                     _check_cancelled(cancelled)
                 apply_row_snapshot(ws, current_row, emp.snapshot, translate_formulas=True)
                 ws.cell(current_row, layout.seq_col).value = employee_seq
+                row_map[emp.source_row] = current_row
                 current_row += 1
                 employee_seq += 1
             data_end_row = current_row - 1
@@ -872,27 +876,15 @@ def _rebuild_summary_sheet(
             break
 
     total_template_row = _find_summary_total_row(ws, start_row)
-    sign_template_row = total_template_row + 1
     summary_max_col = _find_summary_max_col(ws, start_row, total_template_row)
 
-    template_rows: list[tuple[int, str, RowSnapshot, list[Any]]] = []
+    template_rows: list[tuple[int, str, list[Any]]] = []
     for r in range(start_row, total_template_row):
         lbl = _cell_text(ws, r, 1)
-        snap = snapshot_row(ws, r, summary_max_col)
         raw_vals = [ws.cell(r, c).value for c in range(1, summary_max_col + 1)]
-        template_rows.append((r, lbl, snap, raw_vals))
+        template_rows.append((r, lbl, raw_vals))
 
-    total_snapshot = snapshot_row(ws, total_template_row, summary_max_col)
-    total_label = _cell_text(ws, total_template_row, 1) or "合计"
-
-    sign_snapshot: RowSnapshot | None = None
-    signature_text: Any = None
-    if sign_template_row <= ws.max_row:
-        sign_snapshot = snapshot_row(ws, sign_template_row, summary_max_col)
-        signature_text = ws.cell(sign_template_row, 1).value
-
-    unmerge_ranges_from_row(ws, start_row)
-    ws.delete_rows(start_row, ws.max_row - start_row + 1)
+    # 汇总表原有的小计、合计和签字行全部保留，原位更新公式，避免丢失结构及格式。
 
     rendered_leaf_map = {l.label: l for l in rebuilt.rendered_leaves}
     rendered_group_map = {g.label: g for g in rebuilt.rendered_groups}
@@ -916,13 +908,22 @@ def _rebuild_summary_sheet(
             source_items.append(("leaf", leaf))
 
     template_item_map: dict[int, tuple[str, Any]] = {}
-    for idx, (src_r, lbl, _snap, raw_vals) in enumerate(template_rows):
+    flat_leaf = hierarchy.leaves[0] if len(hierarchy.leaves) == 1 and not hierarchy.categories else None
+    project_rows = [
+        row for row, label, _ in template_rows
+        if label and not _is_category_total_label(label)
+    ]
+    for idx, (src_r, lbl, raw_vals) in enumerate(template_rows):
         matched_item = None
         for val in raw_vals:
-            if isinstance(val, str) and ("!" in val or "明细" in val):
+            if isinstance(val, str) and val.startswith("="):
+                detail_rows = {
+                    int(match.group(5)) for match in _SHEET_CELL_REFERENCE.finditer(val)
+                    if (match.group(1) or match.group(2)) == layout.detail_sheet_name
+                }
                 for item_kind, item in source_items:
                     target_r = item.subtotal_row if item_kind == "leaf" else item.total_row
-                    if target_r is not None and (f"!P{target_r}" in val or f"!U{target_r}" in val or f"!{target_r}" in val or f"{target_r}" in val):
+                    if target_r is not None and target_r in detail_rows:
                         matched_item = (item_kind, item)
                         break
             if matched_item is not None:
@@ -937,54 +938,45 @@ def _rebuild_summary_sheet(
         if matched_item is None and len(template_rows) == len(source_items):
             matched_item = source_items[idx]
 
+        # 明细只有一个员工区间、汇总只有一个项目时，对应关系唯一，不依赖小计行。
+        if matched_item is None and flat_leaf is not None and project_rows == [src_r]:
+            matched_item = ("leaf", flat_leaf)
+
         if matched_item is not None:
             template_item_map[src_r] = matched_item
 
-    current_row = start_row
     rendered_sub_rows_in_summary: list[int] = []
     rendered_group_rows_in_summary: list[int] = []
 
-    for src_r, lbl, snap, _raw_vals in template_rows:
+    for src_r, lbl, _raw_vals in template_rows:
+        current_row = src_r
         mapped = template_item_map.get(src_r)
         target_leaf: RenderedLeaf | None = None
         target_group: RenderedGroup | None = None
-        is_rendered = False
 
         if mapped is not None:
             item_kind, item = mapped
             if item_kind == "leaf" and item.label in rendered_leaf_map:
-                is_rendered = True
                 target_leaf = rendered_leaf_map[item.label]
             elif item_kind == "group" and item.label in rendered_group_map:
-                is_rendered = True
                 target_group = rendered_group_map[item.label]
         else:
             if lbl in rendered_leaf_map:
-                is_rendered = True
                 target_leaf = rendered_leaf_map[lbl]
             elif lbl in rendered_group_map:
-                is_rendered = True
                 target_group = rendered_group_map[lbl]
             else:
                 for l_lbl, r_leaf in rendered_leaf_map.items():
-                    if l_lbl and (l_lbl in lbl or lbl in l_lbl):
-                        is_rendered = True
+                    if lbl and l_lbl and (l_lbl in lbl or lbl in l_lbl):
                         target_leaf = r_leaf
                         break
-                if not is_rendered:
+                if target_leaf is None:
                     for g_lbl, r_group in rendered_group_map.items():
-                        if g_lbl and (g_lbl in lbl or lbl in g_lbl):
-                            is_rendered = True
+                        if lbl and g_lbl and (g_lbl in lbl or lbl in g_lbl):
                             target_group = r_group
                             break
 
-        if not is_rendered:
-            continue
-
-        apply_row_snapshot(ws, current_row, snap, translate_formulas=False)
-        ws.cell(current_row, 1).value = lbl
-
-        is_group_row = (target_group is not None) or _is_category_total_label(lbl)
+        is_group_row = target_group is not None or (target_leaf is None and _is_category_total_label(lbl))
         if not is_group_row:
             rendered_sub_rows_in_summary.append(current_row)
             _translate_summary_leaf_formulas(
@@ -1003,27 +995,18 @@ def _rebuild_summary_sheet(
                 current_row,
                 src_r,
                 rendered_sub_rows_in_summary,
-                rendered_group_rows_in_summary,
                 summary_max_col,
             )
-        current_row += 1
+            # 下一个专业仅累计自己的区域，不包含上一个专业的小计或合计。
+            rendered_sub_rows_in_summary = []
 
-    total_row = current_row
-    apply_row_snapshot(ws, total_row, total_snapshot, translate_formulas=False)
-    ws.cell(total_row, 1).value = total_label
     _write_summary_total_formulas(
         ws,
         start_row,
-        total_row,
-        rendered_group_rows_in_summary or rendered_sub_rows_in_summary,
+        total_template_row,
+        rendered_group_rows_in_summary + rendered_sub_rows_in_summary,
         summary_max_col,
     )
-
-    if sign_snapshot is not None:
-        sign_row = total_row + 1
-        apply_row_snapshot(ws, sign_row, sign_snapshot, translate_formulas=False)
-        ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row, end_column=summary_max_col)
-        ws.cell(sign_row, 1).value = signature_text
 
 
 def _find_summary_total_row(ws: Worksheet, start_row: int) -> int:
@@ -1038,22 +1021,27 @@ def _find_summary_total_row(ws: Worksheet, start_row: int) -> int:
     return ws.max_row
 
 
-def _translate_sheet_references(formula: str, target_sheet: str, row_map: dict[int, int]) -> str:
+def _translate_sheet_references(formula: str, target_sheet: str, row_map: dict[int, int | None]) -> str:
     target_clean = target_sheet.replace("'", "").strip()
-    pattern = re.compile(
-        r"(?:'([^']+)'|([A-Za-z0-9_\u4e00-\u9fa5\(\)\uff08\uff09-]+))!\$?([A-Za-z]{1,3})\$?(\d+)"
-    )
 
     def repl(m: re.Match) -> str:
-        s1, s2, col, row_str = m.groups()
+        s1, s2, col, anchor, row_str, end_col, end_anchor, end_row_str = m.groups()
         sheet = (s1 or s2 or "").replace("'", "").strip()
         if sheet.lower() == target_clean.lower():
             old_r = int(row_str)
+            if end_row_str is not None:
+                mapped_rows = [
+                    mapped for row in range(old_r, int(end_row_str) + 1)
+                    if (mapped := row_map.get(row, row)) is not None
+                ]
+                if not mapped_rows:
+                    return "0"
+                return f"'{target_sheet}'!{col}{anchor}{min(mapped_rows)}:{end_col}{end_anchor}{max(mapped_rows)}"
             new_r = row_map.get(old_r, old_r)
-            return f"'{target_sheet}'!{col}{new_r}"
+            return "0" if new_r is None else f"'{target_sheet}'!{col}{anchor}{new_r}"
         return m.group(0)
 
-    return pattern.sub(repl, formula)
+    return _SHEET_CELL_REFERENCE.sub(repl, formula)
 
 
 def _translate_summary_leaf_formulas(
@@ -1062,11 +1050,18 @@ def _translate_summary_leaf_formulas(
     src_template_row: int,
     detail_sheet_name: str,
     target_leaf: RenderedLeaf | None,
-    row_map: dict[int, int],
+    row_map: dict[int, int | None],
     max_column: int,
 ) -> None:
     detail_ref = _formula_sheet_name(detail_sheet_name)
     subtotal_row = target_leaf.new_subtotal_row if target_leaf is not None else None
+
+    if target_leaf is not None and target_leaf.employee_count == 0:
+        for col_index in range(2, max_column + 1):
+            cell = ws.cell(current_row, col_index)
+            if not isinstance(cell, MergedCell):
+                cell.value = None
+        return
 
     has_any_formula = any(
         isinstance(ws.cell(current_row, c).value, str) and ws.cell(current_row, c).value.startswith("=")
@@ -1101,11 +1096,13 @@ def _translate_summary_leaf_formulas(
             21: f"=SUM(D{current_row}:T{current_row})",
         }
         for col_index, formula in defaults.items():
-            if col_index <= max_column:
+            if col_index <= max_column and not isinstance(ws.cell(current_row, col_index), MergedCell):
                 ws.cell(current_row, col_index).value = formula
         return
 
     for col_index in range(2, max_column + 1):
+        if isinstance(ws.cell(current_row, col_index), MergedCell):
+            continue
         val = ws.cell(current_row, col_index).value
         if col_index == 2:
             if target_leaf is not None and target_leaf.data_end_row >= target_leaf.data_start_row:
@@ -1117,6 +1114,22 @@ def _translate_summary_leaf_formulas(
             continue
 
         if isinstance(val, str) and val.startswith("="):
+            # 无小计的单项目模板以序号整列匹配项目整列时，改为本公司员工区间。
+            # 只处理这一模板形式，保留带其他筛选条件的 SUMIFS。
+            sheet_pattern = rf"(?:'{re.escape(detail_sheet_name)}'|{re.escape(detail_sheet_name)})"
+            sumifs = re.fullmatch(
+                rf"=SUMIFS\({sheet_pattern}!\$?([A-Za-z]{{1,3}}):\$?\1,"
+                rf"{sheet_pattern}!\$?A:\$?A,\$?A:\$?A\)",
+                val,
+                re.IGNORECASE,
+            )
+            if subtotal_row is None and target_leaf is not None and sumifs is not None:
+                amount_col = sumifs.group(1)
+                ws.cell(current_row, col_index).value = (
+                    f"=SUM({detail_ref}!{amount_col}{target_leaf.data_start_row}:"
+                    f"{amount_col}{target_leaf.data_end_row})"
+                )
+                continue
             if detail_sheet_name in val:
                 ws.cell(current_row, col_index).value = _translate_sheet_references(
                     val, detail_sheet_name, row_map
@@ -1137,19 +1150,28 @@ def _translate_summary_group_formulas(
     current_row: int,
     src_template_row: int,
     rendered_sub_rows: list[int],
-    rendered_group_rows: list[int],
     max_column: int,
 ) -> None:
+    empty_group = rendered_sub_rows and all(
+        ws.cell(row, col).value is None
+        for row in rendered_sub_rows for col in range(2, max_column + 1)
+    )
     for col_index in range(2, max_column + 1):
+        if isinstance(ws.cell(current_row, col_index), MergedCell):
+            continue
         val = ws.cell(current_row, col_index).value
         col_letter = get_column_letter(col_index)
-        if rendered_sub_rows:
+        if empty_group:
+            ws.cell(current_row, col_index).value = None
+        elif rendered_sub_rows:
             first_r = min(rendered_sub_rows)
             last_r = max(rendered_sub_rows)
-            if len(rendered_sub_rows) > 1:
+            if len(rendered_sub_rows) == last_r - first_r + 1:
                 ws.cell(current_row, col_index).value = f"=SUM({col_letter}{first_r}:{col_letter}{last_r})"
             else:
-                ws.cell(current_row, col_index).value = f"={col_letter}{first_r}"
+                ws.cell(current_row, col_index).value = "=" + "+".join(
+                    f"{col_letter}{row}" for row in rendered_sub_rows
+                )
         elif isinstance(val, str) and val.startswith("="):
             adjusted = re.sub(
                 rf"\b([A-Za-z]{{1,3}}){src_template_row}\b",
@@ -1167,6 +1189,8 @@ def _write_summary_total_formulas(
     max_column: int,
 ) -> None:
     for col_index in range(2, max_column + 1):
+        if isinstance(ws.cell(total_row, col_index), MergedCell):
+            continue
         col_letter = get_column_letter(col_index)
         if rows_to_sum:
             if len(rows_to_sum) == (max(rows_to_sum) - min(rows_to_sum) + 1):

@@ -52,13 +52,15 @@ class SalarySplitTest(unittest.TestCase):
             empty_detail = empty_section_wb["明细表"]
             detail_labels = [empty_detail.cell(row, 1).value for row in range(1, empty_detail.max_row + 1)]
             self.assertIn("河源无线代维合计", detail_labels)
-            self.assertNotIn("河源传输代维合计", detail_labels)
+            self.assertIn("河源传输代维合计", detail_labels)
+            self.assertIsNone(empty_detail["P8"].value)
             empty_summary = empty_section_wb["汇总表"]
             summary_labels = [empty_summary.cell(row, 1).value for row in range(1, empty_summary.max_row + 1)]
             self.assertIn("广东河源市2026年4月移动基站代维项目", summary_labels)
-            self.assertNotIn("广东河源市2026年4月移动线路代维项目", summary_labels)
-            self.assertEqual(empty_summary["A7"].value, "合计")
-            self.assertEqual(empty_summary["C7"].value, "=SUM(C6:C6)")
+            self.assertIn("广东河源市2026年4月移动线路代维项目", summary_labels)
+            self.assertIsNone(empty_summary["C7"].value)
+            self.assertEqual(empty_summary["A8"].value, "合计")
+            self.assertEqual(empty_summary["C8"].value, "=SUM(C6:C7)")
             empty_section_wb.close()
 
     def test_manifest_is_optional(self) -> None:
@@ -145,6 +147,10 @@ class SalarySplitTest(unittest.TestCase):
             self.assertEqual(summary["A10"].value, "B区线路小计")
             self.assertEqual(summary["A11"].value, "传输专业合计")
             self.assertEqual(summary["A12"].value, "项目部总计")
+            self.assertEqual(summary["B8"].value, "=SUM(B6:B7)")
+            self.assertEqual(summary["B11"].value, "=SUM(B9:B10)")
+            self.assertEqual(summary["C11"].value, "=SUM(C9:C10)")
+            self.assertEqual(summary["B12"].value, "=B8+B11")
             wb.close()
 
     def test_split_case4_flat_grand_total_only(self) -> None:
@@ -165,6 +171,43 @@ class SalarySplitTest(unittest.TestCase):
             detail = wb["明细表"]
             self.assertEqual(detail["A10"].value, "全公司总计")
             self.assertEqual(detail["P10"].value, "=SUM(P6:P9)")
+            wb.close()
+
+    def test_flat_project_summary_preserves_rows_and_amount_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sample = root / "flat_project.xlsx"
+            _write_case4_flat_sample(sample)
+            wb = load_workbook(sample)
+            summary = wb["汇总表"]
+            summary["A6"] = "单项目"
+            summary["B6"] = 99
+            summary["C6"] = "=SUMIFS(明细表!Q:Q,明细表!A:A,A:A)"
+            conditional_formula = '=SUMIFS(明细表!Q:Q,明细表!Q:Q,">0")'
+            summary["D6"] = conditional_formula
+            summary["A7"] = "无线专业合计"
+            summary["C7"] = "=SUM(C6:C6)"
+            summary["A8"] = "项目部总计"
+            summary["C8"] = "=C7"
+            summary["A9"] = "总经理："
+            summary.merge_cells("A9:U9")
+            wb.save(sample)
+            wb.close()
+
+            result = split_salary_by_company(sample, root / "output").to_dict()
+            company_a = next(item for item in result["outputs"] if item["company"] == "公司A")
+            wb = load_workbook(company_a["file_path"])
+            summary = wb["汇总表"]
+            self.assertEqual(summary["A6"].value, "单项目")
+            self.assertEqual(summary["A7"].value, "无线专业合计")
+            self.assertEqual(summary["A8"].value, "项目部总计")
+            self.assertEqual(summary["B6"].value, "=COUNT('明细表'!$A$6:$A$9)")
+            self.assertEqual(summary["C6"].value, "=SUM('明细表'!Q6:Q9)")
+            self.assertEqual(summary["D6"].value, conditional_formula)
+            self.assertEqual(summary["C7"].value, "=SUM(C6:C6)")
+            self.assertEqual(summary["C8"].value, "=SUM(C7:C7)")
+            self.assertEqual(summary["A9"].value, "总经理：")
+            self.assertIn("A9:U9", summary.merged_cells)
             wb.close()
 
     def test_split_many_areas_variable_distribution(self) -> None:
