@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import zipfile
@@ -54,6 +55,7 @@ def _beijing_now_str() -> str:
 # OCR 引擎全局单例与线程安全锁
 _OCR_ENGINE = None
 _OCR_ATTEMPTED = False
+_OCR_ENGINE_ERROR = ""
 _OCR_LOCK = threading.Lock()
 _PDF_LOCK = threading.RLock()
 
@@ -64,6 +66,15 @@ class OCRResourceLimitError(RuntimeError):
 
 class OCRMemoryPressureError(RuntimeError):
     """系统内存紧张时停止任务，避免继续识别触发持续换页。"""
+
+
+class OCRUnavailableError(RuntimeError):
+    """OCR 未能启动，必须报告失败，不能当作资料未匹配。"""
+
+
+def _uses_modern_ocr() -> bool:
+    # Python 3.13 已不受 rapidocr_onnxruntime 支持；Win7 继续使用原后端。
+    return sys.version_info >= (3, 13)
 
 
 @lru_cache(maxsize=1)
@@ -151,7 +162,7 @@ def _ocr_runtime_options() -> dict[str, int]:
 
 
 @contextmanager
-def _rapidocr_low_memory_session_options() -> Iterator[None]:
+def _rapidocr_low_memory_session_options(*, modern: bool = False) -> Iterator[None]:
     """Disable ONNX's retained input-shape allocation plan during engine init.
 
     RapidOCR 1.4.4 creates its three ONNX sessions through one private factory.
@@ -164,7 +175,10 @@ def _rapidocr_low_memory_session_options() -> Iterator[None]:
     """
 
     try:
-        from rapidocr_onnxruntime.utils.infer_engine import OrtInferSession
+        if modern:
+            from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+        else:
+            from rapidocr_onnxruntime.utils.infer_engine import OrtInferSession
 
         original_descriptor = OrtInferSession.__dict__.get("_init_sess_opts")
         original_factory = getattr(OrtInferSession, "_init_sess_opts")
@@ -201,22 +215,51 @@ def _rapidocr_low_memory_session_options() -> Iterator[None]:
 
 
 def _get_ocr_engine():
-    global _OCR_ENGINE, _OCR_ATTEMPTED
+    global _OCR_ENGINE, _OCR_ATTEMPTED, _OCR_ENGINE_ERROR
     with _OCR_LOCK:
         if not _OCR_ATTEMPTED:
             _OCR_ATTEMPTED = True
+            modern = _uses_modern_ocr()
+            package = "rapidocr" if modern else "rapidocr_onnxruntime"
             try:
-                from rapidocr_onnxruntime import RapidOCR
                 options = _ocr_runtime_options()
-                with _rapidocr_low_memory_session_options():
-                    try:
-                        _OCR_ENGINE = RapidOCR(**options)
-                    except TypeError:
-                        # Forward-compatible fallback if a future RapidOCR removes
-                        # the thread-control keyword arguments.
-                        _OCR_ENGINE = RapidOCR()
-            except Exception:
+                if modern:
+                    from rapidocr import RapidOCR
+                    from rapidocr.utils.typings import ModelType, OCRVersion
+
+                    params = {
+                        "EngineConfig.onnxruntime." + key: value
+                        for key, value in options.items()
+                    }
+                    params["EngineConfig.onnxruntime.enable_cpu_mem_arena"] = False
+                    params["Global.log_level"] = "warning"
+                    # 只适配接口，模型继续使用旧包同系列的轻量 PP-OCRv4。
+                    for stage in ("Det", "Rec"):
+                        params[stage + ".ocr_version"] = OCRVersion.PPOCRV4
+                        params[stage + ".model_type"] = ModelType.MOBILE
+                    with _rapidocr_low_memory_session_options(modern=True):
+                        _OCR_ENGINE = RapidOCR(params=params)
+                else:
+                    from rapidocr_onnxruntime import RapidOCR
+
+                    with _rapidocr_low_memory_session_options():
+                        try:
+                            _OCR_ENGINE = RapidOCR(**options)
+                        except TypeError:
+                            # 保留旧版运行时的参数兼容回退。
+                            _OCR_ENGINE = RapidOCR()
+            except Exception as exc:
                 _OCR_ENGINE = None
+                _OCR_ENGINE_ERROR = (
+                    f"OCR 引擎 {package} 初始化失败（Python {sys.version_info.major}.{sys.version_info.minor}）："
+                    f"{type(exc).__name__}: {exc}。请检查该环境的 OCR 依赖及模型，修复后重启软件。"
+                )
+                if isinstance(exc, MemoryError) or any(token in str(exc).lower() for token in (
+                    "bad_alloc", "out of memory", "failed to allocate memory", "not enough memory",
+                )):
+                    raise OCRMemoryPressureError("OCR 初始化时内存不足，已停止识别；请关闭其他程序后重试") from exc
+        if _OCR_ENGINE is None:
+            raise OCRUnavailableError(_OCR_ENGINE_ERROR or "OCR 引擎未能启动，请检查依赖后重启软件。")
         return _OCR_ENGINE
 
 
@@ -283,6 +326,14 @@ class MaterialCollectionCancelled(RuntimeError):
 
 def _get_engine_signature() -> str:
     """获取当前 OCR 引擎的版本签名；用于缓存条目与引擎版本一致性校验。"""
+    if _uses_modern_ocr():
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return f"rapidocr@{version('rapidocr')}:ppocrv4-mobile:2"
+        except PackageNotFoundError:
+            return "rapidocr@unavailable"
+    # 保持旧版签名，避免 Win7 和现有 Python 3.12 缓存无故失效。
     try:
         import rapidocr_onnxruntime
 
@@ -2545,6 +2596,8 @@ def _iter_ocr_targets(
 
 def _extract_ocr_result_texts(result: Any) -> list[str]:
     """只保留 OCR 文字，立即丢弃坐标框与置信度等大对象。"""
+    if hasattr(result, "txts"):
+        return [text for text in (result.txts or ()) if isinstance(text, str)]
     texts: list[str] = []
     for item in result or []:
         if not isinstance(item, (list, tuple)):
@@ -2581,10 +2634,12 @@ def _collect_ocr_texts(
             _ensure_ocr_memory_headroom(required_memory)
             engine = _get_ocr_engine()
             if engine is None:
-                return [], False
+                raise OCRUnavailableError("OCR 引擎未能启动，请检查依赖后重启软件。")
             _ensure_ocr_memory_headroom(required_memory)
             with _OCR_LOCK:
-                result, _ = engine(target_input)
+                output = engine(target_input)
+            # 旧包返回 (结果, 耗时)，新版返回带 txts 的 RapidOCROutput。
+            result = output[0] if isinstance(output, tuple) and len(output) == 2 else output
             if result:
                 page_texts = _extract_ocr_result_texts(result)
                 character_count += sum(len(text) for text in page_texts)
@@ -2592,8 +2647,8 @@ def _collect_ocr_texts(
                     raise OCRResourceLimitError("单份资料的 OCR 文字超过安全上限，请拆分后重试")
                 texts.extend(page_texts)
                 del page_texts
-            del result, target_input
-    except (MaterialCollectionCancelled, PDFRecognitionError, OCRResourceLimitError, OCRMemoryPressureError):
+            del result, output, target_input
+    except (MaterialCollectionCancelled, PDFRecognitionError, OCRResourceLimitError, OCRMemoryPressureError, OCRUnavailableError):
         raise
     except MemoryError as exc:
         raise OCRMemoryPressureError("当前内存不足，已停止识别；请关闭其他程序或拆分资料后重试") from exc
@@ -5438,7 +5493,7 @@ def _collect_all_from_folders(
                         mismatch_warning=mismatch,
                         cache_hit=cache_hit,
                     ))
-        except (MaterialCollectionCancelled, OCRMemoryPressureError):
+        except (MaterialCollectionCancelled, OCRMemoryPressureError, OCRUnavailableError):
             raise
         except Exception as e:
             warnings.append(f"无法访问文件夹 {folder_path}: {e}")
@@ -5602,7 +5657,7 @@ def _collect_specific_materials(
                 cancelled=cancelled,
                 analysis_records=analysis_records if contract_labels else None,
             )
-        except (MaterialCollectionCancelled, OCRMemoryPressureError):
+        except (MaterialCollectionCancelled, OCRMemoryPressureError, OCRUnavailableError):
             raise
         except Exception as exc:
             warnings.append(f"文件读取异常 {f_path.name}: {exc}")

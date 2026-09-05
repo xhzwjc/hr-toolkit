@@ -282,6 +282,15 @@ python3.12 hr_toolkit_app.py
 
 Windows 7 SP1 x64 源码环境必须使用 Python 3.8，并把约束文件替换为 `constraints/python38-win7.txt`。正式安装包已内置对应 Qt 运行库，终端用户无需安装 Python 或执行上述命令。
 
+Python 3.13 本地源码环境使用新版 `rapidocr==3.9.2`、ONNX Runtime 和对应 Qt 运行库：
+
+```bash
+python -m pip install -r requirements.txt -r requirements-gui.txt
+python -m hr_toolkit
+```
+
+此环境不要套用 `constraints/python312-production.txt`。Python 3.12 正式构建与 Win7 继续使用原有依赖及 OCR 后端。新版接口使用轻量 PP-OCRv4 模型，首次缺少模型时由引擎下载，之后本地复用；切换 OCR 后端会重新建立识别缓存。无法识别人名的合同仍需核对归属。
+
 ### 1. 社保明细与汇总：
 ```bash
 python3 -m hr_toolkit social-security \
