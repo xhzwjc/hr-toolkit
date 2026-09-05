@@ -8,6 +8,20 @@ from hr_toolkit.tools.material_progress import MaterialProgress
 
 
 class MaterialOCRProgressTest(unittest.TestCase):
+    def test_last_pdf_page_is_emitted_even_inside_throttle_interval(self):
+        events = []
+        progress = MaterialProgress(lambda c, t, message: events.append((c, t, message)))
+        with patch("hr_toolkit.tools.material_progress.time.monotonic", return_value=1.0):
+            progress.begin("识别资料", 10, "个文件")
+            for page in range(1, 100):
+                progress.detail(page, 100, f"正在识别 PDF {page}/100")
+            self.assertEqual(len(events), 1)
+            progress.detail(100, 100, "正在识别 PDF 100/100")
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1][:2], (0, 10))
+        self.assertIn("PDF 100/100", events[-1][2])
+        self.assertEqual((progress.current, progress.total), (0, 10))
+
     def test_only_finished_files_advance_and_pdf_details_keep_file_total(self):
         events = []
         progress = MaterialProgress(lambda c, t, message: events.append((c, t, message)))

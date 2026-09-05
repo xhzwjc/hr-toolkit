@@ -39,7 +39,8 @@ class MaterialProgress:
 
     def detail(self, _current: int, _total: int, message: str) -> None:
         # PDF 页计数仅描述当前文件，不能覆盖外层文件计数。
-        self.emit(message)
+        # 快速处理的最后一页也要可见，其余页仍按原频率合并回调。
+        self.emit(message, force=_total > 0 and _current == _total)
 
     def items(self, items: Iterable[Any], describe: Callable[[Any], str]) -> Iterator[Any]:
         for item in items:
