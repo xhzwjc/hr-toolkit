@@ -2331,6 +2331,9 @@ def _extract_person_names(text: str) -> list[str]:
             candidate = candidate.strip()
             if candidate in {"签字", "签名", "签字姓名", "年月日", "甲方", "乙方"}:
                 continue
+            # 空签名栏后常跟“年月 日”；不能把被 OCR 空格拆开的日期当作姓名。
+            if candidate == "年月" and re.match(r"\s*日(?:\s|$)", normalized[match.end():]):
+                continue
             if not (2 <= len(_normalize_person_name(candidate)) <= 8):
                 continue
             if not _is_valid_person_name(candidate):
