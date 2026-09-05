@@ -9,11 +9,13 @@ import tempfile
 import unittest
 import zipfile
 import zlib
+from io import BytesIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 from openpyxl import load_workbook
+from PIL import Image, PngImagePlugin
 from pypdf import PdfWriter
 from pypdf.generic import (
     DecodedStreamObject,
@@ -53,6 +55,21 @@ from hr_toolkit.tools.material_collector import (
     _scan_folder_index,
     _trim_cache_by_age_and_size,
 )
+
+
+def _png_fixture(marker: str = "fixture") -> bytes:
+    """有效小图片；用无压缩元数据保存模拟 OCR 标记，等长标记保持文件等长。"""
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("test_marker", marker)
+    output = BytesIO()
+    with Image.new("RGB", (16, 16), "white") as image:
+        image.save(output, format="PNG", pnginfo=metadata)
+    return output.getvalue()
+
+
+def _read_fixture_marker(source: str | Path) -> str:
+    with Image.open(source) as image:
+        return image.info["test_marker"]
 
 
 def _write_text_pdf(path: Path, marker: str, *, padding_bytes: int = 0) -> None:
@@ -655,7 +672,7 @@ class TestSafetyAndRobustness(unittest.TestCase):
             with mock.patch.object(
                 mc,
                 "_iter_ocr_targets",
-                return_value=iter((b"page-1", b"page-2", b"page-3")),
+                return_value=iter(_png_fixture(f"page-{page}") for page in range(1, 4)),
             ):
                 texts, complete = mc._collect_ocr_texts(Path("contract.pdf"))
 
@@ -694,7 +711,7 @@ class TestSafetyAndRobustness(unittest.TestCase):
             with mock.patch.object(
                 mc,
                 "_iter_ocr_targets",
-                return_value=iter(b"page" for _ in pages),
+                return_value=iter(_png_fixture(f"page-{page}") for page in range(len(pages))),
             ):
                 result = mc._analyze_ocr_file(
                     Path("contract.pdf"),
@@ -1000,17 +1017,19 @@ class TestOCRCacheHelpers(unittest.TestCase):
         )
         self.assertNotIn("自定义材料", json.dumps(entry, ensure_ascii=False))
 
-    def test_oversized_cache_is_ignored_before_reading(self) -> None:
+    def test_oversized_cache_stops_before_reading_and_preserves_file(self) -> None:
         import hr_toolkit.tools.material_collector as material_collector
 
         with tempfile.TemporaryDirectory() as td:
             cache_path = Path(td) / _OCR_CACHE_FILE_NAME
             cache_path.write_bytes(b"{" + b" " * 1024 + b"}")
+            original = cache_path.read_bytes()
             with mock.patch.object(material_collector, "_OCR_CACHE_FILE_LOAD_MAX_BYTES", 128):
-                loaded = _load_ocr_cache(cache_path)
-
-            self.assertEqual(loaded["entries"], {})
-            self.assertEqual(loaded["paths"], {})
+                with mock.patch.object(material_collector.json, "load") as read_json:
+                    with self.assertRaises(material_collector.OCRResourceLimitError):
+                        _load_ocr_cache(cache_path)
+                    read_json.assert_not_called()
+            self.assertEqual(cache_path.read_bytes(), original)
 
     def test_large_parsed_cache_is_reused_and_invalidated_by_file_change(self) -> None:
         from hr_toolkit.tools import material_collector as mc
@@ -1198,7 +1217,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 employee_dir = library / "张三"
                 employee_dir.mkdir(parents=True)
                 source = employee_dir / "a5d6e67cd.jpg"
-                source.write_bytes(b"customer-jpg-fixture")
+                source.write_bytes(_png_fixture("customer-jpg-fixture"))
                 source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
 
                 first = collect_employee_materials(
@@ -1266,7 +1285,7 @@ class TestOCRCacheIO(unittest.TestCase):
             emp_dir.mkdir()
             # 用按文件名识别的纯图片名（走缓存写入路径必须有 OCR 成功，
             # 这里使用扩展名 + 文件名都能走 OCR 分支的姿势）
-            (emp_dir / "a5d6e67cd.jpg").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            (emp_dir / "a5d6e67cd.jpg").write_bytes(_png_fixture())
 
             out = Path(td) / "输出"
             # mock OCR engine，固定返回"身份证"
@@ -1322,7 +1341,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 emp.mkdir()
                 # 多个图片都需 OCR 识别
                 for name in ("a1.png", "b2.jpg", "c3.jpeg"):
-                    (emp / name).write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                    (emp / name).write_bytes(_png_fixture())
 
                 out1 = Path(td) / "输出1"
                 # 首次：建立缓存（OCR 调用计数应有值）
@@ -1377,7 +1396,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 emp = lib / "张三"
                 emp.mkdir()
                 pic = emp / "old_random_hash_name.jpg"
-                pic.write_bytes(b"\x89PNG\r\n\x1a\nfake_image_bytes")
+                pic.write_bytes(_png_fixture("fake_image_bytes"))
 
                 out1 = Path(td) / "输出1"
                 # 首次运行：写入内容哈希指纹缓存
@@ -1425,7 +1444,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 emp = lib / "张三"
                 emp.mkdir()
                 pic = emp / "a.png"
-                pic.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                pic.write_bytes(_png_fixture())
 
                 out1 = Path(td) / "输出1"
                 collect_employee_materials(
@@ -1438,7 +1457,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 # 修改文件 size + mtime
                 import time
                 time.sleep(0.05)
-                pic.write_bytes(b"\x89PNG\r\n\x1a\n" + b"X" * 1000)
+                pic.write_bytes(_png_fixture("X" * 1000))
 
                 out2 = Path(td) / "输出2"
                 collect_employee_materials(
@@ -1473,9 +1492,9 @@ class TestOCRCacheIO(unittest.TestCase):
                 emp = lib / "张三"
                 emp.mkdir()
                 pic1 = emp / "a.png"
-                pic1.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                pic1.write_bytes(_png_fixture())
                 pic2 = emp / "b.png"
-                pic2.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                pic2.write_bytes(_png_fixture())
 
                 out1 = Path(td) / "输出1"
                 collect_employee_materials(
@@ -1529,7 +1548,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 lib.mkdir()
                 emp = lib / "张三"
                 emp.mkdir()
-                (emp / "a.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                (emp / "a.png").write_bytes(_png_fixture())
 
                 out = Path(td) / "输出"
                 result = collect_employee_materials(
@@ -1567,7 +1586,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 lib.mkdir()
                 emp = lib / "张三"
                 emp.mkdir()
-                (emp / "a.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                (emp / "a.png").write_bytes(_png_fixture())
 
                 # 模拟只读：先创建缓存文件路径后，切到只读目录
                 out = Path(td) / "输出"
@@ -1627,7 +1646,7 @@ class TestOCRCacheIO(unittest.TestCase):
                 lib.mkdir()
                 emp = lib / "张三"
                 emp.mkdir()
-                (emp / "a.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+                (emp / "a.png").write_bytes(_png_fixture())
 
                 out = Path(td) / "输出"
                 collect_employee_materials(
@@ -1802,7 +1821,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             def __call__(self, source):
                 type(self).call_count += 1
-                marker = Path(source).read_bytes().decode("utf-8", errors="ignore")
+                marker = _read_fixture_marker(source)
                 if marker == "zhang_contract":
                     return ([
                         ["乙方", "张三"],
@@ -1854,7 +1873,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
     @staticmethod
     def _write_image(path: Path, marker: str) -> None:
-        path.write_bytes(marker.encode("utf-8"))
+        path.write_bytes(_png_fixture(marker))
 
     def test_default_library_mode_remains_person_folder(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1957,6 +1976,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             # 两个 marker 等长；恢复 mtime 后仍必须依靠 ctime/hash 识别内容变更。
             self.assertEqual(len("zhang_id_card"), len("lisi__id_card"))
             self._write_image(source, "lisi__id_card")
+            self.assertEqual(source.stat().st_size, original_stat.st_size)
             os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
             result = collect_employee_materials(
@@ -2061,7 +2081,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             def mutate_before_copy(_current: int, _total: int, message: str) -> None:
                 nonlocal changed
-                if not changed and "正在检索与匹配" in message:
+                if not changed and "【匹配人员资料】" in message:
                     self._write_image(source, "li_id_card")
                     changed = True
 
@@ -2074,6 +2094,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                 progress_callback=mutate_before_copy,
             )
 
+            self.assertTrue(changed)
             self.assertEqual(result.matched_file_count, 0)
             self.assertEqual(result.missing_records["张三"], ["劳动合同"])
             self.assertTrue(any("索引后发生变化" in warning for warning in result.warnings))
@@ -2308,18 +2329,14 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             working_engine = self.mc._OCR_ENGINE
             self.mc._OCR_ENGINE = None
             self.mc._OCR_ATTEMPTED = True
-            first = collect_employee_materials(
-                library,
-                root / "输出1",
-                roster_source="张三",
-                material_types=["劳动合同"],
-                library_mode=LIBRARY_MODE_FLAT_OCR,
-            )
-            self.assertEqual(first.matched_file_count, 0)
-            self.assertEqual(
-                sum("暂时无法完成 OCR" in warning for warning in first.warnings),
-                1,
-            )
+            with self.assertRaises(self.mc.OCRUnavailableError):
+                collect_employee_materials(
+                    library,
+                    root / "输出1",
+                    roster_source="张三",
+                    material_types=["劳动合同"],
+                    library_mode=LIBRARY_MODE_FLAT_OCR,
+                )
             cache = _load_ocr_cache(library / _OCR_CACHE_FILE_NAME)
             self.assertEqual(cache["entries"], {})
 
@@ -2362,7 +2379,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             def __call__(self, source):
                 type(self).call_count += 1
-                marker = Path(source).read_text(encoding="utf-8")
+                marker = _read_fixture_marker(source)
                 return ([[None, page_texts[marker]]], None)
 
         mc._OCR_ENGINE = ContractPageEngine()
@@ -2374,7 +2391,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             source_hashes: dict[str, str] = {}
             for page_number in range(1, 6):
                 source = library / f"scan_{page_number:03d}.png"
-                source.write_text(f"page-{page_number}", encoding="utf-8")
+                source.write_bytes(_png_fixture(f"page-{page_number}"))
                 source_hashes[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
 
             first = collect_employee_materials(
@@ -2422,7 +2439,8 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
         self.assertEqual(sorted(copied_hashes.values()), sorted(source_hashes.values()))
         self.assertEqual(final_source_hashes, source_hashes)
         self.assertTrue(all("document_group" in match.matched_by for match in second.matches))
-        self.assertNotIn("document_group", json.dumps(cache_payload, ensure_ascii=False))
+        # 人工确认元数据允许保存；逐页 OCR 缓存不能带上自动推断的分组归属。
+        self.assertNotIn("document_group", json.dumps(cache_payload["entries"], ensure_ascii=False))
         self.assertTrue(all(length <= 4096 for length in cached_text_lengths))
 
     def test_adjacent_contracts_for_different_people_do_not_cross_group(self) -> None:
@@ -2442,7 +2460,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
         class TwoContractEngine:
             def __call__(self, source):
-                page_number = int(Path(source).read_text(encoding="utf-8"))
+                page_number = int(_read_fixture_marker(source))
                 return ([[None, page_texts[page_number]]], None)
 
         mc._OCR_ENGINE = TwoContractEngine()
@@ -2452,8 +2470,8 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             library = root / "无序资料库"
             library.mkdir()
             for page_number in range(1, 11):
-                (library / f"scan_{page_number:03d}.png").write_text(
-                    str(page_number), encoding="utf-8",
+                (library / f"scan_{page_number:03d}.png").write_bytes(
+                    _png_fixture(str(page_number)),
                 )
 
             result = collect_employee_materials(
@@ -2478,7 +2496,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
         self.assertEqual(zhang_sources, {f"scan_{number:03d}.png" for number in range(1, 6)})
         self.assertEqual(li_sources, {f"scan_{number:03d}.png" for number in range(6, 11)})
 
-    def test_contract_group_can_use_close_scan_time_and_matching_dimensions(self) -> None:
+    def test_close_scan_time_and_dimensions_still_require_contract_confirmation(self) -> None:
         mc = self.mc
         page_texts = {
             "cover": "劳动合同 合同编号：HT-003",
@@ -2488,7 +2506,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
         class MetadataGroupEngine:
             def __call__(self, source):
-                marker = Path(source).read_text(encoding="utf-8")
+                marker = _read_fixture_marker(source)
                 return ([[None, page_texts[marker]]], None)
 
         mc._OCR_ENGINE = MetadataGroupEngine()
@@ -2502,7 +2520,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                 ("b-body.png", "body"),
                 ("c-signature.png", "signature"),
             ):
-                (library / filename).write_text(marker, encoding="utf-8")
+                (library / filename).write_bytes(_png_fixture(marker))
 
             with mock.patch.object(
                 mc, "_read_image_dimensions", return_value=(1200, 1600),
@@ -2516,7 +2534,17 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                     generate_report=False,
                 )
 
-        self.assertEqual(result.matched_file_count, 3)
+            self.assertIsNotNone(result.review_path)
+            review = load_workbook(result.review_path, read_only=True, data_only=True)
+            try:
+                rows = list(review["待确认归属"].iter_rows(min_row=2, values_only=True))
+                self.assertEqual(len(rows), 3)
+                self.assertTrue(all("待确认" in row[6] for row in rows))
+            finally:
+                review.close()
+
+        self.assertEqual(result.matched_file_count, 0)
+        self.assertEqual(result.missing_records["张三"], ["劳动合同"])
         self.assertLessEqual(read_dimensions.call_count, 3)
 
     def test_time_and_dimensions_do_not_absorb_unrelated_image(self) -> None:
@@ -2529,7 +2557,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
         class MixedBatchEngine:
             def __call__(self, source):
-                marker = Path(source).read_text(encoding="utf-8")
+                marker = _read_fixture_marker(source)
                 return ([[None, page_texts[marker]]], None)
 
         mc._OCR_ENGINE = MixedBatchEngine()
@@ -2543,7 +2571,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                 ("b-unrelated.png", "unrelated"),
                 ("c-signature.png", "signature"),
             ):
-                (library / filename).write_text(marker, encoding="utf-8")
+                (library / filename).write_bytes(_png_fixture(marker))
 
             with mock.patch.object(
                 mc, "_read_image_dimensions", return_value=(1200, 1600),
@@ -2609,7 +2637,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
             def __call__(self, source):
                 type(self).call_count += 1
-                marker = Path(source).read_text(encoding="utf-8")
+                marker = _read_fixture_marker(source)
                 return ([[None, page_texts[marker]]], None)
 
         mc._OCR_ENGINE = MutableContractEngine()
@@ -2619,11 +2647,11 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             library = root / "无序资料库"
             library.mkdir()
             for page_number in range(1, 5):
-                (library / f"scan_{page_number:03d}.png").write_text(
-                    f"page-{page_number}", encoding="utf-8",
+                (library / f"scan_{page_number:03d}.png").write_bytes(
+                    _png_fixture(f"page-{page_number}"),
                 )
             signature = library / "scan_005.png"
-            signature.write_text("page-5-z", encoding="utf-8")
+            signature.write_bytes(_png_fixture("page-5-z"))
 
             first = collect_employee_materials(
                 library,
@@ -2634,7 +2662,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
                 generate_report=False,
             )
             previous_stat = signature.stat()
-            signature.write_text("page-5-l", encoding="utf-8")
+            signature.write_bytes(_png_fixture("page-5-l"))
             os.utime(
                 signature,
                 ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000),
@@ -2667,7 +2695,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
         class RaceContractEngine:
             def __call__(self, source):
-                marker = Path(source).read_text(encoding="utf-8")
+                marker = _read_fixture_marker(source)
                 return ([[None, page_texts[marker]]], None)
 
         mc._OCR_ENGINE = RaceContractEngine()
@@ -2677,16 +2705,16 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             library = root / "无序资料库"
             library.mkdir()
             for page_number in range(1, 6):
-                (library / f"scan_{page_number:03d}.png").write_text(
-                    f"page-{page_number}", encoding="utf-8",
+                (library / f"scan_{page_number:03d}.png").write_bytes(
+                    _png_fixture(f"page-{page_number}"),
                 )
             changed_page = library / "scan_005.png"
             changed = False
 
             def mutate_after_index(_current, _total, message):
                 nonlocal changed
-                if not changed and "正在检索与匹配" in message:
-                    changed_page.write_text("changed-after-index", encoding="utf-8")
+                if not changed and "【匹配人员资料】" in message:
+                    changed_page.write_bytes(_png_fixture("changed-after-index"))
                     changed = True
 
             result = collect_employee_materials(
@@ -2714,7 +2742,7 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
 
         class ConflictingPageEngine:
             def __call__(self, source):
-                page_number = int(Path(source).read_text(encoding="utf-8"))
+                page_number = int(_read_fixture_marker(source))
                 return ([[None, page_texts[page_number]]], None)
 
         mc._OCR_ENGINE = ConflictingPageEngine()
@@ -2724,8 +2752,8 @@ class TestFlatOCRMaterialLibrary(unittest.TestCase):
             library = root / "无序资料库"
             library.mkdir()
             for page_number in range(1, 4):
-                (library / f"scan_{page_number:03d}.png").write_text(
-                    str(page_number), encoding="utf-8",
+                (library / f"scan_{page_number:03d}.png").write_bytes(
+                    _png_fixture(str(page_number)),
                 )
 
             result = collect_employee_materials(
@@ -2866,7 +2894,7 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             employee_dir = folder_library / "张三"
             employee_dir.mkdir(parents=True)
             folder_source = employee_dir / "random.jpg"
-            folder_source.write_bytes(b"special-certificate-folder")
+            folder_source.write_bytes(_png_fixture("special-certificate-folder"))
             folder_hash = hashlib.sha256(folder_source.read_bytes()).hexdigest()
 
             self._set_engine(lines)
@@ -2892,7 +2920,7 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             flat_library = root / "无序资料库"
             flat_library.mkdir()
             flat_source = flat_library / "random.jpg"
-            flat_source.write_bytes(b"special-certificate-flat")
+            flat_source.write_bytes(_png_fixture("special-certificate-flat"))
             flat_hash = hashlib.sha256(flat_source.read_bytes()).hexdigest()
             self._set_engine(lines)
             flat_result = collect_employee_materials(
@@ -3036,7 +3064,7 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             root = Path(td)
             library = root / "lib"
             library.mkdir()
-            (library / "a.jpg").write_bytes(b"cert-number-only")
+            (library / "a.jpg").write_bytes(_png_fixture("cert-number-only"))
             cache = {"version": mc._OCR_CACHE_VERSION}
             cache_path = library / ".hr_material_index_cache.json"
             warnings: list = []
@@ -3060,7 +3088,7 @@ class TestSpecialCertGraphicTitleAndReorderedMatching(unittest.TestCase):
             employee_dir = root / "资料库" / "张三"
             employee_dir.mkdir(parents=True)
             source = employee_dir / "a.jpg"
-            source.write_bytes(b"custom-cert-number")
+            source.write_bytes(_png_fixture("custom-cert-number"))
 
             self._set_engine([("n", "我的证书天谴 500237200308190399")])
             first = collect_employee_materials(
