@@ -289,7 +289,7 @@ python -m pip install -r requirements.txt -r requirements-gui.txt
 python -m hr_toolkit
 ```
 
-此环境不要套用 `constraints/python312-production.txt`。Python 3.12 正式构建与 Win7 继续使用原有依赖及 OCR 后端。新版接口使用轻量 PP-OCRv4 模型，首次缺少模型时由引擎下载，之后本地复用；切换 OCR 后端会重新建立识别缓存。无法识别人名的合同仍需核对归属。
+此环境不要套用 `constraints/python312-production.txt`。Python 3.12 正式构建与 Win7 继续使用原有依赖及 OCR 后端。新版接口使用轻量 PP-OCRv4 模型，首次缺少模型时由引擎下载，之后本地复用；切换 OCR 后端会重新建立识别缓存。无法识别人名的合同仍需核对归属。运行记录支持鼠标选择、系统复制快捷键、右键复制及“复制全部”（复制当前列表保留的最多 1000 条记录）。
 
 ### 1. 社保明细与汇总：
 ```bash

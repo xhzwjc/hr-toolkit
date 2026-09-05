@@ -854,7 +854,17 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.margins: 17
                                 spacing: 8
-                                Text { text: "运行记录"; color: root.textMain; font.pixelSize: 15; font.weight: Font.DemiBold }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text { text: "运行记录"; color: root.textMain; font.pixelSize: 15; font.weight: Font.DemiBold }
+                                    Item { Layout.fillWidth: true }
+                                    AppButton {
+                                        objectName: "copyRunLogsButton"
+                                        text: "复制全部"
+                                        variant: "link"
+                                        onClicked: controller.copyRunLogs()
+                                    }
+                                }
                                 ListView {
                                     id: logList
                                     objectName: "logList"
@@ -873,7 +883,34 @@ ApplicationWindow {
                                         spacing: 7
                                         Text { text: level === "muted" ? "" : "●"; color: level === "error" ? "#C83A3A" : level === "warning" ? "#C28112" : level === "success" ? "#1D8E68" : root.primary; font.pixelSize: 9 }
                                         Text { text: time; color: "#9A9D99"; font.pixelSize: 10; verticalAlignment: Text.AlignTop }
-                                        Text { id: logText; Layout.fillWidth: true; text: model.text; color: level === "muted" ? root.textMuted : root.textMain; font.pixelSize: 12; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+                                        TextEdit {
+                                            id: logText
+                                            objectName: "logText"
+                                            Layout.fillWidth: true
+                                            text: model.text
+                                            color: level === "muted" ? root.textMuted : root.textMain
+                                            font.pixelSize: 12
+                                            wrapMode: TextEdit.Wrap
+                                            textFormat: TextEdit.PlainText
+                                            readOnly: true
+                                            selectByMouse: true
+                                            selectByKeyboard: true
+                                            persistentSelection: true
+                                            selectionColor: "#D8EAE3"
+                                            selectedTextColor: root.textMain
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                acceptedButtons: Qt.RightButton
+                                                onClicked: logContextMenu.popup()
+                                            }
+                                            Menu {
+                                                id: logContextMenu
+                                                objectName: "logContextMenu"
+                                                MenuItem { text: "复制"; enabled: logText.selectedText.length > 0; onTriggered: logText.copy() }
+                                                MenuItem { text: "选择本条"; onTriggered: { logText.forceActiveFocus(); logText.selectAll() } }
+                                                MenuItem { text: "复制全部记录"; onTriggered: controller.copyRunLogs() }
+                                            }
+                                        }
                                     }
                                 }
                             }

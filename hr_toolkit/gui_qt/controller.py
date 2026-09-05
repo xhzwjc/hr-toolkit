@@ -45,6 +45,7 @@ from .compat import (
     QCoreApplication,
     QDesktopServices,
     QFileDialog,
+    QGuiApplication,
     QObject,
     QTimer,
     QUrl,
@@ -2679,6 +2680,15 @@ class AppController(QObject):
         if hasattr(self, "_log_buffer"):
             self._log_buffer.clear()
         self._log_model.clear()
+
+    @Slot()
+    def copyRunLogs(self) -> None:
+        self._flush_logs()
+        text = "\n".join(
+            f"{item.get('time', '')} {item.get('text', '')}".strip()
+            for item in self._log_model.items()
+        )
+        QGuiApplication.clipboard().setText(text)
 
     @Slot(str, str)
     def _append_log(self, text: str, level: str = "info") -> None:
