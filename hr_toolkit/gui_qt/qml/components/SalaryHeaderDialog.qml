@@ -237,6 +237,14 @@ AppDialog {
     footer: Rectangle {
         implicitHeight: 94
         color: "#FAF9F6"
+        radius: dialog.background.radius
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: parent.radius
+            color: parent.color
+        }
         ColumnLayout {
             anchors.fill: parent
             anchors.margins: 12
