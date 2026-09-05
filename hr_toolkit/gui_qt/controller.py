@@ -2543,11 +2543,9 @@ class AppController(QObject):
         try:
             self._salary_selection_drafts = {x["group_id"]: x for x in json.loads(choices_json).get("groups", [])}
             group = next(g for g in self._salary_inspection["groups"] if g["group_id"] == group_id)
+            # 相似表头可能是仍在使用的另一套模板，只重置当前模板。
             self._salary_draft_profiles.pop(group["key"], None)
             self._salary_reset_profile_keys.add(group["key"])
-            for key in group.get("related_profile_keys", []):
-                self._salary_draft_profiles.pop(key, None)
-                self._salary_reset_profile_keys.add(key)
             self._salary_selection_drafts.pop(group_id, None)
             for item in group["files"]:
                 self._salary_hints.pop(item["key"], None)

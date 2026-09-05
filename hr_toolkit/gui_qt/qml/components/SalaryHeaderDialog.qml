@@ -25,6 +25,12 @@ AppDialog {
         groups = JSON.parse(JSON.stringify(data.groups || []))
         issues = JSON.parse(JSON.stringify(data.issues || []))
         selectedGroup = 0
+        for (var i = 0; i < groups.length; i++) {
+            if (!groups[i].ready && !groups[i].skip) {
+                selectedGroup = i
+                break
+            }
+        }
         revision++
         if (!opened) rememberCheck.checked = true
         open()
@@ -108,7 +114,7 @@ AppDialog {
             spacing: 13
             Text {
                 Layout.fillWidth: true
-                text: "同类模板只需确认一次。请选择原表中对应的列，软件会记住当前项目的设置。"
+                text: "可混合上传不同模板。已识别的文件无需重选；在下拉框分别确认其余模板，勾选“记住”后下次自动使用，各套设置互不替换。"
                 color: "#55534D"; font.pixelSize: 13; wrapMode: Text.Wrap
             }
             AppComboBox {
